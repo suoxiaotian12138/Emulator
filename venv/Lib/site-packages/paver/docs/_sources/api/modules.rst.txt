@@ -1,7 +1,0 @@
-paver
-=====
-
-.. toctree::
-   :maxdepth: 4
-
-   paver
