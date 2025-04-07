@@ -1,0 +1,198 @@
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Using with Mercurial (hg) (paver.hg) &#8212; Paver 1.3.4 documentation</title>
+    <link rel="stylesheet" href="_static/default.css" type="text/css" />
+    <link rel="stylesheet" href="_static/pygments.css" type="text/css" />
+    <script type="text/javascript">
+      var DOCUMENTATION_OPTIONS = {
+        URL_ROOT:    './',
+        VERSION:     '1.3.4',
+        COLLAPSE_INDEX: false,
+        FILE_SUFFIX: '.html',
+        HAS_SOURCE:  true,
+        SOURCELINK_SUFFIX: '.txt'
+      };
+    </script>
+    <script type="text/javascript" src="_static/jquery.js"></script>
+    <script type="text/javascript" src="_static/underscore.js"></script>
+    <script type="text/javascript" src="_static/doctools.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="SSH Remote Access Support (paver.ssh)" href="ssh.html" />
+    <link rel="prev" title="Using with Bazaar-NG (bzr) (paver.bzr)" href="bzr.html" />
+   
+  <link rel="stylesheet" href="_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head>
+  <body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <div class="section" id="module-paver.hg">
+<span id="using-with-mercurial-hg-paver-hg"></span><span id="hg"></span><h1>Using with Mercurial (hg) (paver.hg)<a class="headerlink" href="#module-paver.hg" title="Permalink to this headline">¶</a></h1>
+<p>Convenience functions for working with mercurial</p>
+<p>This module does not include any tasks, only functions.</p>
+<p>At this point, these functions do not use any kind of library.  They require
+the hg binary on the PATH.</p>
+<dl class="function">
+<dt id="paver.hg.branches">
+<code class="descclassname">paver.hg.</code><code class="descname">branches</code><span class="sig-paren">(</span><em>repo_path</em>, <em>closed=False</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.hg.branches" title="Permalink to this definition">¶</a></dt>
+<dd><p>List branches for the target repository.</p>
+<dl class="docutils">
+<dt>Parameters:</dt>
+<dd><p class="first">repo_path (string): The local path to a mercurial repository.
+closed=False (bool): Whether to include closed branches in the</p>
+<blockquote class="last">
+<div>branch list.</div></blockquote>
+</dd>
+<dt>Returns:</dt>
+<dd>A python tuple.  The first item of the tuple is the current branch.
+The second item of the tuple is a list of the branches</dd>
+</dl>
+</dd></dl>
+
+<dl class="function">
+<dt id="paver.hg.clone">
+<code class="descclassname">paver.hg.</code><code class="descname">clone</code><span class="sig-paren">(</span><em>url</em>, <em>dest_folder</em>, <em>rev=None</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.hg.clone" title="Permalink to this definition">¶</a></dt>
+<dd><p>Clone a mercurial repository.</p>
+<dl class="docutils">
+<dt>Parameters:</dt>
+<dd><dl class="first last docutils">
+<dt>url (string): The path to clone the repository from.  Could be local</dt>
+<dd>or remote.</dd>
+<dt>dest_folder (string): The local folder where the repository will be</dt>
+<dd>cloned.</dd>
+<dt>rev=None (string or None): If specified, the revision to clone to.</dt>
+<dd>If omitted or <cite>None</cite>, all changes will be cloned.</dd>
+</dl>
+</dd>
+<dt>Returns:</dt>
+<dd>None</dd>
+</dl>
+</dd></dl>
+
+<dl class="function">
+<dt id="paver.hg.latest_tag">
+<code class="descclassname">paver.hg.</code><code class="descname">latest_tag</code><span class="sig-paren">(</span><em>repo_path</em>, <em>relative_to='tip'</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.hg.latest_tag" title="Permalink to this definition">¶</a></dt>
+<dd><p>Get the latest tag from a mercurial repository.</p>
+<dl class="docutils">
+<dt>Parameters:</dt>
+<dd><p class="first">repo_path (string): The local path to a mercurial repository.
+relative_to=’tip’ (string): If provided, the revision to use as</p>
+<blockquote class="last">
+<div>a reference. Defaults to ‘tip’.</div></blockquote>
+</dd>
+<dt>Returns:</dt>
+<dd>The string name of the latest tag.</dd>
+</dl>
+</dd></dl>
+
+<dl class="function">
+<dt id="paver.hg.pull">
+<code class="descclassname">paver.hg.</code><code class="descname">pull</code><span class="sig-paren">(</span><em>repo_path</em>, <em>rev=None</em>, <em>url=None</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.hg.pull" title="Permalink to this definition">¶</a></dt>
+<dd><p>Pull changes into a mercurial repository.</p>
+<dl class="docutils">
+<dt>Parameters:</dt>
+<dd><p class="first">repo_path (string): The local path to a mercurial repository.
+rev=None (string or None): If specified, the revision to pull to.</p>
+<blockquote>
+<div>If omitted or <cite>None</cite>, all changes will be pulled.</div></blockquote>
+<dl class="last docutils">
+<dt>url=None (string or None): If specified, the repository to pull from.</dt>
+<dd>If omitted or <cite>None</cite>, the default location of the repository will
+be used.</dd>
+</dl>
+</dd>
+<dt>Returns:</dt>
+<dd>None</dd>
+</dl>
+</dd></dl>
+
+<dl class="function">
+<dt id="paver.hg.update">
+<code class="descclassname">paver.hg.</code><code class="descname">update</code><span class="sig-paren">(</span><em>repo_path</em>, <em>rev='tip'</em>, <em>clean=False</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.hg.update" title="Permalink to this definition">¶</a></dt>
+<dd><p>Update a mercurial repository to a revision.</p>
+<dl class="docutils">
+<dt>Parameters:</dt>
+<dd><p class="first">repo_path (string): The local path to a mercurial repository.
+rev=’tip’ (string): If provided, the revision to update to.  If</p>
+<blockquote>
+<div>omitted, ‘tip’ will be used.</div></blockquote>
+<dl class="last docutils">
+<dt>clean=False (bool): If <cite>True</cite>, the update will discard uncommitted</dt>
+<dd>changes.</dd>
+</dl>
+</dd>
+<dt>Returns:</dt>
+<dd>None</dd>
+</dl>
+</dd></dl>
+
+</div>
+
+
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper"><div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="index.html">Documentation overview</a><ul>
+  <li><a href="paverstdlib.html">The Paver Standard Library</a><ul>
+      <li>Previous: <a href="bzr.html" title="previous chapter">Using with Bazaar-NG (bzr) (paver.bzr)</a></li>
+      <li>Next: <a href="ssh.html" title="next chapter">SSH Remote Access Support (paver.ssh)</a></li>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+  <div role="note" aria-label="source link">
+    <h3>This Page</h3>
+    <ul class="this-page-menu">
+      <li><a href="_sources/hg.rst.txt"
+            rel="nofollow">Show Source</a></li>
+    </ul>
+   </div>
+<div id="searchbox" style="display: none" role="search">
+  <h3>Quick search</h3>
+    <form class="search" action="search.html" method="get">
+      <div><input type="text" name="q" /></div>
+      <div><input type="submit" value="Go" /></div>
+      <input type="hidden" name="check_keywords" value="yes" />
+      <input type="hidden" name="area" value="default" />
+    </form>
+</div>
+<script type="text/javascript">$('#searchbox').show(0);</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2008, SitePen, Inc..
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 1.6.5</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.10</a>
+      
+      |
+      <a href="_sources/hg.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

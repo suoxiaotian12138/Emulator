@@ -1,0 +1,910 @@
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>paver.deps package &#8212; Paver 1.3.4 documentation</title>
+    <link rel="stylesheet" href="../_static/default.css" type="text/css" />
+    <link rel="stylesheet" href="../_static/pygments.css" type="text/css" />
+    <script type="text/javascript">
+      var DOCUMENTATION_OPTIONS = {
+        URL_ROOT:    '../',
+        VERSION:     '1.3.4',
+        COLLAPSE_INDEX: false,
+        FILE_SUFFIX: '.html',
+        HAS_SOURCE:  true,
+        SOURCELINK_SUFFIX: '.txt'
+      };
+    </script>
+    <script type="text/javascript" src="../_static/jquery.js"></script>
+    <script type="text/javascript" src="../_static/underscore.js"></script>
+    <script type="text/javascript" src="../_static/doctools.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="paver.tests package" href="paver.tests.html" />
+    <link rel="prev" title="paver package" href="paver.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head>
+  <body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <div class="section" id="paver-deps-package">
+<h1>paver.deps package<a class="headerlink" href="#paver-deps-package" title="Permalink to this headline">¶</a></h1>
+<div class="section" id="submodules">
+<h2>Submodules<a class="headerlink" href="#submodules" title="Permalink to this headline">¶</a></h2>
+</div>
+<div class="section" id="paver-deps-path2-module">
+<h2>paver.deps.path2 module<a class="headerlink" href="#paver-deps-path2-module" title="Permalink to this headline">¶</a></h2>
+</div>
+<div class="section" id="module-paver.deps.path3">
+<span id="paver-deps-path3-module"></span><h2>paver.deps.path3 module<a class="headerlink" href="#module-paver.deps.path3" title="Permalink to this headline">¶</a></h2>
+<p>path.py - An object representing a path to a file or directory.</p>
+<dl class="docutils">
+<dt>Original author:</dt>
+<dd>Jason Orendorff &lt;<a class="reference external" href="mailto:jason&#46;orendorff&#37;&#52;&#48;gmail&#46;com">jason<span>&#46;</span>orendorff<span>&#64;</span>gmail<span>&#46;</span>com</a>&gt;</dd>
+<dt>Contributors:</dt>
+<dd>Mikhail Gusarov &lt;<a class="reference external" href="mailto:dottedmag&#37;&#52;&#48;dottedmag&#46;net">dottedmag<span>&#64;</span>dottedmag<span>&#46;</span>net</a>&gt;
+Marc Abramowitz &lt;<a class="reference external" href="mailto:marc&#37;&#52;&#48;marc-abramowitz&#46;com">marc<span>&#64;</span>marc-abramowitz<span>&#46;</span>com</a>&gt;</dd>
+</dl>
+<p>Example:</p>
+<p>from path import path
+d = path(‘/home/guido/bin’)
+for f in d.files(‘<a href="#id1"><span class="problematic" id="id2">*</span></a>.py’):</p>
+<blockquote>
+<div>f.chmod(0755)</div></blockquote>
+<p>This module requires Python 2.3 or later.</p>
+<dl class="class">
+<dt id="paver.deps.path3.path">
+<em class="property">class </em><code class="descclassname">paver.deps.path3.</code><code class="descname">path</code><a class="headerlink" href="#paver.deps.path3.path" title="Permalink to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal"><span class="pre">str</span></code></p>
+<p>Represents a filesystem path.</p>
+<p>For documentation on individual methods, consult their
+counterparts in os.path.</p>
+<dl class="method">
+<dt id="paver.deps.path3.path.abspath">
+<code class="descname">abspath</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.abspath" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.access">
+<code class="descname">access</code><span class="sig-paren">(</span><em>mode</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.access" title="Permalink to this definition">¶</a></dt>
+<dd><p>Return true if current user has access to this path.</p>
+<p>mode - One of the constants os.F_OK, os.R_OK, os.W_OK, os.X_OK</p>
+</dd></dl>
+
+<dl class="attribute">
+<dt id="paver.deps.path3.path.atime">
+<code class="descname">atime</code><a class="headerlink" href="#paver.deps.path3.path.atime" title="Permalink to this definition">¶</a></dt>
+<dd><p>Last access time of the file.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.basename">
+<code class="descname">basename</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.basename" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.bytes">
+<code class="descname">bytes</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.bytes" title="Permalink to this definition">¶</a></dt>
+<dd><p>Open this file, read all bytes, return them as a string.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.chmod">
+<code class="descname">chmod</code><span class="sig-paren">(</span><em>mode</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.chmod" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.chown">
+<code class="descname">chown</code><span class="sig-paren">(</span><em>uid</em>, <em>gid</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.chown" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.chroot">
+<code class="descname">chroot</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.chroot" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.copy">
+<code class="descname">copy</code><span class="sig-paren">(</span><em>src</em>, <em>dst</em>, <em>*</em>, <em>follow_symlinks=True</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.copy" title="Permalink to this definition">¶</a></dt>
+<dd><p>Copy data and mode bits (“cp src dst”). Return the file’s destination.</p>
+<p>The destination may be a directory.</p>
+<p>If follow_symlinks is false, symlinks won’t be followed. This
+resembles GNU’s “cp -P src dst”.</p>
+<p>If source and destination are the same file, a SameFileError will be
+raised.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.copy2">
+<code class="descname">copy2</code><span class="sig-paren">(</span><em>src</em>, <em>dst</em>, <em>*</em>, <em>follow_symlinks=True</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.copy2" title="Permalink to this definition">¶</a></dt>
+<dd><p>Copy data and all stat info (“cp -p src dst”). Return the file’s
+destination.”</p>
+<p>The destination may be a directory.</p>
+<p>If follow_symlinks is false, symlinks won’t be followed. This
+resembles GNU’s “cp -P src dst”.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.copyfile">
+<code class="descname">copyfile</code><span class="sig-paren">(</span><em>src</em>, <em>dst</em>, <em>*</em>, <em>follow_symlinks=True</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.copyfile" title="Permalink to this definition">¶</a></dt>
+<dd><p>Copy data from src to dst.</p>
+<p>If follow_symlinks is not set and src is a symbolic link, a new
+symlink will be created instead of copying the file it points to.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.copymode">
+<code class="descname">copymode</code><span class="sig-paren">(</span><em>src</em>, <em>dst</em>, <em>*</em>, <em>follow_symlinks=True</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.copymode" title="Permalink to this definition">¶</a></dt>
+<dd><p>Copy mode bits from src to dst.</p>
+<p>If follow_symlinks is not set, symlinks aren’t followed if and only
+if both <cite>src</cite> and <cite>dst</cite> are symlinks.  If <cite>lchmod</cite> isn’t available
+(e.g. Linux) this method does nothing.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.copystat">
+<code class="descname">copystat</code><span class="sig-paren">(</span><em>src</em>, <em>dst</em>, <em>*</em>, <em>follow_symlinks=True</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.copystat" title="Permalink to this definition">¶</a></dt>
+<dd><p>Copy all stat info (mode bits, atime, mtime, flags) from src to dst.</p>
+<p>If the optional flag <cite>follow_symlinks</cite> is not set, symlinks aren’t followed if and
+only if both <cite>src</cite> and <cite>dst</cite> are symlinks.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.copytree">
+<code class="descname">copytree</code><span class="sig-paren">(</span><em>src</em>, <em>dst</em>, <em>symlinks=False</em>, <em>ignore=None</em>, <em>copy_function=&lt;function copy2&gt;</em>, <em>ignore_dangling_symlinks=False</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.copytree" title="Permalink to this definition">¶</a></dt>
+<dd><p>Recursively copy a directory tree.</p>
+<p>The destination directory must not already exist.
+If exception(s) occur, an Error is raised with a list of reasons.</p>
+<p>If the optional symlinks flag is true, symbolic links in the
+source tree result in symbolic links in the destination tree; if
+it is false, the contents of the files pointed to by symbolic
+links are copied. If the file pointed by the symlink doesn’t
+exist, an exception will be added in the list of errors raised in
+an Error exception at the end of the copy process.</p>
+<p>You can set the optional ignore_dangling_symlinks flag to true if you
+want to silence this exception. Notice that this has no effect on
+platforms that don’t support os.symlink.</p>
+<p>The optional ignore argument is a callable. If given, it
+is called with the <cite>src</cite> parameter, which is the directory
+being visited by copytree(), and <cite>names</cite> which is the list of
+<cite>src</cite> contents, as returned by os.listdir():</p>
+<blockquote>
+<div>callable(src, names) -&gt; ignored_names</div></blockquote>
+<p>Since copytree() is called recursively, the callable will be
+called once for each directory that is copied. It returns a
+list of names relative to the <cite>src</cite> directory that should
+not be copied.</p>
+<p>The optional copy_function argument is a callable that will be used
+to copy each file. It will be called with the source path and the
+destination path as arguments. By default, copy2() is used, but any
+function that supports the same signature (like copy()) can be used.</p>
+</dd></dl>
+
+<dl class="attribute">
+<dt id="paver.deps.path3.path.ctime">
+<code class="descname">ctime</code><a class="headerlink" href="#paver.deps.path3.path.ctime" title="Permalink to this definition">¶</a></dt>
+<dd><p>Creation time of the file.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.dirname">
+<code class="descname">dirname</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.dirname" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.dirs">
+<code class="descname">dirs</code><span class="sig-paren">(</span><span class="sig-paren">)</span> &#x2192; List of this directory's subdirectories.<a class="headerlink" href="#paver.deps.path3.path.dirs" title="Permalink to this definition">¶</a></dt>
+<dd><p>The elements of the list are path objects.
+This does not walk recursively into subdirectories
+(but see path.walkdirs).</p>
+<p>With the optional ‘pattern’ argument, this only lists
+directories whose names match the given pattern.  For
+example, d.dirs(‘build-<a href="#id3"><span class="problematic" id="id4">*</span></a>’).</p>
+</dd></dl>
+
+<dl class="attribute">
+<dt id="paver.deps.path3.path.drive">
+<code class="descname">drive</code><a class="headerlink" href="#paver.deps.path3.path.drive" title="Permalink to this definition">¶</a></dt>
+<dd><p>The drive specifier, for example ‘C:’.
+This is always empty on systems that don’t use drive specifiers.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.exists">
+<code class="descname">exists</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.exists" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.expand">
+<code class="descname">expand</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.expand" title="Permalink to this definition">¶</a></dt>
+<dd><p>Clean up a filename by calling expandvars(),
+expanduser(), and normpath() on it.</p>
+<p>This is commonly everything needed to clean up a filename
+read from a configuration file, for example.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.expanduser">
+<code class="descname">expanduser</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.expanduser" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.expandvars">
+<code class="descname">expandvars</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.expandvars" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="attribute">
+<dt id="paver.deps.path3.path.ext">
+<code class="descname">ext</code><a class="headerlink" href="#paver.deps.path3.path.ext" title="Permalink to this definition">¶</a></dt>
+<dd><p>The file extension, for example ‘.py’.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.files">
+<code class="descname">files</code><span class="sig-paren">(</span><span class="sig-paren">)</span> &#x2192; List of the files in this directory.<a class="headerlink" href="#paver.deps.path3.path.files" title="Permalink to this definition">¶</a></dt>
+<dd><p>The elements of the list are path objects.
+This does not walk into subdirectories (see path.walkfiles).</p>
+<p>With the optional ‘pattern’ argument, this only lists files
+whose names match the given pattern.  For example,
+d.files(‘<a href="#id5"><span class="problematic" id="id6">*</span></a>.pyc’).</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.fnmatch">
+<code class="descname">fnmatch</code><span class="sig-paren">(</span><em>pattern</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.fnmatch" title="Permalink to this definition">¶</a></dt>
+<dd><p>Return True if self.name matches the given pattern.</p>
+<dl class="docutils">
+<dt>pattern - A filename pattern with wildcards,</dt>
+<dd>for example ‘<a href="#id7"><span class="problematic" id="id8">*</span></a>.py’.</dd>
+</dl>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.get_owner">
+<code class="descname">get_owner</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.get_owner" title="Permalink to this definition">¶</a></dt>
+<dd><p>Return the name of the owner of this file or directory.</p>
+<p>This follows symbolic links.</p>
+<p>On Windows, this returns a name of the form ur’DOMAINUser Name’.
+On Windows, a group can own a file or directory.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.getatime">
+<code class="descname">getatime</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.getatime" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.getctime">
+<code class="descname">getctime</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.getctime" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="classmethod">
+<dt id="paver.deps.path3.path.getcwd">
+<em class="property">classmethod </em><code class="descname">getcwd</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.getcwd" title="Permalink to this definition">¶</a></dt>
+<dd><p>Return the current working directory as a path object.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.getmtime">
+<code class="descname">getmtime</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.getmtime" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.getsize">
+<code class="descname">getsize</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.getsize" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.glob">
+<code class="descname">glob</code><span class="sig-paren">(</span><em>pattern</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.glob" title="Permalink to this definition">¶</a></dt>
+<dd><p>Return a list of path objects that match the pattern.</p>
+<p>pattern - a path relative to this directory, with wildcards.</p>
+<p>For example, path(‘/users’).glob(‘<em>/bin/</em>’) returns a list
+of all the files users have in their bin directories.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.isabs">
+<code class="descname">isabs</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.isabs" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.isdir">
+<code class="descname">isdir</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.isdir" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.isfile">
+<code class="descname">isfile</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.isfile" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.islink">
+<code class="descname">islink</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.islink" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.ismount">
+<code class="descname">ismount</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.ismount" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.joinpath">
+<code class="descname">joinpath</code><span class="sig-paren">(</span><em>*args</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.joinpath" title="Permalink to this definition">¶</a></dt>
+<dd><p>Join two or more path components, adding a separator
+character (os.sep) if needed.  Returns a new path
+object.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.lines">
+<code class="descname">lines</code><span class="sig-paren">(</span><em>encoding=None</em>, <em>errors='strict'</em>, <em>retain=True</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.lines" title="Permalink to this definition">¶</a></dt>
+<dd><p>Open this file, read all lines, return them in a list.</p>
+<dl class="docutils">
+<dt>Optional arguments:</dt>
+<dd><dl class="first last docutils">
+<dt>encoding - The Unicode encoding (or character set) of</dt>
+<dd>the file.  The default is None, meaning the content
+of the file is read as 8-bit characters and returned
+as a list of (non-Unicode) str objects.</dd>
+<dt>errors - How to handle Unicode errors; see help(str.decode)</dt>
+<dd>for the options.  Default is ‘strict’</dd>
+<dt>retain - If true, retain newline characters; but all newline</dt>
+<dd>character combinations (‘r’, ‘n’, ‘rn’) are
+translated to ‘n’.  If false, newline characters are
+stripped off.  Default is True.</dd>
+</dl>
+</dd>
+</dl>
+<p>This uses ‘U’ mode in Python 2.3 and later.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.link">
+<code class="descname">link</code><span class="sig-paren">(</span><em>newpath</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.link" title="Permalink to this definition">¶</a></dt>
+<dd><p>Create a hard link at ‘newpath’, pointing to this file.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.listdir">
+<code class="descname">listdir</code><span class="sig-paren">(</span><span class="sig-paren">)</span> &#x2192; List of items in this directory.<a class="headerlink" href="#paver.deps.path3.path.listdir" title="Permalink to this definition">¶</a></dt>
+<dd><p>Use D.files() or D.dirs() instead if you want a listing
+of just files or just subdirectories.</p>
+<p>The elements of the list are path objects.</p>
+<p>With the optional ‘pattern’ argument, this only lists
+items whose names match the given pattern.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.lstat">
+<code class="descname">lstat</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.lstat" title="Permalink to this definition">¶</a></dt>
+<dd><p>Like path.stat(), but do not follow symbolic links.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.makedirs">
+<code class="descname">makedirs</code><span class="sig-paren">(</span><em>mode=511</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.makedirs" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.makedirs_p">
+<code class="descname">makedirs_p</code><span class="sig-paren">(</span><em>mode=511</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.makedirs_p" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.mkdir">
+<code class="descname">mkdir</code><span class="sig-paren">(</span><em>mode=511</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.mkdir" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.mkdir_p">
+<code class="descname">mkdir_p</code><span class="sig-paren">(</span><em>mode=511</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.mkdir_p" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.move">
+<code class="descname">move</code><span class="sig-paren">(</span><em>src</em>, <em>dst</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.move" title="Permalink to this definition">¶</a></dt>
+<dd><p>Recursively move a file or directory to another location. This is
+similar to the Unix “mv” command. Return the file or directory’s
+destination.</p>
+<p>If the destination is a directory or a symlink to a directory, the source
+is moved inside the directory. The destination path must not already
+exist.</p>
+<p>If the destination already exists but is not a directory, it may be
+overwritten depending on os.rename() semantics.</p>
+<p>If the destination is on our current filesystem, then rename() is used.
+Otherwise, src is copied to the destination and then removed. Symlinks are
+recreated under the new name if os.rename() fails because of cross
+filesystem renames.</p>
+<p>A lot more could be done here…  A look at a mv.c shows a lot of
+the issues this implementation glosses over.</p>
+</dd></dl>
+
+<dl class="attribute">
+<dt id="paver.deps.path3.path.mtime">
+<code class="descname">mtime</code><a class="headerlink" href="#paver.deps.path3.path.mtime" title="Permalink to this definition">¶</a></dt>
+<dd><p>Last-modified time of the file.</p>
+</dd></dl>
+
+<dl class="attribute">
+<dt id="paver.deps.path3.path.name">
+<code class="descname">name</code><a class="headerlink" href="#paver.deps.path3.path.name" title="Permalink to this definition">¶</a></dt>
+<dd><p>The name of this file or directory without the full path.</p>
+<p>For example, path(‘/usr/local/lib/libpython.so’).name == ‘libpython.so’</p>
+</dd></dl>
+
+<dl class="attribute">
+<dt id="paver.deps.path3.path.namebase">
+<code class="descname">namebase</code><a class="headerlink" href="#paver.deps.path3.path.namebase" title="Permalink to this definition">¶</a></dt>
+<dd><p>The same as path.name, but with one file extension stripped off.</p>
+<p>For example, path(‘/home/guido/python.tar.gz’).name     == ‘python.tar.gz’,
+but          path(‘/home/guido/python.tar.gz’).namebase == ‘python.tar’</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.normcase">
+<code class="descname">normcase</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.normcase" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.normpath">
+<code class="descname">normpath</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.normpath" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.open">
+<code class="descname">open</code><span class="sig-paren">(</span><em>mode='r'</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.open" title="Permalink to this definition">¶</a></dt>
+<dd><p>Open this file.  Return a file object.</p>
+</dd></dl>
+
+<dl class="attribute">
+<dt id="paver.deps.path3.path.owner">
+<code class="descname">owner</code><a class="headerlink" href="#paver.deps.path3.path.owner" title="Permalink to this definition">¶</a></dt>
+<dd><p>Name of the owner of this file or directory.</p>
+</dd></dl>
+
+<dl class="attribute">
+<dt id="paver.deps.path3.path.parent">
+<code class="descname">parent</code><a class="headerlink" href="#paver.deps.path3.path.parent" title="Permalink to this definition">¶</a></dt>
+<dd><p>This path’s parent directory, as a new path object.</p>
+<p>For example, path(‘/usr/local/lib/libpython.so’).parent == path(‘/usr/local/lib’)</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.pathconf">
+<code class="descname">pathconf</code><span class="sig-paren">(</span><em>name</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.pathconf" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.read_hash">
+<code class="descname">read_hash</code><span class="sig-paren">(</span><em>hash_name</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.read_hash" title="Permalink to this definition">¶</a></dt>
+<dd><p>Calculate given hash for this file.</p>
+<p>List of supported hashes can be obtained from hashlib package. This
+reads the entire file.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.read_hexhash">
+<code class="descname">read_hexhash</code><span class="sig-paren">(</span><em>hash_name</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.read_hexhash" title="Permalink to this definition">¶</a></dt>
+<dd><p>Calculate given hash for this file, returning hexdigest.</p>
+<p>List of supported hashes can be obtained from hashlib package. This
+reads the entire file.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.read_md5">
+<code class="descname">read_md5</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.read_md5" title="Permalink to this definition">¶</a></dt>
+<dd><p>Calculate the md5 hash for this file.</p>
+<p>This reads through the entire file.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.readlink">
+<code class="descname">readlink</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.readlink" title="Permalink to this definition">¶</a></dt>
+<dd><p>Return the path to which this symbolic link points.</p>
+<p>The result may be an absolute or a relative path.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.readlinkabs">
+<code class="descname">readlinkabs</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.readlinkabs" title="Permalink to this definition">¶</a></dt>
+<dd><p>Return the path to which this symbolic link points.</p>
+<p>The result is always an absolute path.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.realpath">
+<code class="descname">realpath</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.realpath" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.relpath">
+<code class="descname">relpath</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.relpath" title="Permalink to this definition">¶</a></dt>
+<dd><p>Return this path as a relative path,
+based from the current working directory.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.relpathto">
+<code class="descname">relpathto</code><span class="sig-paren">(</span><em>dest</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.relpathto" title="Permalink to this definition">¶</a></dt>
+<dd><p>Return a relative path from self to dest.</p>
+<p>If there is no relative path from self to dest, for example if
+they reside on different drives in Windows, then this returns
+dest.abspath().</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.remove">
+<code class="descname">remove</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.remove" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.remove_p">
+<code class="descname">remove_p</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.remove_p" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.removedirs">
+<code class="descname">removedirs</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.removedirs" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.removedirs_p">
+<code class="descname">removedirs_p</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.removedirs_p" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.rename">
+<code class="descname">rename</code><span class="sig-paren">(</span><em>new</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.rename" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.renames">
+<code class="descname">renames</code><span class="sig-paren">(</span><em>new</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.renames" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.rmdir">
+<code class="descname">rmdir</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.rmdir" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.rmdir_p">
+<code class="descname">rmdir_p</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.rmdir_p" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.rmtree">
+<code class="descname">rmtree</code><span class="sig-paren">(</span><em>*args</em>, <em>**kw</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.rmtree" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.rmtree_p">
+<code class="descname">rmtree_p</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.rmtree_p" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.samefile">
+<code class="descname">samefile</code><span class="sig-paren">(</span><em>otherfile</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.samefile" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="attribute">
+<dt id="paver.deps.path3.path.size">
+<code class="descname">size</code><a class="headerlink" href="#paver.deps.path3.path.size" title="Permalink to this definition">¶</a></dt>
+<dd><p>Size of the file, in bytes.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.splitall">
+<code class="descname">splitall</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.splitall" title="Permalink to this definition">¶</a></dt>
+<dd><p>Return a list of the path components in this path.</p>
+<p>The first item in the list will be a path.  Its value will be
+either os.curdir, os.pardir, empty, or the root directory of
+this path (for example, ‘/’ or ‘C:').  The other items in
+the list will be strings.</p>
+<p>path.path.joinpath(<a href="#id9"><span class="problematic" id="id10">*</span></a>result) will yield the original path.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.splitdrive">
+<code class="descname">splitdrive</code><span class="sig-paren">(</span><span class="sig-paren">)</span> &#x2192; Return (p.drive, &lt;the rest of p&gt;).<a class="headerlink" href="#paver.deps.path3.path.splitdrive" title="Permalink to this definition">¶</a></dt>
+<dd><p>Split the drive specifier from this path.  If there is
+no drive specifier, p.drive is empty, so the return value
+is simply (path(‘’), p).  This is always the case on Unix.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.splitext">
+<code class="descname">splitext</code><span class="sig-paren">(</span><span class="sig-paren">)</span> &#x2192; Return (p.stripext(), p.ext).<a class="headerlink" href="#paver.deps.path3.path.splitext" title="Permalink to this definition">¶</a></dt>
+<dd><p>Split the filename extension from this path and return
+the two parts.  Either part may be empty.</p>
+<p>The extension is everything from ‘.’ to the end of the
+last path segment.  This has the property that if
+(a, b) == p.splitext(), then a + b == p.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.splitpath">
+<code class="descname">splitpath</code><span class="sig-paren">(</span><span class="sig-paren">)</span> &#x2192; Return (p.parent, p.name).<a class="headerlink" href="#paver.deps.path3.path.splitpath" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.stat">
+<code class="descname">stat</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.stat" title="Permalink to this definition">¶</a></dt>
+<dd><p>Perform a stat() system call on this path.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.statvfs">
+<code class="descname">statvfs</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.statvfs" title="Permalink to this definition">¶</a></dt>
+<dd><p>Perform a statvfs() system call on this path.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.stripext">
+<code class="descname">stripext</code><span class="sig-paren">(</span><span class="sig-paren">)</span> &#x2192; Remove one file extension from the path.<a class="headerlink" href="#paver.deps.path3.path.stripext" title="Permalink to this definition">¶</a></dt>
+<dd><p>For example, path(‘/home/guido/python.tar.gz’).stripext()
+returns path(‘/home/guido/python.tar’).</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.symlink">
+<code class="descname">symlink</code><span class="sig-paren">(</span><em>newlink</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.symlink" title="Permalink to this definition">¶</a></dt>
+<dd><p>Create a symbolic link at ‘newlink’, pointing here.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.text">
+<code class="descname">text</code><span class="sig-paren">(</span><em>encoding=None</em>, <em>errors='strict'</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.text" title="Permalink to this definition">¶</a></dt>
+<dd><p>Open this file, read it in, return the content as a string.</p>
+<p>This uses ‘U’ mode in Python 2.3 and later, so ‘rn’ and ‘r’
+are automatically translated to ‘n’.</p>
+<p>Optional arguments:</p>
+<dl class="docutils">
+<dt>encoding - The Unicode encoding (or character set) of</dt>
+<dd>the file.  If present, the content of the file is
+decoded and returned as a unicode object; otherwise
+it is returned as an 8-bit str.</dd>
+<dt>errors - How to handle Unicode errors; see help(str.decode)</dt>
+<dd>for the options.  Default is ‘strict’.</dd>
+</dl>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.touch">
+<code class="descname">touch</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.touch" title="Permalink to this definition">¶</a></dt>
+<dd><p>Set the access/modified times of this file to the current time.
+Create the file if it does not exist.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.unlink">
+<code class="descname">unlink</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.unlink" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.unlink_p">
+<code class="descname">unlink_p</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.unlink_p" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.utime">
+<code class="descname">utime</code><span class="sig-paren">(</span><em>times</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.utime" title="Permalink to this definition">¶</a></dt>
+<dd><p>Set the access and modified times of this file.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.walk">
+<code class="descname">walk</code><span class="sig-paren">(</span><span class="sig-paren">)</span> &#x2192; iterator over files and subdirs, recursively.<a class="headerlink" href="#paver.deps.path3.path.walk" title="Permalink to this definition">¶</a></dt>
+<dd><p>The iterator yields path objects naming each child item of
+this directory and its descendants.  This requires that
+D.isdir().</p>
+<p>This performs a depth-first traversal of the directory tree.
+Each directory is returned just before all its children.</p>
+<p>The errors= keyword argument controls behavior when an
+error occurs.  The default is ‘strict’, which causes an
+exception.  The other allowed values are ‘warn’, which
+reports the error via warnings.warn(), and ‘ignore’.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.walkdirs">
+<code class="descname">walkdirs</code><span class="sig-paren">(</span><span class="sig-paren">)</span> &#x2192; iterator over subdirs, recursively.<a class="headerlink" href="#paver.deps.path3.path.walkdirs" title="Permalink to this definition">¶</a></dt>
+<dd><p>With the optional ‘pattern’ argument, this yields only
+directories whose names match the given pattern.  For
+example, mydir.walkdirs(‘<a href="#id11"><span class="problematic" id="id12">*</span></a>test’) yields only directories
+with names ending in ‘test’.</p>
+<p>The errors= keyword argument controls behavior when an
+error occurs.  The default is ‘strict’, which causes an
+exception.  The other allowed values are ‘warn’, which
+reports the error via warnings.warn(), and ‘ignore’.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.walkfiles">
+<code class="descname">walkfiles</code><span class="sig-paren">(</span><span class="sig-paren">)</span> &#x2192; iterator over files in D, recursively.<a class="headerlink" href="#paver.deps.path3.path.walkfiles" title="Permalink to this definition">¶</a></dt>
+<dd><p>The optional argument, pattern, limits the results to files
+with names that match the pattern.  For example,
+mydir.walkfiles(‘<a href="#id13"><span class="problematic" id="id14">*</span></a>.tmp’) yields only files with the .tmp
+extension.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.write_bytes">
+<code class="descname">write_bytes</code><span class="sig-paren">(</span><em>bytes</em>, <em>append=False</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.write_bytes" title="Permalink to this definition">¶</a></dt>
+<dd><p>Open this file and write the given bytes to it.</p>
+<p>Default behavior is to overwrite any existing file.
+Call p.write_bytes(bytes, append=True) to append instead.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.write_lines">
+<code class="descname">write_lines</code><span class="sig-paren">(</span><em>lines</em>, <em>encoding=None</em>, <em>errors='strict'</em>, <em>linesep='\n'</em>, <em>append=False</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.write_lines" title="Permalink to this definition">¶</a></dt>
+<dd><p>Write the given lines of text to this file.</p>
+<p>By default this overwrites any existing file at this path.</p>
+<p>This puts a platform-specific newline sequence on every line.
+See ‘linesep’ below.</p>
+<p>lines - A list of strings.</p>
+<dl class="docutils">
+<dt>encoding - A Unicode encoding to use.  This applies only if</dt>
+<dd>‘lines’ contains any Unicode strings.</dd>
+<dt>errors - How to handle errors in Unicode encoding.  This</dt>
+<dd>also applies only to Unicode strings.</dd>
+<dt>linesep - The desired line-ending.  This line-ending is</dt>
+<dd>applied to every line.  If a line already has any
+standard line ending (‘r’, ‘n’, ‘rn’, u’x85’,
+u’rx85’, u’u2028’), that will be stripped off and
+this will be used instead.  The default is os.linesep,
+which is platform-dependent (‘rn’ on Windows, ‘n’ on
+Unix, etc.)  Specify None to write the lines as-is,
+like file.writelines().</dd>
+</dl>
+<p>Use the keyword argument append=True to append lines to the
+file.  The default is to overwrite the file.  Warning:
+When you use this with Unicode data, if the encoding of the
+existing data in the file is different from the encoding
+you specify with the encoding= parameter, the result is
+mixed-encoding data, which can really confuse someone trying
+to read the file later.</p>
+</dd></dl>
+
+<dl class="method">
+<dt id="paver.deps.path3.path.write_text">
+<code class="descname">write_text</code><span class="sig-paren">(</span><em>text</em>, <em>encoding=None</em>, <em>errors='strict'</em>, <em>linesep='\n'</em>, <em>append=False</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.deps.path3.path.write_text" title="Permalink to this definition">¶</a></dt>
+<dd><p>Write the given text to this file.</p>
+<p>The default behavior is to overwrite any existing file;
+to append instead, use the ‘append=True’ keyword argument.</p>
+<p>There are two differences between path.write_text() and
+path.write_bytes(): newline handling and Unicode handling.
+See below.</p>
+<p>Parameters:</p>
+<blockquote>
+<div><ul class="simple">
+<li>text - str/unicode - The text to be written.</li>
+<li>encoding - str - The Unicode encoding that will be used.
+This is ignored if ‘text’ isn’t a Unicode string.</li>
+<li>errors - str - How to handle Unicode encoding errors.
+Default is ‘strict’.  See help(unicode.encode) for the
+options.  This is ignored if ‘text’ isn’t a Unicode
+string.</li>
+<li>linesep - keyword argument - str/unicode - The sequence of
+characters to be used to mark end-of-line.  The default is
+os.linesep.  You can also specify None; this means to
+leave all newlines as they are in ‘text’.</li>
+<li>append - keyword argument - bool - Specifies what to do if
+the file already exists (True: append to the end of it;
+False: overwrite it.)  The default is False.</li>
+</ul>
+</div></blockquote>
+<p>— Newline handling.</p>
+<p>write_text() converts all standard end-of-line sequences
+(‘n’, ‘r’, and ‘rn’) to your platform’s default end-of-line
+sequence (see os.linesep; on Windows, for example, the
+end-of-line marker is ‘rn’).</p>
+<p>If you don’t like your platform’s default, you can override it
+using the ‘linesep=’ keyword argument.  If you specifically want
+write_text() to preserve the newlines as-is, use ‘linesep=None’.</p>
+<p>This applies to Unicode text the same as to 8-bit text, except
+there are three additional standard Unicode end-of-line sequences:
+u’x85’, u’rx85’, and u’u2028’.</p>
+<p>(This is slightly different from when you open a file for
+writing with fopen(filename, “w”) in C or open(filename, ‘w’)
+in Python.)</p>
+<p>— Unicode</p>
+<p>If ‘text’ isn’t Unicode, then apart from newline handling, the
+bytes are written verbatim to the file.  The ‘encoding’ and
+‘errors’ arguments are not used and must be omitted.</p>
+<p>If ‘text’ is Unicode, it is first converted to bytes using the
+specified ‘encoding’ (or the default encoding if ‘encoding’
+isn’t specified).  The ‘errors’ argument applies only to this
+conversion.</p>
+</dd></dl>
+
+</dd></dl>
+
+</div>
+<div class="section" id="module-paver.deps">
+<span id="module-contents"></span><h2>Module contents<a class="headerlink" href="#module-paver.deps" title="Permalink to this headline">¶</a></h2>
+</div>
+</div>
+
+
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+  <h3><a href="../index.html">Table Of Contents</a></h3>
+  <ul>
+<li><a class="reference internal" href="#">paver.deps package</a><ul>
+<li><a class="reference internal" href="#submodules">Submodules</a></li>
+<li><a class="reference internal" href="#paver-deps-path2-module">paver.deps.path2 module</a></li>
+<li><a class="reference internal" href="#module-paver.deps.path3">paver.deps.path3 module</a></li>
+<li><a class="reference internal" href="#module-paver.deps">Module contents</a></li>
+</ul>
+</li>
+</ul>
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index.html">Documentation overview</a><ul>
+  <li><a href="../paverfullapi.html">Complete API Reference</a><ul>
+  <li><a href="paver.html">paver package</a><ul>
+      <li>Previous: <a href="paver.html" title="previous chapter">paver package</a></li>
+      <li>Next: <a href="paver.tests.html" title="next chapter">paver.tests package</a></li>
+  </ul></li>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+  <div role="note" aria-label="source link">
+    <h3>This Page</h3>
+    <ul class="this-page-menu">
+      <li><a href="../_sources/api/paver.deps.rst.txt"
+            rel="nofollow">Show Source</a></li>
+    </ul>
+   </div>
+<div id="searchbox" style="display: none" role="search">
+  <h3>Quick search</h3>
+    <form class="search" action="../search.html" method="get">
+      <div><input type="text" name="q" /></div>
+      <div><input type="submit" value="Go" /></div>
+      <input type="hidden" name="check_keywords" value="yes" />
+      <input type="hidden" name="area" value="default" />
+    </form>
+</div>
+<script type="text/javascript">$('#searchbox').show(0);</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2008, SitePen, Inc..
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 1.6.5</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.10</a>
+      
+      |
+      <a href="../_sources/api/paver.deps.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

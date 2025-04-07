@@ -1,0 +1,276 @@
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Documentation Tools (paver.doctools) &#8212; Paver 1.3.4 documentation</title>
+    <link rel="stylesheet" href="_static/default.css" type="text/css" />
+    <link rel="stylesheet" href="_static/pygments.css" type="text/css" />
+    <script type="text/javascript">
+      var DOCUMENTATION_OPTIONS = {
+        URL_ROOT:    './',
+        VERSION:     '1.3.4',
+        COLLAPSE_INDEX: false,
+        FILE_SUFFIX: '.html',
+        HAS_SOURCE:  true,
+        SOURCELINK_SUFFIX: '.txt'
+      };
+    </script>
+    <script type="text/javascript" src="_static/jquery.js"></script>
+    <script type="text/javascript" src="_static/underscore.js"></script>
+    <script type="text/javascript" src="_static/doctools.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Miscellaneous Tasks (paver.misctasks)" href="misctasks.html" />
+    <link rel="prev" title="File Handling in Paver (paver.path)" href="files.html" />
+   
+  <link rel="stylesheet" href="_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head>
+  <body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <div class="section" id="module-paver.doctools">
+<span id="documentation-tools-paver-doctools"></span><span id="doctools"></span><h1>Documentation Tools (paver.doctools)<a class="headerlink" href="#module-paver.doctools" title="Permalink to this headline">¶</a></h1>
+<p>Tasks and utility functions and classes for working with project
+documentation.</p>
+<dl class="class">
+<dt id="paver.doctools.Includer">
+<em class="property">class </em><code class="descclassname">paver.doctools.</code><code class="descname">Includer</code><span class="sig-paren">(</span><em>basedir</em>, <em>cog=None</em>, <em>include_markers=None</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.doctools.Includer" title="Permalink to this definition">¶</a></dt>
+<dd><p>Looks up SectionedFiles relative to the basedir.</p>
+<p>When called with a filename and an optional section, the Includer
+will:</p>
+<ol class="arabic simple">
+<li>look up that file relative to the basedir in a cache</li>
+<li>load it as a SectionedFile if it’s not in the cache</li>
+<li>return the whole file if section is None</li>
+<li>return just the section desired if a section is requested</li>
+</ol>
+<p>If a cog object is provided at initialization, the text will be
+output (via cog’s out) rather than returned as
+a string.</p>
+<p>You can pass in include_markers which is a dictionary that maps
+file extensions to the single line comment character for that
+file type. If there is an include marker available, then
+output like:</p>
+<p># section ‘sectionname’ from ‘file.py’</p>
+<p>There are some default include markers. If you don’t pass
+in anything, no include markers will be displayed. If you
+pass in an empty dictionary, the default ones will
+be displayed.</p>
+</dd></dl>
+
+<dl class="class">
+<dt id="paver.doctools.SectionedFile">
+<em class="property">class </em><code class="descclassname">paver.doctools.</code><code class="descname">SectionedFile</code><span class="sig-paren">(</span><em>filename=None</em>, <em>from_string=None</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.doctools.SectionedFile" title="Permalink to this definition">¶</a></dt>
+<dd><p>Loads a file into memory and keeps track of all of the
+sections found in the file. Sections are started with a
+line that looks like this:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="p">[[[</span><span class="n">section</span> <span class="n">SECTIONNAME</span><span class="p">]]]</span>
+</pre></div>
+</div>
+<p>Anything else can appear on the line outside of the brackets
+(so if you’re in a source code file, you can put the section marker
+in a comment). The entire lines containing the section markers are
+not included when you request the text from the file.</p>
+<p>An end of section marker looks like this:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="p">[[[</span><span class="n">endsection</span><span class="p">]]]</span>
+</pre></div>
+</div>
+<p>Sections can be nested. If you do nest sections, you will use
+dotted notation to refer to the inner sections. For example,
+a “dessert” section within an “order” section would be referred
+to as “order.dessert”.</p>
+<p>The SectionedFile provides dictionary-style access to the
+sections. If you have a SectionedFile named ‘sf’,
+sf[sectionname] will give you back a string of that section
+of the file, including any inner sections. There won’t
+be any section markers in that string.</p>
+<p>You can get the text of the whole file via the <code class="docutils literal"><span class="pre">all</span></code> property
+(for example, <code class="docutils literal"><span class="pre">sf.all</span></code>).</p>
+<p>Section names must be unique across the file, but inner section
+names are kept track of by the full dotted name. So you can
+have a “dessert” section that is contained within two different
+outer sections.</p>
+<p>Ending a section without starting one or ending the file without
+ending a section will yield BuildFailures.</p>
+<dl class="attribute">
+<dt id="paver.doctools.SectionedFile.all">
+<code class="descname">all</code><a class="headerlink" href="#paver.doctools.SectionedFile.all" title="Permalink to this definition">¶</a></dt>
+<dd><p>Property to get access to the whole file.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="function">
+<dt id="paver.doctools.cog">
+<code class="descclassname">paver.doctools.</code><code class="descname">cog</code><span class="sig-paren">(</span><em>options</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.doctools.cog" title="Permalink to this definition">¶</a></dt>
+<dd><p>Runs the cog code generator against the files matching your 
+specification. By default, cog will run against any .rst files
+in your Sphinx document root. Full documentation for Cog is
+here:</p>
+<p><a class="reference external" href="https://nedbatchelder.com/code/cog/">https://nedbatchelder.com/code/cog/</a></p>
+<p>In a nutshell, you put blocks in your file that look like
+this:</p>
+<p>[[[cog cog.outl(“Hi there!”)
+]]]
+[[[end]]]</p>
+<p>Cog will replace the space between ]]] and [[[end]]] with
+the generated output. In this case, Hi there!</p>
+<p>Here are the options available for the cog task. These are
+looked up in the ‘cog’ options section by default. The
+‘sphinx’ option set is also searched.</p>
+<dl class="docutils">
+<dt>basedir</dt>
+<dd>directory to look in for files to cog. If not set,
+‘docroot’ is looked up.</dd>
+<dt>pattern</dt>
+<dd>file glob to look for under basedir. By default, <code class="docutils literal"><span class="pre">*.rst</span></code></dd>
+<dt>includedir</dt>
+<dd><p class="first">If you have external files to include in your
+documentation, setting includedir to the root
+of those files will put a paver.doctools.Includer 
+in your Cog namespace as ‘include’. This lets you
+easily include files and sections of files. Here’s
+an example usage:</p>
+<div class="last highlight-default"><div class="highlight"><pre><span></span><span class="p">[[[</span><span class="n">cog</span> <span class="n">include</span><span class="p">(</span><span class="s1">&#39;filename_under_includedir.py&#39;</span><span class="p">,</span> <span class="s1">&#39;mysection&#39;</span><span class="p">)]]]</span>
+<span class="p">[[[</span><span class="n">end</span><span class="p">]]]</span>
+</pre></div>
+</div>
+</dd>
+<dt>defines</dt>
+<dd>Dictionary of objects added to your Cog namespace.
+(can supersede ‘include’ and ‘sh’ defined by includedir.)</dd>
+<dt>beginspec</dt>
+<dd>String used at the beginning of the code generation block.
+Default: [[[cog</dd>
+<dt>endspec</dt>
+<dd>String used at the end of the code generation block.
+Default; ]]]</dd>
+<dt>endoutput</dt>
+<dd>String used at the end of the generated output
+Default: [[[end]]]</dd>
+<dt>delete_code</dt>
+<dd>Remove the generator code. Note that this will mean that the
+files that get changed cannot be changed again since the code
+will be gone. Default: False</dd>
+<dt>include_markers</dt>
+<dd><p class="first">Dictionary mapping file extensions to the single line
+comment marker for that file. There are some defaults.
+For example, ‘py’ maps to ‘# ‘. If there is a known
+include marker for a given file, then a comment
+will be displayed along the lines of:</p>
+<p># section ‘SECTIONNAME’ in file ‘foo.py’</p>
+<p class="last">If this option is not set, these lines will not
+be displayed at all. If this option is set to an
+empty dictionary, the default include markers
+will be displayed. You can also pass in your own
+extension -&gt; include marker settings.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="function">
+<dt id="paver.doctools.doc_clean">
+<code class="descclassname">paver.doctools.</code><code class="descname">doc_clean</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.doctools.doc_clean" title="Permalink to this definition">¶</a></dt>
+<dd><p>Clean (delete) the built docs. Specifically, this deletes the
+build directory under the docroot. See the html task for the
+options list.</p>
+</dd></dl>
+
+<dl class="function">
+<dt id="paver.doctools.html">
+<code class="descclassname">paver.doctools.</code><code class="descname">html</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#paver.doctools.html" title="Permalink to this definition">¶</a></dt>
+<dd><p>Build HTML documentation using Sphinx. This uses the following
+options in a “sphinx” section of the options.</p>
+<dl class="docutils">
+<dt>docroot</dt>
+<dd>the root under which Sphinx will be working. Default: docs</dd>
+<dt>builddir</dt>
+<dd>directory under the docroot where the resulting files are put.
+default: .build</dd>
+<dt>sourcedir</dt>
+<dd>directory under the docroot for the source files
+default: (empty string)</dd>
+<dt>apidir</dt>
+<dd>directory under the sourcedir for the auto-generated API docs (empty = don’t create them)
+default: api</dd>
+</dl>
+</dd></dl>
+
+<dl class="function">
+<dt id="paver.doctools.uncog">
+<code class="descclassname">paver.doctools.</code><code class="descname">uncog</code><span class="sig-paren">(</span><em>options</em><span class="sig-paren">)</span><a class="headerlink" href="#paver.doctools.uncog" title="Permalink to this definition">¶</a></dt>
+<dd><p>Remove the Cog generated code from files. Often, you will want to
+do this before committing code under source control, because you
+don’t generally want generated code in your version control system.</p>
+<p>This takes the same options as the cog task. Look there for
+more information.</p>
+</dd></dl>
+
+</div>
+
+
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper"><div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="index.html">Documentation overview</a><ul>
+  <li><a href="paverstdlib.html">The Paver Standard Library</a><ul>
+      <li>Previous: <a href="files.html" title="previous chapter">File Handling in Paver (paver.path)</a></li>
+      <li>Next: <a href="misctasks.html" title="next chapter">Miscellaneous Tasks (paver.misctasks)</a></li>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+  <div role="note" aria-label="source link">
+    <h3>This Page</h3>
+    <ul class="this-page-menu">
+      <li><a href="_sources/doctools.rst.txt"
+            rel="nofollow">Show Source</a></li>
+    </ul>
+   </div>
+<div id="searchbox" style="display: none" role="search">
+  <h3>Quick search</h3>
+    <form class="search" action="search.html" method="get">
+      <div><input type="text" name="q" /></div>
+      <div><input type="submit" value="Go" /></div>
+      <input type="hidden" name="check_keywords" value="yes" />
+      <input type="hidden" name="area" value="default" />
+    </form>
+</div>
+<script type="text/javascript">$('#searchbox').show(0);</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2008, SitePen, Inc..
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 1.6.5</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.10</a>
+      
+      |
+      <a href="_sources/doctools.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

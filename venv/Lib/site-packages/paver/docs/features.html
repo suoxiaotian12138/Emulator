@@ -1,0 +1,173 @@
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Paver’s Features &#8212; Paver 1.3.4 documentation</title>
+    <link rel="stylesheet" href="_static/default.css" type="text/css" />
+    <link rel="stylesheet" href="_static/pygments.css" type="text/css" />
+    <script type="text/javascript">
+      var DOCUMENTATION_OPTIONS = {
+        URL_ROOT:    './',
+        VERSION:     '1.3.4',
+        COLLAPSE_INDEX: false,
+        FILE_SUFFIX: '.html',
+        HAS_SOURCE:  true,
+        SOURCELINK_SUFFIX: '.txt'
+      };
+    </script>
+    <script type="text/javascript" src="_static/jquery.js"></script>
+    <script type="text/javascript" src="_static/underscore.js"></script>
+    <script type="text/javascript" src="_static/doctools.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Getting Started with Paver" href="getting_started.html" />
+    <link rel="prev" title="Foreword: Why Paver?" href="foreword.html" />
+   
+  <link rel="stylesheet" href="_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head>
+  <body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <div class="section" id="paver-s-features">
+<h1>Paver’s Features<a class="headerlink" href="#paver-s-features" title="Permalink to this headline">¶</a></h1>
+<div class="section" id="files-are-just-python">
+<span id="justpython"></span><h2>Files Are Just Python<a class="headerlink" href="#files-are-just-python" title="Permalink to this headline">¶</a></h2>
+<p>Python has a very concise, readable syntax. There’s no need to create some
+mini-language for describing your builds. Quite often it seems like these
+mini-languages are missing features that you need. By using Python as its
+syntax, you can always be sure that you can express whatever it is you
+need to do easily. A for loop is just a for loop:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">fn</span> <span class="ow">in</span> <span class="p">[</span><span class="s2">&quot;f1.txt&quot;</span><span class="p">,</span> <span class="s2">&quot;f2.txt&quot;</span><span class="p">,</span> <span class="s2">&quot;f3.txt&quot;</span><span class="p">]:</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">path</span><span class="p">(</span><span class="n">fn</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">remove</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>
+<div class="section" id="one-file-with-one-syntax">
+<span id="onefile"></span><h2>One File with One Syntax<a class="headerlink" href="#one-file-with-one-syntax" title="Permalink to this headline">¶</a></h2>
+<p>When putting together a Python project today, you get into a collection of
+tools to get the job done. distutils and setuptools are the standards for
+getting packages put together. zc.buildout and virtualenv are used for
+installation into isolated deployment environments. Sphinx provides
+a great way to document Python projects.</p>
+<p>To put together a total system, you need each of these parts. But they
+each have their own way of working. The goal with the
+<a class="reference internal" href="paverstdlib.html#stdlib"><span class="std std-ref">Paver Standard Library</span></a>
+is to make the common tools have a more integrated feel, so you don’t
+have to guess as much about how to get something done.</p>
+<p>As of today, Paver is tightly integrated with distutils and setuptools,
+and can easily work as a drop-in, more easily scriptable replacement for
+setup.py.</p>
+</div>
+<div class="section" id="easy-file-operations">
+<span id="pathmodule"></span><h2>Easy file operations<a class="headerlink" href="#easy-file-operations" title="Permalink to this headline">¶</a></h2>
+<p>Paver includes a customized version of Jason Orendorff’s awesome path.py
+module. Operations on files and directories could hardly be easier,
+and the methods have been modified to support “dry run” behavior.</p>
+</div>
+<div class="section" id="small-bits-of-behavior-take-small-amounts-of-work">
+<span id="fivelines"></span><h2>Small bits of behavior take small amounts of work<a class="headerlink" href="#small-bits-of-behavior-take-small-amounts-of-work" title="Permalink to this headline">¶</a></h2>
+<p>Imagine you need to do something that will take you 5 lines of Python code.
+With some of the tools that Paver augments, it’ll take you a lot more
+effort than those 5 lines of code. You have to read about the API for
+making new commands or recipes or otherwise extending the package.
+The goal when using Paver is to have a five line change take about five
+lines to make.</p>
+<p>For example, let’s say you need to perform some extra work when and ‘sdist’
+is run. Good luck figuring out the best way to do that with distutils. With
+Paver, it’s just:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="nd">@task</span>
+<span class="k">def</span> <span class="nf">sdist</span><span class="p">():</span>
+    <span class="c1"># perform fancy file manipulations</span>
+    <span class="n">blah</span><span class="o">.</span><span class="n">blah</span><span class="o">.</span><span class="n">blah</span><span class="p">()</span>
+
+    <span class="c1"># *now* run the sdist</span>
+    <span class="n">call_task</span><span class="p">(</span><span class="s2">&quot;setuptools.command.sdist&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<div class="section" id="can-take-advantage-of-libraries-but-doesn-t-require-them">
+<span id="nodeps"></span><h2>Can Take Advantage of Libraries But Doesn’t Require Them<a class="headerlink" href="#can-take-advantage-of-libraries-but-doesn-t-require-them" title="Permalink to this headline">¶</a></h2>
+<p>The Paver Standard Library includes support for a lot of the common tools,
+but you don’t necessarily need all of those tools, and certainly not on
+every project. Paver is designed to have no other requirements but to
+automatically take advantage of other tools when they’re available.</p>
+</div>
+</div>
+
+
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+  <h3><a href="index.html">Table Of Contents</a></h3>
+  <ul>
+<li><a class="reference internal" href="#">Paver’s Features</a><ul>
+<li><a class="reference internal" href="#files-are-just-python">Files Are Just Python</a></li>
+<li><a class="reference internal" href="#one-file-with-one-syntax">One File with One Syntax</a></li>
+<li><a class="reference internal" href="#easy-file-operations">Easy file operations</a></li>
+<li><a class="reference internal" href="#small-bits-of-behavior-take-small-amounts-of-work">Small bits of behavior take small amounts of work</a></li>
+<li><a class="reference internal" href="#can-take-advantage-of-libraries-but-doesn-t-require-them">Can Take Advantage of Libraries But Doesn’t Require Them</a></li>
+</ul>
+</li>
+</ul>
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="index.html">Documentation overview</a><ul>
+      <li>Previous: <a href="foreword.html" title="previous chapter">Foreword: Why Paver?</a></li>
+      <li>Next: <a href="getting_started.html" title="next chapter">Getting Started with Paver</a></li>
+  </ul></li>
+</ul>
+</div>
+  <div role="note" aria-label="source link">
+    <h3>This Page</h3>
+    <ul class="this-page-menu">
+      <li><a href="_sources/features.rst.txt"
+            rel="nofollow">Show Source</a></li>
+    </ul>
+   </div>
+<div id="searchbox" style="display: none" role="search">
+  <h3>Quick search</h3>
+    <form class="search" action="search.html" method="get">
+      <div><input type="text" name="q" /></div>
+      <div><input type="submit" value="Go" /></div>
+      <input type="hidden" name="check_keywords" value="yes" />
+      <input type="hidden" name="area" value="default" />
+    </form>
+</div>
+<script type="text/javascript">$('#searchbox').show(0);</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2008, SitePen, Inc..
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 1.6.5</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.10</a>
+      
+      |
+      <a href="_sources/features.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

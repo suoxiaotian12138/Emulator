@@ -1,0 +1,102 @@
+paver\.tests package
+====================
+
+Submodules
+----------
+
+paver\.tests\.other\_pavement module
+------------------------------------
+
+.. automodule:: paver.tests.other_pavement
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+paver\.tests\.test\_doctools module
+-----------------------------------
+
+.. automodule:: paver.tests.test_doctools
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+paver\.tests\.test\_git module
+------------------------------
+
+.. automodule:: paver.tests.test_git
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+paver\.tests\.test\_hg module
+-----------------------------
+
+.. automodule:: paver.tests.test_hg
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+paver\.tests\.test\_options module
+----------------------------------
+
+.. automodule:: paver.tests.test_options
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+paver\.tests\.test\_path module
+-------------------------------
+
+.. automodule:: paver.tests.test_path
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+paver\.tests\.test\_setuputils module
+-------------------------------------
+
+.. automodule:: paver.tests.test_setuputils
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+paver\.tests\.test\_shell module
+--------------------------------
+
+.. automodule:: paver.tests.test_shell
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+paver\.tests\.test\_svn module
+------------------------------
+
+.. automodule:: paver.tests.test_svn
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+paver\.tests\.test\_tasks module
+--------------------------------
+
+.. automodule:: paver.tests.test_tasks
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+paver\.tests\.utils module
+--------------------------
+
+.. automodule:: paver.tests.utils
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+
+Module contents
+---------------
+
+.. automodule:: paver.tests
+    :members:
+    :undoc-members:
+    :show-inheritance:

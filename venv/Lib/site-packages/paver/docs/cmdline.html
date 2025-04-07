@@ -1,0 +1,137 @@
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Paver Command Line &#8212; Paver 1.3.4 documentation</title>
+    <link rel="stylesheet" href="_static/default.css" type="text/css" />
+    <link rel="stylesheet" href="_static/pygments.css" type="text/css" />
+    <script type="text/javascript">
+      var DOCUMENTATION_OPTIONS = {
+        URL_ROOT:    './',
+        VERSION:     '1.3.4',
+        COLLAPSE_INDEX: false,
+        FILE_SUFFIX: '.html',
+        HAS_SOURCE:  true,
+        SOURCELINK_SUFFIX: '.txt'
+      };
+    </script>
+    <script type="text/javascript" src="_static/jquery.js"></script>
+    <script type="text/javascript" src="_static/underscore.js"></script>
+    <script type="text/javascript" src="_static/doctools.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Tips and Tricks" href="tips.html" />
+    <link rel="prev" title="SSH Remote Access Support (paver.ssh)" href="ssh.html" />
+   
+  <link rel="stylesheet" href="_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head>
+  <body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <div class="section" id="paver-command-line">
+<span id="cmdline"></span><h1>Paver Command Line<a class="headerlink" href="#paver-command-line" title="Permalink to this headline">¶</a></h1>
+<p>Paver does sophisticated command line parsing globally and for each task:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="n">paver</span> <span class="p">[</span><span class="o">-</span><span class="n">q</span><span class="p">]</span> <span class="p">[</span><span class="o">-</span><span class="n">n</span><span class="p">]</span> <span class="p">[</span><span class="o">-</span><span class="n">v</span><span class="p">]</span> <span class="p">[</span><span class="o">-</span><span class="n">f</span> <span class="n">pavement</span><span class="p">]</span> <span class="p">[</span><span class="o">-</span><span class="n">h</span><span class="p">]</span> <span class="p">[</span><span class="n">option</span><span class="o">.</span><span class="n">name</span><span class="o">=</span><span class="n">key</span><span class="p">]</span> <span class="p">[</span><span class="n">taskname</span><span class="p">]</span> <span class="p">[</span><span class="n">taskoptions</span><span class="p">]</span> <span class="p">[</span><span class="n">taskname</span><span class="o">...</span><span class="p">]</span>
+</pre></div>
+</div>
+<p>The command line options are:</p>
+<table class="docutils option-list" frame="void" rules="none">
+<col class="option" />
+<col class="description" />
+<tbody valign="top">
+<tr><td class="option-group">
+<kbd><span class="option">-q</span></kbd></td>
+<td>quiet… don’t display much info (info and debug messages are not shown)</td></tr>
+<tr><td class="option-group">
+<kbd><span class="option">-n</span></kbd></td>
+<td>dry run… don’t actually run destructive commands</td></tr>
+<tr><td class="option-group">
+<kbd><span class="option">-v</span></kbd></td>
+<td>verbose… display debug level output</td></tr>
+<tr><td class="option-group">
+<kbd><span class="option">-h</span></kbd></td>
+<td>display the command line options and list of available tasks. Note
+that -h can be provided for any task to display the command line options
+and detailed help for that task.</td></tr>
+<tr><td class="option-group">
+<kbd><span class="option">-f <var>&lt;pavement&gt;</var></span></kbd></td>
+<td>use a different file than “pavement.py”</td></tr>
+</tbody>
+</table>
+<p>If you run paver without a task, it will only run the “auto” task, if there
+is one. Otherwise, Paver will do nothing.</p>
+<p><code class="docutils literal"><span class="pre">paver</span> <span class="pre">help</span></code> is the equivalent of <code class="docutils literal"><span class="pre">paver</span> <span class="pre">-h</span></code>, and <code class="docutils literal"><span class="pre">paver</span> <span class="pre">help</span> <span class="pre">taskname</span></code>
+is the equivalent of <code class="docutils literal"><span class="pre">paver</span> <span class="pre">taskname</span> <span class="pre">-h</span></code>.</p>
+<p>You can set build options via the command line by providing optionname=value.
+The option names can be in dotted notation, so <code class="docutils literal"><span class="pre">foo.bar.baz=something</span></code> will
+set options[‘foo’][‘bar’][‘baz’] = ‘something’ in the options. If you need
+to enter a value with multiple words, put quotes around the part with the space.</p>
+<p><cite>Important and useful</cite>: Options are set at the point in which they appear in
+the command line. That means that you can set an option before one task
+and then set it to another value for the next task.</p>
+</div>
+
+
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper"><div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="index.html">Documentation overview</a><ul>
+      <li>Previous: <a href="ssh.html" title="previous chapter">SSH Remote Access Support (paver.ssh)</a></li>
+      <li>Next: <a href="tips.html" title="next chapter">Tips and Tricks</a></li>
+  </ul></li>
+</ul>
+</div>
+  <div role="note" aria-label="source link">
+    <h3>This Page</h3>
+    <ul class="this-page-menu">
+      <li><a href="_sources/cmdline.rst.txt"
+            rel="nofollow">Show Source</a></li>
+    </ul>
+   </div>
+<div id="searchbox" style="display: none" role="search">
+  <h3>Quick search</h3>
+    <form class="search" action="search.html" method="get">
+      <div><input type="text" name="q" /></div>
+      <div><input type="submit" value="Go" /></div>
+      <input type="hidden" name="check_keywords" value="yes" />
+      <input type="hidden" name="area" value="default" />
+    </form>
+</div>
+<script type="text/javascript">$('#searchbox').show(0);</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2008, SitePen, Inc..
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 1.6.5</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.10</a>
+      
+      |
+      <a href="_sources/cmdline.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

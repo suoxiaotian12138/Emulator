@@ -1,0 +1,494 @@
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Getting Started with Paver &#8212; Paver 1.3.4 documentation</title>
+    <link rel="stylesheet" href="_static/default.css" type="text/css" />
+    <link rel="stylesheet" href="_static/pygments.css" type="text/css" />
+    <script type="text/javascript">
+      var DOCUMENTATION_OPTIONS = {
+        URL_ROOT:    './',
+        VERSION:     '1.3.4',
+        COLLAPSE_INDEX: false,
+        FILE_SUFFIX: '.html',
+        HAS_SOURCE:  true,
+        SOURCELINK_SUFFIX: '.txt'
+      };
+    </script>
+    <script type="text/javascript" src="_static/jquery.js"></script>
+    <script type="text/javascript" src="_static/underscore.js"></script>
+    <script type="text/javascript" src="_static/doctools.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="pavement.py in depth" href="pavement.html" />
+    <link rel="prev" title="Paver’s Features" href="features.html" />
+   
+  <link rel="stylesheet" href="_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head>
+  <body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <div class="section" id="getting-started-with-paver">
+<span id="gettingstarted"></span><h1>Getting Started with Paver<a class="headerlink" href="#getting-started-with-paver" title="Permalink to this headline">¶</a></h1>
+<p>Often, the easiest way to get going with a new tool is to see an example
+in action, so that’s how we’ll get started with Paver. In the Paver
+distribution, there are samples under docs/samples. The Getting
+Started samples are in the “started” directory under there.</p>
+<div class="section" id="the-old-way">
+<h2>The Old Way<a class="headerlink" href="#the-old-way" title="Permalink to this headline">¶</a></h2>
+<p>Our first sample is called “The Old Way” (and it’s in the
+docs/samples/started/oldway directory). It’s a fairly typical project
+with one Python package and some docs, and we want to be able to
+distribute it.</p>
+<p>Python’s <a class="reference external" href="http://docs.python.org/dist/dist.html">distutils</a> makes it easy indeed to create a distributable
+package. We create a setup.py file that looks like this:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1">#&lt;== include(&#39;started/oldway/setup.py&#39;)==&gt;</span>
+<span class="c1">#&lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>With that simple setup script, you can run:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="n">python</span> <span class="n">setup</span><span class="o">.</span><span class="n">py</span> <span class="n">sdist</span>
+</pre></div>
+</div>
+<p>to build a source distribution:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;==</span>
+<span class="c1"># sh(&#39;cd docs/samples/started/oldway; python setup.py sdist&#39;,</span>
+<span class="c1">#    insert_output=False)</span>
+<span class="c1"># sh(&#39;ls -l docs/samples/started/oldway/dist&#39;)</span>
+<span class="c1"># ==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>Then your users can run the familiar:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="n">python</span> <span class="n">setup</span><span class="o">.</span><span class="n">py</span> <span class="n">install</span>
+</pre></div>
+</div>
+<p>to install the package, or use setuptools’ even easier:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="n">easy_install</span> <span class="s2">&quot;TheOldWay&quot;</span>
+</pre></div>
+</div>
+<p>for packages that are up on the Python Package Index.</p>
+<div class="section" id="the-old-way-s-docs">
+<h3>The Old Way’s Docs<a class="headerlink" href="#the-old-way-s-docs" title="Permalink to this headline">¶</a></h3>
+<p>The Old Way project is at least a bit modern in that it uses <a class="reference external" href="http://sphinx.pocoo.org">Sphinx</a> for documentation. When you use sphinx-quickstart to get going with your
+docs, Sphinx will give you a Makefile that you can run to generate
+your HTML docs. So, generating the HTML docs is easy:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="n">make</span> <span class="n">html</span>
+</pre></div>
+</div>
+<p>Except, in this project (as in Paver itself), we want to include the
+HTML files in a docs directory in the package for presenting help to
+the users. We end up creating a shell script to do this:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&quot;started/oldway/builddocs.sh&quot;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>Of course, creating a script like this means that we have to actually
+remember to run it. We could change this script to “buildsdist.sh”
+and add a <code class="docutils literal"><span class="pre">python</span> <span class="pre">setup.py</span> <span class="pre">sdist</span></code> to the end of the file. But,
+wouldn’t it be nicer if we could just use <code class="docutils literal"><span class="pre">python</span> <span class="pre">setup.py</span> <span class="pre">sdist</span></code>
+directly?</p>
+<p>You can <a class="reference external" href="http://docs.python.org/dist/node84.html">create new distutils commands</a>, but do you really want to
+drop stuff like that in the distutils/command package in your
+Python library directory? And how would you call the sdist command
+anyway? <a class="reference external" href="http://peak.telecommunity.com/DevCenter/setuptools">setuptools</a> helps, but it still requires setting up a module
+and entry point for this collection of commands.</p>
+</div>
+<div class="section" id="work-with-me-here">
+<h3>Work with me here<a class="headerlink" href="#work-with-me-here" title="Permalink to this headline">¶</a></h3>
+<p>I just <cite>know</cite> there are some people reading this and thinking
+“man, what a contrived example!”. Building, packaging, distributing
+and deploying of projects is quite custom for every project.
+Part of the point of Paver is to make it easy to handle whatever
+weird requirements arise in your project. This example may seem
+contrived, but it should give you an idea of how easy Paver
+makes it to get your tasks done.</p>
+</div>
+</div>
+<div class="section" id="the-new-way">
+<h2>The New Way<a class="headerlink" href="#the-new-way" title="Permalink to this headline">¶</a></h2>
+<p>Let’s bring in Paver now to clean up our scripting a bit. Converting
+a project to use Paver is really, really simple. Recall the setup
+function from our Old Way setup.py:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&quot;started/oldway/setup.py&quot;, &quot;setup&quot;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<div class="section" id="id1">
+<h3>Getting Started with Paver<a class="headerlink" href="#id1" title="Permalink to this headline">¶</a></h3>
+<p>setup.py is a standard Python script. It’s just called setup.py
+as a convention. Paver works a bit more like Make or Rake.
+To use Paver, you run <code class="docutils literal"><span class="pre">paver</span> <span class="pre">&lt;taskname&gt;</span></code> and the paver
+command will look for a pavement.py file in the current directory.
+pavement.py is a standard Python module. A typical pavement will
+import from paver.easy to get a bunch of convenience functions
+and objects and then import other modules that include useful
+tasks:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&#39;started/newway/pavement.py&#39;, &#39;imports&#39;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>Converting from setup.py to pavement.py is easy. Paver provides
+a special <code class="docutils literal"><span class="pre">options</span></code> object that holds all of your build options.
+<code class="docutils literal"><span class="pre">options</span></code> is just a dictionary that allows attribute-style
+access and has some special searching abilities. The options
+for distutils operations are stored in a <code class="docutils literal"><span class="pre">setup</span></code> section of the
+options. And, as a convenience, Paver provides a setup function
+that sets the values in that options section (and goes a step
+further, by making all of the distutils/setuptools commands
+available as Paver tasks). Here’s what the conversion looks like:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&#39;started/newway/pavement.py&#39;, &#39;setup&#39;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+</div>
+<div class="section" id="paver-is-compatible-with-distutils">
+<h3>Paver is compatible with distutils<a class="headerlink" href="#paver-is-compatible-with-distutils" title="Permalink to this headline">¶</a></h3>
+<p>Choosing to use Paver does not mean giving up on distutils or
+setuptools. Paver lets you continue to use distutils and setuptools
+commands. When you import a module that has Paver tasks in it,
+those tasks automatically become available for running. If you
+want access to distutils and setuptools commands as well, you can either
+use the <code class="docutils literal"><span class="pre">paver.setuputils.setup</span></code> function as described
+above, or call <code class="docutils literal"><span class="pre">paver.setuputils.install_distutils_tasks()</span></code>.</p>
+<p>We can see this in action by looking at <code class="docutils literal"><span class="pre">paver</span> <span class="pre">help</span></code>:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== sh(&#39;cd docs/samples/started/newway; paver help&#39;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>That command is listing all of the available tasks, and you can see
+near the top there are tasks from distutils.command. All of the
+standard distutils commands are available.</p>
+<p>There’s one more thing we need to do before our Python package
+is properly redistributable: tell distutils about our special files.
+We can do that with a simple MANIFEST.in:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&#39;started/newway/MANIFEST.in&#39;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>With that, we can run <code class="docutils literal"><span class="pre">paver</span> <span class="pre">sdist</span></code> and end up with the
+equivalent output file:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;==</span>
+<span class="c1"># sh(&#39;cd docs/samples/started/newway; paver sdist&#39;,</span>
+<span class="c1">#    insert_output=False)</span>
+<span class="c1"># sh(&#39;ls -l docs/samples/started/newway/dist&#39;)</span>
+<span class="c1"># ==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>It also means that users of The New Way can also run <code class="docutils literal"><span class="pre">paver</span> <span class="pre">install</span></code>
+to install the package on their system. Neat.</p>
+</div>
+<div class="section" id="but-people-are-used-to-setup-py">
+<h3>But people are used to setup.py!<a class="headerlink" href="#but-people-are-used-to-setup-py" title="Permalink to this headline">¶</a></h3>
+<p><code class="docutils literal"><span class="pre">python</span> <span class="pre">setup.py</span> <span class="pre">install</span></code> has been around a long time. And while
+you could certainly put a README file in your package telling
+people to run <code class="docutils literal"><span class="pre">paver</span> <span class="pre">install</span></code>, we all know that no one actually
+reads docs. (Hey, thanks for taking the time to read this!)</p>
+<p>No worries, though. You can run <code class="docutils literal"><span class="pre">paver</span> <span class="pre">generate_setup</span></code> to get a
+setup.py file that you can ship in your tarball. Then your users
+can run <code class="docutils literal"><span class="pre">python</span> <span class="pre">setup.py</span> <span class="pre">install</span></code> just like they’re used to,
+and Paver will take over.</p>
+</div>
+<div class="section" id="but-people-don-t-have-paver-yet">
+<h3>But people don’t have Paver yet!<a class="headerlink" href="#but-people-don-t-have-paver-yet" title="Permalink to this headline">¶</a></h3>
+<p>There are millions of Python installations that don’t have Paver yet,
+but have Python and distutils. How can they run a Paver-based install?</p>
+<p>Easy, you just run <code class="docutils literal"><span class="pre">paver</span> <span class="pre">minilib</span></code> and you will get a file called
+paver-minilib.zip. That file has enough of Paver to allow someone
+to install most projects. The Paver-generated setup.py knows to look
+for that file and use it if it sees it.</p>
+<p>Worried about bloating your package? The paver-minilib is not large:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;==</span>
+<span class="c1"># sh(&#39;cd docs/samples/started/newway ; paver minilib&#39;,</span>
+<span class="c1">#    insert_output=False)</span>
+<span class="c1"># sh(&#39;ls -l docs/samples/started/newway/paver-minilib.zip&#39;)</span>
+<span class="c1"># ==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>Paver itself is bootstrapped with a generated setup file and a
+paver-minilib.</p>
+</div>
+<div class="section" id="hey-didn-t-you-just-create-more-work-for-me">
+<h3>Hey! Didn’t you just create more work for me?<a class="headerlink" href="#hey-didn-t-you-just-create-more-work-for-me" title="Permalink to this headline">¶</a></h3>
+<p>You might have noticed that we now have three commands to run in
+order to get a proper distribution for The New Way. Well, you can
+actually run them all at once: <code class="docutils literal"><span class="pre">paver</span> <span class="pre">generate_setup</span> <span class="pre">minilib</span> <span class="pre">sdist</span></code>.
+That’s not terrible, but it’s also not great. You don’t want to
+end up with a broken distribution just because you forgot one of
+the tasks.</p>
+<p>By design, one of the easiest things to do in Paver is to extend
+the behavior of an existing “task”, and that includes distutils
+commands. All we need to do is create a new sdist task in our
+pavement.py:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&#39;started/newway/pavement.py&#39;, &#39;sdist&#39;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>The &#64;task decorator just tells Paver that this is a task and not just
+a function. The &#64;needs decorator specifies other tasks that should
+run before this one. You can also use the <cite>call_task(taskname)</cite>
+function within your task if you wish. The function name determines
+the name of the task. The docstring is what shows up in Paver’s
+help output.</p>
+<p>With that task in our pavement.py, <code class="docutils literal"><span class="pre">paver</span> <span class="pre">sdist</span></code> is all it takes
+to build a source distribution after generating a setup file
+and minilib.</p>
+<div class="admonition note">
+<p class="first admonition-title">Note</p>
+<p class="last">If you are depending on distutils task (via &#64;needs), you have to call <code class="docutils literal"><span class="pre">setup()</span></code> before task is defined.
+Under the hood, <code class="docutils literal"><span class="pre">setup</span></code> call installs distutils/setupsools task and make them available, so do not make it conditional.</p>
+</div>
+</div>
+<div class="section" id="tackling-the-docs">
+<h3>Tackling the Docs<a class="headerlink" href="#tackling-the-docs" title="Permalink to this headline">¶</a></h3>
+<p>Until the tools themselves provide tasks and functions that make
+creating pavements easier, Paver’s Standard Library will include
+a collection of modules that help out for commonly used tools.
+Sphinx is one package for which Paver has built-in support.</p>
+<p>To use Paver’s Sphinx support, you need to have Sphinx installed
+and, in your pavement.py, <code class="docutils literal"><span class="pre">import</span> <span class="pre">paver.doctools</span></code>. Just performing
+the import will make the doctools-related tasks available.
+<code class="docutils literal"><span class="pre">paver</span> <span class="pre">help</span> <span class="pre">html</span></code> will tell us how to use the html command:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== sh(&#39;paver help paver.doctools.html&#39;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>According to that, we’ll need to set the builddir setting, since we’re
+using a builddir called “_build”. Let’s add this to our pavement.py:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&#39;started/newway/pavement.py&#39;, &#39;sphinx&#39;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>And with that, <code class="docutils literal"><span class="pre">paver</span> <span class="pre">html</span></code> is now equivalent to <code class="docutils literal"><span class="pre">make</span> <span class="pre">html</span></code> using
+the Makefile that Sphinx gave us.</p>
+</div>
+<div class="section" id="getting-rid-of-our-docs-shell-script">
+<h3>Getting rid of our docs shell script<a class="headerlink" href="#getting-rid-of-our-docs-shell-script" title="Permalink to this headline">¶</a></h3>
+<p>You may remember that shell script we had for moving our generated
+docs to the right place:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&#39;started/oldway/builddocs.sh&#39;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>Ideally, we’d want this to happen whenever we generate the docs.
+We’ve already seen how to override tasks, so let’s try that out
+here:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&#39;started/newway/pavement.py&#39;, &#39;html&#39;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>There are a handful of interesting things in here. The equivalent of
+‘make html’ is the &#64;needs(‘paver.doctools.html’), since that’s
+the task we’re overriding.</p>
+<p>Inside our task, we’re using “path”. This is a customized
+version of Jason Orendorff’s path module. All kinds of file
+and directory operations become super-simple using this module.</p>
+<p>We start by deleting our destination directory, since we’ll be copying
+new generated files into that spot. Next, we look at the built
+docs directory that we’ll be moving:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&#39;started/newway/pavement.py&#39;, &#39;html.builtdocs&#39;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>One cool thing about path objects is that you can use the natural
+and comfortable ‘/’ operator to build up your paths.</p>
+<p>The next thing we see here is the accessing of options. The
+options object is available to your tasks. It’s basically a dictionary
+that offers attribute-style access and can search for variables
+(which is why you can type options.builddir instead of
+the longer options.sphinx.builddir). That property of options is
+also convenient for being able to share properties between sections.</p>
+<p>And with that, we eliminate the shell script as a separate file.</p>
+</div>
+<div class="section" id="fixing-another-wart-in-the-old-way">
+<h3>Fixing another wart in The Old Way<a class="headerlink" href="#fixing-another-wart-in-the-old-way" title="Permalink to this headline">¶</a></h3>
+<p>In the documentation for The Old Way, we actually included the
+function body directly in the docs. But, we had to cut and paste
+it there. Sphinx does offer a way to include an external file
+in your documentation. Paver includes a better way.</p>
+<p>There are a couple of parts to the documentation problem:</p>
+<ol class="arabic simple">
+<li>It’s good to have your code in separate files from your docs
+so that the code can be complete, runnable and, above all,
+testable programs so that you can be sure that everything works.</li>
+<li>You want your writing and the samples included with your writing
+to stand up as reasonable, coherent documents. Python’s doctest
+style does not always lend itself to coherent documents.</li>
+<li>It’s nice to have the code sample that you’re writing about
+included inline with the documents as you’re writing them.
+It’s easier to write when you can easily see what you’re
+writing about.</li>
+</ol>
+<p>#1 and #3 sound mutually exclusive, but they’re not. Paver has a
+two part strategy to solve this problem. Let’s look at part of the index.rst
+document file to see the first part:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&quot;started/newway/docs/index.rst&quot;, &quot;mainpart&quot;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>In The New Way’s index.rst, you can see the same mechanism being used that
+is used in this Getting Started guide. Paver includes Ned Batchelder’s
+<a class="reference external" href="http://nedbatchelder.com/code/cog/">Cog</a> package. Cog lets you drop snippets of Python into a file and have
+those snippets generate stuff that goes into the file. Unlike a template
+language, Cog is designed so that you can leave the markers in and
+regenerate as often as you need to. With a template language, you have
+the template and the finalized output, but not a file that has both.</p>
+<p>So, as I’m writing this Getting Started document, I can glance up and see
+the index.rst contents right inline. You’ll notice The # [[ [cog part in there
+is calling an include() function. This is the second part offered by
+Paver. Paver lets you specify an “includedir” for use with Cog.
+This lets you include files relative to that directory. And, critically,
+it also lets you mark off sections of those files so that you can
+easily include just the part you want. In the example above, we’re picking
+up the ‘code’ section of the newway/thecode.py file. Let’s take a look
+at that file:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== sh(&quot;cat docs/samples/started/newway/newway/thecode.py&quot;) ==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>Paver has a Cog-like syntax for defining named sections. So, you just
+use the <code class="docutils literal"><span class="pre">include</span></code> function with the relative filename and the section
+you want, and it will be included. Sections can even be nested (and
+you refer to nested sections using familiar dotted notation).</p>
+</div>
+<div class="section" id="bonus-deployment-example">
+<h3>Bonus Deployment Example<a class="headerlink" href="#bonus-deployment-example" title="Permalink to this headline">¶</a></h3>
+<p>pavements are just standard Python. The syntax for looping and things
+like that are just what you’re used to. The options are standard Python
+so they can contain lists and other objects. Need to deploy to
+multiple hosts? Just put the hosts in the options and loop over them.</p>
+<p>Let’s say we want to deploy The New Way project’s HTML files to a
+couple of servers. This is similar to what I do for Paver itself, though
+I only have one server. First, we’ll set up some variables to use for
+our deploy task:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&#39;started/newway/pavement.py&#39;, &#39;deployoptions&#39;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>As you can see, we can put whatever kinds of objects we wish into
+the options. Now for the deploy task itself:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== include(&quot;started/newway/pavement.py&quot;, &quot;deploy&quot;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+<p>You’ll notice the new “cmdopts” decorator. Let’s say that you have
+sensitive information like a password that you don’t want to include
+in your pavement. You can easily make it a command line option for that
+task using cmdopts. options.deploy.username will be set to whatever
+the user enters on the command line.</p>
+<p>It’s also worth noting that when looking up options, Paver gives
+priority to options in a section with the same name as the task. So,
+options.username will prefer options.deploy.username even if there
+is a username in another section.</p>
+<p>Our deploy task uses a simple for loop to run an rsync command
+for each host. Let’s do a dry run providing a username to see
+what the commands will be:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span><span class="c1"># &lt;== sh(&quot;cd docs/samples/started/newway; paver -n deploy -u kevin&quot;)==&gt;</span>
+<span class="c1"># &lt;==end==&gt;</span>
+</pre></div>
+</div>
+</div>
+<div class="section" id="where-to-go-from-here">
+<h3>Where to go from here<a class="headerlink" href="#where-to-go-from-here" title="Permalink to this headline">¶</a></h3>
+<p>The first thing to do is to just get started using Paver. As you’ve seen
+above, it’s easy to get Paver into your workflow, even with existing
+projects.</p>
+<p>Use the <code class="docutils literal"><span class="pre">paver</span> <span class="pre">help</span></code> command.</p>
+<p>If you really want more detail now, you’ll want to read more about
+<a class="reference internal" href="pavement.html#pavement"><span class="std std-ref">pavement files</span></a> and the
+<a class="reference internal" href="paverstdlib.html#stdlib"><span class="std std-ref">Paver Standard Library</span></a>.</p>
+</div>
+</div>
+</div>
+
+
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+  <h3><a href="index.html">Table Of Contents</a></h3>
+  <ul>
+<li><a class="reference internal" href="#">Getting Started with Paver</a><ul>
+<li><a class="reference internal" href="#the-old-way">The Old Way</a><ul>
+<li><a class="reference internal" href="#the-old-way-s-docs">The Old Way’s Docs</a></li>
+<li><a class="reference internal" href="#work-with-me-here">Work with me here</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#the-new-way">The New Way</a><ul>
+<li><a class="reference internal" href="#id1">Getting Started with Paver</a></li>
+<li><a class="reference internal" href="#paver-is-compatible-with-distutils">Paver is compatible with distutils</a></li>
+<li><a class="reference internal" href="#but-people-are-used-to-setup-py">But people are used to setup.py!</a></li>
+<li><a class="reference internal" href="#but-people-don-t-have-paver-yet">But people don’t have Paver yet!</a></li>
+<li><a class="reference internal" href="#hey-didn-t-you-just-create-more-work-for-me">Hey! Didn’t you just create more work for me?</a></li>
+<li><a class="reference internal" href="#tackling-the-docs">Tackling the Docs</a></li>
+<li><a class="reference internal" href="#getting-rid-of-our-docs-shell-script">Getting rid of our docs shell script</a></li>
+<li><a class="reference internal" href="#fixing-another-wart-in-the-old-way">Fixing another wart in The Old Way</a></li>
+<li><a class="reference internal" href="#bonus-deployment-example">Bonus Deployment Example</a></li>
+<li><a class="reference internal" href="#where-to-go-from-here">Where to go from here</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="index.html">Documentation overview</a><ul>
+      <li>Previous: <a href="features.html" title="previous chapter">Paver’s Features</a></li>
+      <li>Next: <a href="pavement.html" title="next chapter">pavement.py in depth</a></li>
+  </ul></li>
+</ul>
+</div>
+  <div role="note" aria-label="source link">
+    <h3>This Page</h3>
+    <ul class="this-page-menu">
+      <li><a href="_sources/getting_started.rst.txt"
+            rel="nofollow">Show Source</a></li>
+    </ul>
+   </div>
+<div id="searchbox" style="display: none" role="search">
+  <h3>Quick search</h3>
+    <form class="search" action="search.html" method="get">
+      <div><input type="text" name="q" /></div>
+      <div><input type="submit" value="Go" /></div>
+      <input type="hidden" name="check_keywords" value="yes" />
+      <input type="hidden" name="area" value="default" />
+    </form>
+</div>
+<script type="text/javascript">$('#searchbox').show(0);</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2008, SitePen, Inc..
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 1.6.5</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.10</a>
+      
+      |
+      <a href="_sources/getting_started.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>
