@@ -2,18 +2,18 @@
   "loopix": {
         "parametersClients": {
         "NOISE_LENGTH": "500",
-        "EXP_PARAMS_DROP": "2.0",
+        "EXP_PARAMS_DROP": "20.0",
         "PATH_LENGTH": "3",
-        "EXP_PARAMS_LOOPS": "2.0",
+        "EXP_PARAMS_LOOPS": "100.0",
         "EXP_PARAMS_DELAY": "0.001",
-        "TIME_PULL": "1000.0",
+        "TIME_PULL": "20.0",
         "EXP_PARAMS_PAYLOAD": "2.0",
         "DATABASE_NAME":"example.db",
         "DATA_DIR":"tmp/mail"
     },
     "parametersMixnodes": {
         "NOISE_LENGTH": "500",
-        "EXP_PARAMS_LOOPS": "2.0",
+        "EXP_PARAMS_LOOPS": "20.0",
         "EXP_PARAMS_DELAY": "0.001",
         "MAX_DELAY_TIME": "-432000",
         "DATABASE_NAME":"example.db"
@@ -21,7 +21,7 @@
     "parametersProviders": {
       "MAX_RETRIEVE": "50",
       "NOISE_LENGTH": "500",
-      "EXP_PARAMS_LOOPS": "2.0",
+      "EXP_PARAMS_LOOPS": "20.0",
       "EXP_PARAMS_DELAY": "0.001",
       "MAX_DELAY_TIME": "-432000",
       "DATABASE_NAME":"example.db"

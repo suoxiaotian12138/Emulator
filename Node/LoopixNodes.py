@@ -51,6 +51,7 @@ class Loopix_node(DatagramProtocol):
 
     def get_and_addCallback(self, function):
         self.receiver.get().addCallback(function)
+
     def add_callback_to(self, func, callback_func):
         """调用任意函数，并将其返回值传递给 callback_func"""
         result = func()  # 调用原函数
@@ -62,6 +63,7 @@ class Loopix_node(DatagramProtocol):
             reactor.callLater(0, callback_func, result)
 
     def datagramReceived(self, data, addr):
+        print("received datagram")
         self.receiver.put((data,addr))
 
     def handle_packet(self, packet):
@@ -92,7 +94,7 @@ class Loopix_Mixnode(Loopix_node):
         print("[%s] > Started" % self.name)
         self.plugin_initial()
         self.turn_on_processing()
-        self.message_maker.make_stream("LOOP")
+        # self.message_maker.make_stream("LOOP")
 
 
     def register(self):
@@ -121,14 +123,15 @@ class Loopix_Client(Loopix_node):
         self.type = "client"
         self.config_params = self.jsonReader.get_loopix_config_params(paramsname="parametersClients")
 
+
     def startProtocol(self):
         print("[%s] > Started" % self.name)
 
         # self.transport.write(b"hello", ("127.0.0.1", 9999))
         self.plugin_initial()
         self.turn_on_processing()
-        self.message_maker.make_stream("LOOP")
-        self.message_maker.make_stream("DROP")
+        # self.message_maker.make_stream("LOOP")
+        # self.message_maker.make_stream("DROP")
         self.message_maker.make_stream("REAL")
 
     def plugin_initial(self,nodetype = "client"):
@@ -142,10 +145,7 @@ class Loopix_Client(Loopix_node):
         self.receiver = LoopixReceiver(config_params=self.config_params, message_maker=self.message_maker)
         self.register()
 
-
-
     def subscribe_provider(self):
-        d = twisted.names.client.getHostByName(self.provider.host)
         lc = task.LoopingCall(self.sender.send, ['SUBSCRIBE', self.name, self.host, self.port], self.provider.host, self.provider.port)
         lc.start(self.config_params.TIME_PULL, now=True)
 
@@ -157,8 +157,6 @@ class Loopix_Client(Loopix_node):
             ).decode('utf-8'), self.provider.name])
         dbManager.close_connection()
 
-
-
     def retrieve_messages(self):
         lc = task.LoopingCall(self.sender.send, ['PULL', self.name],self.provider.host,self.provider.port)
         lc.start(self.config_params.TIME_PULL, now=True)
@@ -168,7 +166,6 @@ class Loopix_Client(Loopix_node):
         reactor.callLater(20.0, self.get_and_addCallback, self.handle_packet)
 
     def handle_packet(self, packet_addr):
-        print("receive a message")
         """ 处理收到的 UDP 数据包 """
         packet, addr = packet_addr
         self.process.read_packet_client(packet)
@@ -192,7 +189,7 @@ class Loopix_Provider(Loopix_node):
         print("[%s] > Started" % self.name)
         self.plugin_initial()
         self.turn_on_processing()
-        self.message_maker.make_stream("LOOP")
+        # self.message_maker.make_stream("LOOP")
 
 
     def plugin_initial(self,nodetype = "provider"):
@@ -217,7 +214,6 @@ class Loopix_Provider(Loopix_node):
     def handle_packet(self, packet_addr):
         """ 处理收到的 UDP 数据包 """
         packet, addr = packet_addr
-        print(addr)
         self.process.read_packet_provider(packet)
         try:
             # 再次调用 handle_packet 以实现循环监听
@@ -232,7 +228,7 @@ class Loopix_Provider(Loopix_node):
         reactor.callLater(20.0, self.get_and_addCallback, self.handle_packet)
 
     def is_assigned_client(self, client_id):
-        return any(c == client_id for c in self.clients)
+        return any(c == client_id for c in self.receiver.clients)
 
 
 
