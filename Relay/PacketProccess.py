@@ -10,11 +10,10 @@ class LoopixProcess():
 
     def read_packet(self):
         return
+
     def read_packet_client(self, packet):
         decoded_packet = decode(packet)
-        print("here is client")
         if not decoded_packet[0] == 'DUMMY':
-            print("dummy")
             flag, decrypted_packet = self.process_packet(decoded_packet)
             return flag, decrypted_packet
 
@@ -82,6 +81,8 @@ class LoopixProcess():
                 return ("LOOP", [message]) if message.startswith(b'HT') else ("NEW", message)
             else:
                 return "ERROR", []
+        else:
+            print(routing_flag)
 
 
     def _send_or_delay(self, delay, packet, addr):

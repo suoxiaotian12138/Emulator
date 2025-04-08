@@ -7,7 +7,6 @@ from twisted.application import service, internet
 from Crypto.NodeBuild import LoopixNodeSetup
 from Databasemanage.database_init import loopix_database_initial
 
-
 loopix_database_initial()
 node_set = [9995, '127.0.0.1', 'client1', 1]
 setup = LoopixNodeSetup(node_set)

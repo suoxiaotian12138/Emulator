@@ -25,6 +25,7 @@ class LoopixCrypto(object):
     def make_sphinx_packet(self, receiver, path, message, drop_flag=False, type_flag=None):
         keys_nodes = self.take_nodes_keys(path)
         routing_info = self.take_nodes_routing(path, drop_flag, type_flag)
+        print(routing_info)
         dest = (receiver.host, receiver.port, receiver.name)
         header, body = create_forward_message(self.sec_params,
                                               routing_info, keys_nodes, dest, message)
