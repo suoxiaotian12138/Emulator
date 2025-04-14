@@ -1,8 +1,13 @@
 import socket
 
-def send_udp_packet(host, port, message):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.sendto(message.encode(), (host, port))
-    sock.close()
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # 不用真的连接，目标地址可以是任意可达的外网
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    finally:
+        s.close()
+    return ip
 
-send_udp_packet("127.0.0.1", 9994, "Test message")
+print("本机内网地址是：", get_local_ip())

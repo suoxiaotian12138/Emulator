@@ -18,10 +18,7 @@ class Loopix_sender():
 
     def send(self, packet, host, port, resolved_adrs=None):
         """ 发送 UDP 数据包的独立函数 """
-        if packet[0] == "SUBSCRIBE":
-            print("send a subscribe packet")
         encoded_packet = encode(packet)
-        self.transport.write(encoded_packet, (host, port))
 
         if abstract.isIPAddress(host):
             self.transport.write(encoded_packet, (host, port))
@@ -35,4 +32,5 @@ class Loopix_sender():
                 d.addCallback(send_to_ip)
                 d.addErrback(lambda failure_obj: print(f"DNS 解析失败: {host} - {failure_obj}"))
 
+        return None
 

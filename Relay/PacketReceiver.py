@@ -3,12 +3,15 @@ import time
 import csv
 import threading
 import numpy as np
-
-
+import os
+from queue import Queue
+from collections import defaultdict
+import weakref
+import random
 
 
 class LoopixReceiver():
-    def __init__(self, config_params, message_maker):
+    def __init__(self, loopixnode):
         self.queue = []
         self.consumers = []
 
@@ -22,11 +25,17 @@ class LoopixReceiver():
         self.sum_Error = []
         self.timings = 0.0
         self.prev_Error = 0.0
+        self._node_ref = weakref.ref(loopixnode) if loopixnode else None
 
-        self.config_params = config_params
-        self.message_maker = message_maker
+        self.config_params = loopixnode.config_params
         self.lock = threading.Lock()
         self.logs = []
+        self.routingtable = loopixnode.routingtable
+        self.target_dir = "D:/project/Oniverse/file_pre_to_send/" + loopixnode.name
+        self.output_buffer = Queue()
+        self.data_buffer = defaultdict(list)
+        self.storage_directory = "D:/project/Oniverse/file_received/" + loopixnode.name
+
 
     def __contains__(self, key):
         return key in self.queue
@@ -55,20 +64,32 @@ class LoopixReceiver():
             self.storage_inbox[client_id] = [packet]
 
     def pull_messages(self, client_id):
+        print("pulling messages from {}".format(client_id))
         dummy_messages = []
         popped_messages = self.get_clients_messages(client_id)
+
         if len(popped_messages) < self.config_params.MAX_RETRIEVE:
-            dummy_messages = self.message_maker.generate_dummy_messages(
+            dummy_messages = self.generate_dummy_messages(
                 self.config_params.MAX_RETRIEVE - len(popped_messages))
         return popped_messages + dummy_messages
 
     def get_clients_messages(self, client_id):
+        print(self.storage_inbox.keys())
         if client_id in self.storage_inbox.keys():
             messages = self.storage_inbox[client_id]
             popped, rest = messages[:self.config_params.MAX_RETRIEVE], messages[self.config_params.MAX_RETRIEVE:]
             self.storage_inbox[client_id] = rest
             return popped
         return []
+
+    def generate_dummy_messages(self, num):
+        dummy_messages = [('DUMMY', self.generate_random_string(self.config_params.NOISE_LENGTH),
+                    self.generate_random_string(self.config_params.NOISE_LENGTH)) for _ in range(num)]
+        return dummy_messages
+
+    @staticmethod
+    def generate_random_string(length):
+        return np.random.bytes(length)
 
     def _process(self):
         try:
@@ -123,9 +144,77 @@ class LoopixReceiver():
     def log(self, data):
         self.logs.append(data)
         if len(self.logs) > 1000:
-            with open('PIDcontrolVal.csv', 'ab') as outfile:
+            with open('PIDcontrolVal.csv', 'a', newline='') as outfile:
                 csvW = csv.writer(outfile, delimiter=',')
-                csvW.writerows(self.logs)
+                # 避免 bytes 和 str 混用的问题
+                safe_logs = [
+                    [col.decode() if isinstance(col, bytes) else col for col in row]
+                    for row in self.logs
+                ]
+                csvW.writerows(safe_logs)
             self.logs = []
 
 
+
+    def check_new_file(self):
+        if not os.path.exists(self.target_dir):
+            os.makedirs(self.target_dir)
+        files = os.listdir(self.target_dir)
+        receiver = random.choice(self.routingtable["clients"])
+
+        for filename in files:
+            full_path = os.path.join(self.target_dir, filename)
+
+            if not filename.endswith(".done") and os.path.isfile(full_path):
+                with open(full_path, "rb") as f:
+                    content = f.read()
+
+                # 为每个文件生成唯一 file_id
+                file_id = filename[:2].upper()
+
+                # 添加开始标志
+                self.output_buffer.put((b'FILE_START:' + file_id.encode(), receiver))
+                # 分片入队
+                for seq, i in enumerate(range(0, len(content), self.config_params.NOISE_LENGTH)):
+                    chunk = content[i:i + self.config_params.NOISE_LENGTH]
+                    header = b'FILE_DATA:' + file_id.encode() + b':' + str(seq).encode()
+                    self.output_buffer.put((header + b':' + chunk,receiver))
+
+                # 添加结束标志
+                self.output_buffer.put((b'FILE_END:' + file_id.encode(), receiver))
+
+                os.rename(full_path, full_path + ".done")
+
+        reactor.callLater(self.config_params.EXP_PARAMS_CHECK, self.check_new_file)
+
+    def put_real_message(self, packet):
+        if packet.startswith(b'FILE_START:'):
+            file_id = packet[len(b'FILE_START:'):].decode()
+            print(f"[Receiver] FILE_START: {file_id}")
+            self.data_buffer[file_id] = []
+
+        elif packet.startswith(b'FILE_DATA:'):
+            _, file_id, seq, data = packet.split(b':', 3)
+            file_id = file_id.decode()
+            seq = int(seq.decode())
+            self.data_buffer[file_id].append(data)
+
+
+        elif packet.startswith(b'FILE_END:'):
+            file_id = packet[len(b'FILE_END:'):].decode()
+            print(f"[Receiver] FILE_END: {file_id}")
+            self.write_file(file_id)
+            del self.data_buffer[file_id]
+
+    def write_file(self, file_id):
+        """将完整文件写入storage_directory"""
+        if not os.path.exists(self.storage_directory):
+            os.makedirs(self.storage_directory)
+
+        file_path = os.path.join(self.storage_directory, f"{file_id}.txt")
+        print(self.data_buffer[file_id])
+        with open(file_path, 'wb') as f:
+            for chunk in self.data_buffer[file_id]:
+                f.write(chunk)
+
+        print(f"[Receiver] 已保存完整文件: {file_path}")

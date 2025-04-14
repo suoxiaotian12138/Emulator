@@ -14,7 +14,8 @@ class JSONReader(object):
         "MAX_RETRIEVE": int,
         "PATH_LENGTH": int,
         "DATABASE_NAME": str,
-        "DATA_DIR": str
+        "DATA_DIR": str,
+        "EXP_PARAMS_CHECK": float,
     }
 
     def __init__(self, config_paths):

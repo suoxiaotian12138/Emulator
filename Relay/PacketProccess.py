@@ -1,5 +1,7 @@
+from twisted.conch.ssh.connection import messages
+
 from tools.Serialization import decode
-from tools.sphinxmix.SphinxClient import Relay_flag,Dest_flag
+from tools.sphinxmix.SphinxClient import Relay_flag,Dest_flag,Surb_flag
 import weakref
 import itertools
 
@@ -13,9 +15,23 @@ class LoopixProcess():
 
     def read_packet_client(self, packet):
         decoded_packet = decode(packet)
+        loopix_node = self._node_ref()
         if not decoded_packet[0] == 'DUMMY':
             flag, decrypted_packet = self.process_packet(decoded_packet)
+            if flag == "NEW":
+                message = decrypted_packet['message']
+                print(message)
+                loopix_node.receiver.put_real_message(message)
+                if 'surb' in decrypted_packet:
+                    surb = decrypted_packet['surb']
+                    loopix_node.message_maker.make_reply_message(surb,message)
+                else:
+                    print('received a packet without surb')
+            elif flag == "LOOP":
+                print("receive a loop message")
             return flag, decrypted_packet
+        else:
+            return False, None
 
     def read_packet_mixnode(self, packet):
         """ 解码和处理收到的数据包 """
@@ -44,11 +60,12 @@ class LoopixProcess():
                 list(map(lambda pair: loopix_node.sender.send(pair[0], *pair[1]),
                          zip(pulled_messages, itertools.repeat(loopix_node.receiver.clients[decoded_packet[1]]))))
             else:
+                print("received a packet")
                 flag, decrypted_packet = self.process_packet(decoded_packet)
                 if flag == "ROUT":
                     delay, new_header, new_body, next_addr, next_name = decrypted_packet
                     if loopix_node.is_assigned_client(next_name):
-                        loopix_node.put_into_storage(next_name, (new_header, new_body))
+                        loopix_node.receiver.put_into_storage(next_name, (new_header, new_body))
                     else:
                         loopix_node.reactor.callFromThread(self._send_or_delay,
                                                     delay,
@@ -71,18 +88,24 @@ class LoopixProcess():
             # 处理中继节点
             print("drop message")
             next_addr, drop_flag, type_flag, delay, next_name = meta_info[0]
+            print(type_flag)
             return ("DROP", []) if drop_flag else ("ROUT", [delay, new_header, new_body, next_addr, next_name])
 
         elif routing_flag == Dest_flag:
             # 处理目标节点
             print("dest message")
-            dest, message = loopix_node.crypto_node.handle_received_forward(new_body, mac)
+            dest, decoded_packet = loopix_node.crypto_node.handle_received_forward(new_body, mac)
             if dest == [loopix_node.host, loopix_node.port, loopix_node.name]:
-                return ("LOOP", [message]) if message.startswith(b'HT') else ("NEW", message)
+                message = decoded_packet['message']
+                return ("LOOP", decoded_packet) if message.startswith(b'HT') else ("NEW", decoded_packet)
             else:
-                return "ERROR", []
-        else:
-            print(routing_flag)
+                return ("ERROR", [])
+        elif routing_flag == Surb_flag:
+            print("surb message")
+            surb_id = routing[-1]
+            message = loopix_node.crypto_node.handle_receive_surb(new_body, surb_id)
+            print(message)
+            return ("SURB", message)
 
 
     def _send_or_delay(self, delay, packet, addr):

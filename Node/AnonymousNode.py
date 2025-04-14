@@ -24,6 +24,7 @@ anonymous_networks = {
         "Client": Loopix_Client,
         "Mixnode": Loopix_Mixnode,
         "Provider": Loopix_Provider,
+
     },
 }
 
