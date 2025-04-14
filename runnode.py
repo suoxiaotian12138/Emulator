@@ -1,4 +1,4 @@
-    import os
+import os
 import sys
 import subprocess
 import time
@@ -19,7 +19,7 @@ sys.path.append('{BASE_DIR}')
 from twisted.python import log
 from twisted.application import service, internet
 from Crypto.NodeBuild import LoopixNodeSetup
-from databasemanage.database_init import loopix_database_initial
+from Databasemanage.database_init import loopix_database_initial
 
 
 loopix_database_initial()

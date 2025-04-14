@@ -20,15 +20,14 @@ class LoopixProcess():
             flag, decrypted_packet = self.process_packet(decoded_packet)
             if flag == "NEW":
                 message = decrypted_packet['message']
-                print(message)
                 loopix_node.receiver.put_real_message(message)
                 if 'surb' in decrypted_packet:
                     surb = decrypted_packet['surb']
                     loopix_node.message_maker.make_reply_message(surb,message)
                 else:
-                    print('received a packet without surb')
+                    pass
             elif flag == "LOOP":
-                print("receive a loop message")
+                pass
             return flag, decrypted_packet
         else:
             return False, None
@@ -43,7 +42,7 @@ class LoopixProcess():
                 delay, new_header, new_body, next_addr, _ = decrypted_packet
                 loopix_node.reactor.callFromThread(self._send_or_delay, delay, (new_header, new_body), next_addr)
             elif flag == "LOOP":
-                print(f"[{loopix_node.name}] > Received loop message")
+                pass
         except Exception as exp:
             print("ERROR:", str(exp))
 
@@ -52,15 +51,12 @@ class LoopixProcess():
         try:
             decoded_packet = decode(packet)
             if decoded_packet[0] == 'SUBSCRIBE':
-                print("receive a sub message")
                 self._subscribe_client(decoded_packet[1:])
             elif decoded_packet[0] == 'PULL':
-                print("pull a message")
                 pulled_messages = loopix_node.receiver.pull_messages(client_id=decoded_packet[1])
                 list(map(lambda pair: loopix_node.sender.send(pair[0], *pair[1]),
                          zip(pulled_messages, itertools.repeat(loopix_node.receiver.clients[decoded_packet[1]]))))
             else:
-                print("received a packet")
                 flag, decrypted_packet = self.process_packet(decoded_packet)
                 if flag == "ROUT":
                     delay, new_header, new_body, next_addr, next_name = decrypted_packet
@@ -71,10 +67,9 @@ class LoopixProcess():
                                                     delay,
                                                     (new_header, new_body),
                                                     next_addr)
-                elif flag == "LOOP":
-                    print("[%s] > Received loop message" % loopix_node.name)
-                elif flag == "DROP":
-                    print("[%s] > Received drop message" % loopix_node.name)
+                else:
+                    pass
+
         except Exception as exp:
             print("ERROR: ", str(exp))
 
@@ -100,6 +95,7 @@ class LoopixProcess():
                 return ("LOOP", decoded_packet) if message.startswith(b'HT') else ("NEW", decoded_packet)
             else:
                 return ("ERROR", [])
+
         elif routing_flag == Surb_flag:
             print("surb message")
             surb_id = routing[-1]
