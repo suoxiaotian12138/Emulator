@@ -1,6 +1,7 @@
 
 
 from support_formats import Origin
+import json
 
 import hashlib
 import time
@@ -67,7 +68,12 @@ class Loopix_message_maker():
 
             surb_id = surb['id']
             surb_header = surb['header']
-            print("trace_id",surb_header[0][-2])
+
+            raw_data = surb_header[0]
+            routing_info = json.loads(raw_data.decode('utf-8'))
+            trace_id = routing_info[1][2]
+            info = {"surb_id": surb_id}
+
             # 构造回复内容
             reply_message = self.generate_reply_message(message)
 
@@ -76,10 +82,6 @@ class Loopix_message_maker():
 
             host = self.routingtable["provider_info"].host
             port = self.routingtable["provider_info"].port
-
-            trace_id = 'surb'
-            info = {"surb_id": surb_id}
-
         elif mode == "FORWARD":
             header, body = kwargs.get('packet')
             host,port = kwargs.get('addr')
@@ -108,10 +110,8 @@ class Loopix_message_maker():
         loopix_node.monitor.log_event(
             trace_id=trace_id,
             event="send",
-            src=f"{loopix_node.host}:{loopix_node.port}",
             dst=f"{host}:{port}",
             info=info
-
         )
         print(f"send a {mode} message")
 

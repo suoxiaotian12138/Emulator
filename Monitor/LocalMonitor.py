@@ -1,7 +1,8 @@
 import time
 import json
 import socket
-import weakref
+import hashlib
+
 
 class LocalMonitor:
     """
@@ -32,13 +33,24 @@ class LocalMonitor:
     def recv_time_record(self, packet, addr):
         time_record = time.time()
         arc_addr = addr
-        self.temporary_record[packet] = [time_record, arc_addr]
 
-    def recv(self, packet, trace_id ,event):
-        time_record, arc_addr = self.temporary_record[packet]
+        packet_key = self.packet_fingerprint(packet)
+        self.temporary_record[packet_key] = [time_record, arc_addr]
+
+    def recv_log(self, packet, trace_id ,event):
+
+        packet_key = self.packet_fingerprint(packet)
+        time_record, arc_addr = self.temporary_record[packet_key]
+        host,port = arc_addr
+        src = f"{host}:{port}",
+        self.log_event(trace_id=trace_id, event=event, src=src,time_record=time_record)
         self.temporary_record.pop(packet)
-        self.log_event(trace_id=trace_id, event=event, src=arc_addr,time_record=time_record)
 
+    @staticmethod
+    def packet_fingerprint(packet: bytes) -> str:
+        """高性能 fingerprint，防止大包计算过慢"""
+        digest = hashlib.sha256(packet[:512]).hexdigest()  # 只取前512字节
+        return digest[:16]
 
 
     def log_event(self, trace_id, event, src=None, dst=None, info=None, time_record=None):

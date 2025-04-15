@@ -5,19 +5,13 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="828f0c2f-6c0b-4d94-94a0-ee23f0048ef8" name="更改" comment="">
-      <change afterPath="$PROJECT_DIR$/Monitor/LocalMonitor.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/Emulator.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/Emulator.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Crypto/CryptoNode.py" beforeDir="false" afterPath="$PROJECT_DIR$/Crypto/CryptoNode.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Mixnode_mix2.tac" beforeDir="false" afterPath="$PROJECT_DIR$/Mixnode_mix2.tac" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Monitor/GlobalMonitor.py" beforeDir="false" afterPath="$PROJECT_DIR$/Monitor/GlobalMonitor.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Monitor/LocalMonitor.py" beforeDir="false" afterPath="$PROJECT_DIR$/Monitor/LocalMonitor.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/Node/LoopixNodes.py" beforeDir="false" afterPath="$PROJECT_DIR$/Node/LoopixNodes.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/PIDcontrolVal.csv" beforeDir="false" afterPath="$PROJECT_DIR$/PIDcontrolVal.csv" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/Packet/MessageMaker.py" beforeDir="false" afterPath="$PROJECT_DIR$/Packet/MessageMaker.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/Relay/PacketProccess.py" beforeDir="false" afterPath="$PROJECT_DIR$/Relay/PacketProccess.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/file_pre_to_send/client1/test.txt.done" beforeDir="false" afterPath="$PROJECT_DIR$/file_pre_to_send/client1/test.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/test.py" beforeDir="false" afterPath="$PROJECT_DIR$/test.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/file_pre_to_send/client1/test.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/file_received/client2/TE.txt" beforeDir="false" afterPath="$PROJECT_DIR$/file_received/client2/TE.txt" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

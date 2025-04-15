@@ -68,7 +68,7 @@ class Loopix_node(DatagramProtocol):
 
     def datagramReceived(self, data, addr):
         self.receiver.put((data,addr))
-        self.monitor.recv_time_record(data,addr)
+        #self.monitor.recv_time_record(data,addr)
 
 
     def handle_packet(self, packet):
@@ -111,7 +111,7 @@ class Loopix_Mixnode(Loopix_node):
         """ 处理收到的 UDP 数据包 """
         packet, addr = packet_addr
 
-        self.process.read_packet_mixnode(packet)
+        self.process.read_packet(mode='mixnode', packet = packet)
         try:
             # 再次调用 handle_packet 以实现循环监听
             self.reactor.callFromThread(self.get_and_addCallback, self.handle_packet)
@@ -190,7 +190,7 @@ class Loopix_Client(Loopix_node):
         """ 处理收到的 UDP 数据包 """
         packet, addr = packet_addr
 
-        self.process.read_packet_client(packet)
+        self.process.read_packet(mode='client', packet = packet)
         try:
             # 再次调用 handle_packet 以实现循环监听
             self.reactor.callFromThread(self.get_and_addCallback, self.handle_packet)
@@ -237,7 +237,7 @@ class Loopix_Provider(Loopix_node):
     def handle_packet(self, packet_addr):
         """ 处理收到的 UDP 数据包 """
         packet, addr = packet_addr
-        self.process.read_packet_provider(packet)
+        self.process.read_packet(mode='provider', packet = packet)
         try:
             # 再次调用 handle_packet 以实现循环监听
             self.reactor.callFromThread(self.get_and_addCallback, self.handle_packet)

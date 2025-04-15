@@ -37,7 +37,7 @@ class LoopixProcess():
             print(f"[ERROR] Unknown mode: {mode}")
             return None
 
-        loopix_node.monitor.recv(packet = packet,trace_id = trace_id,event = event)
+        #loopix_node.monitor.recv_log(packet = packet,trace_id = trace_id,event = event)
 
 
 
