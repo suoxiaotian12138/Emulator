@@ -19,7 +19,7 @@ from Databasemanage import LoopixDatamanager
 from cryptography.hazmat.primitives import serialization
 from Attack.Passive_detect import Passive_detect_by_record
 from twisted.internet.defer import succeed
-
+from Monitor.LocalMonitor import LocalMonitor
 
 
 class Loopix_node(DatagramProtocol):
@@ -47,6 +47,7 @@ class Loopix_node(DatagramProtocol):
 
         self.process = LoopixProcess(self)
         self.sender = Loopix_sender(self.transport, self.reactor)
+        self.monitor = LocalMonitor(self)
         self.message_maker = Loopix_message_maker(self)
 
 
@@ -66,8 +67,8 @@ class Loopix_node(DatagramProtocol):
             reactor.callLater(0, callback_func, result)
 
     def datagramReceived(self, data, addr):
-
         self.receiver.put((data,addr))
+        self.monitor.recv_time_record(data,addr)
 
 
     def handle_packet(self, packet):
@@ -132,7 +133,7 @@ class Loopix_Client(Loopix_node):
         self.plugin_initial()
         self.turn_on_processing()
         #self.message_maker.make_stream("LOOP")
-        reactor.callLater(50, self.message_maker.make_stream, "REAL")
+        reactor.callLater(10, self.message_maker.make_stream, "REAL")
 
     def plugin_initial(self,nodetype = "client"):
         self.crypto_node = LoopixCrypto(self)
@@ -142,6 +143,7 @@ class Loopix_Client(Loopix_node):
         self.receiver = LoopixReceiver(self)
         self.provider = self.routingtable["provider_info"]
         self.subscribe_provider()
+        self.monitor = LocalMonitor(self)
         self.message_maker = Loopix_message_maker(self)
         self.register()
         self.receiver.check_new_file()
@@ -218,6 +220,7 @@ class Loopix_Provider(Loopix_node):
         self.receiver = LoopixReceiver(self)
         self.process = LoopixProcess(self)
         self.sender = Loopix_sender(self.transport, self.reactor)
+        self.monitor = LocalMonitor(self)
         self.message_maker = Loopix_message_maker(self)
         self.storagebox_initial()
 

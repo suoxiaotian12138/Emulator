@@ -1,8 +1,10 @@
 
-import random
-from os import error
+
 from support_formats import Origin
 
+import hashlib
+import time
+import random
 import numpy as np
 import weakref
 from Routing.RoutingStrategy import execute_routing_strategy
@@ -11,32 +13,26 @@ from tools.sphinxmix import SphinxClient
 class Loopix_message_maker():
     def __init__(self, loopixnode):
         self._node_ref = weakref.ref(loopixnode) if loopixnode else None
-        self.config_params = loopixnode.config_params
         self.crypto = loopixnode.crypto_node
+        self.config_params = loopixnode.config_params
         self.output_buffer = loopixnode.receiver.output_buffer
         self.routingtable = loopixnode.routingtable
         self.reactor = loopixnode.reactor
-
+        self.name = loopixnode.name
         self.count = 1
 
-    def make_stream(self, mode="LOOP", message_function=None, packet_function=None):
-        """
-        发送消息：
-        - mode="real"  发送真实消息
-        - mode="loop"  发送Loop消息
-        - mode="drop"  发送Drop消息
-        """
-
+    def make_stream(self, mode="LOOP", **kwargs):
         loopix_node = self._node_ref()
+        trace_id = self.generate_trace_id()
+        info = {}
+        delay = 0
         if mode == "REAL":
             if not self.output_buffer.empty():
-                message,receiver = self.output_buffer.get()
-                type_flag = loopix_node.name + str(self.count)
-
-                # receiver = random.choice(self.routingtable["clients"])
-                # print(receiver)
+                message, receiver = self.output_buffer.get()
                 path = self.construct_full_path(receiver)
-                header, body = self.crypto.make_sphinx_packet(receiver, path, message, drop_flag=False,type_flag=type_flag,need_surb=True)
+                surb_trace_id = self.generate_trace_id()
+                header, body = self.crypto.make_sphinx_packet(receiver, path, message, trace_id=trace_id,
+                                                              need_surb=True, surb_trace_id=surb_trace_id)
                 packet = (header, body)
                 host = self.routingtable["provider_info"].host
                 port = self.routingtable["provider_info"].port
@@ -45,82 +41,115 @@ class Loopix_message_maker():
                 receiver = random.choice(self.routingtable["clients"])
                 path = self.construct_full_path(receiver)
                 drop_message = self.generate_random_string(self.config_params.NOISE_LENGTH)
-                type_flag = loopix_node.name + str(self.count)
-                header, body = self.crypto.make_sphinx_packet(receiver, path, drop_message, drop_flag=True,type_flag=type_flag)
-                self.count+=1
+                header, body = self.crypto.make_sphinx_packet(receiver, path, drop_message, drop_flag=True,
+                                                              trace_id=trace_id)
                 packet = (header, body)
                 host = path[0].host
                 port = path[0].port
+
             self.schedule_next_task(self.config_params.EXP_PARAMS_LOOPS, lambda: self.make_stream(mode="REAL"))
 
         elif mode == "LOOP":
             path = self.construct_full_path()
             loop_message = b'HT' + self.generate_random_string(self.config_params.NOISE_LENGTH)
-            type_flag = loopix_node.name + str(self.count)
-
-            header, body = self.crypto.make_sphinx_packet(loopix_node, path, loop_message,type_flag=type_flag)
+            header, body = self.crypto.make_sphinx_packet(loopix_node, path, loop_message, trace_id=trace_id)
             packet = (header, body)
             host = path[0].host
             port = path[0].port
+
             self.schedule_next_task(self.config_params.EXP_PARAMS_LOOPS, lambda: self.make_stream(mode="LOOP"))
 
-        else:
+        elif mode == "REPLY":
+            surb = kwargs.get('surb')
+            message = kwargs.get('message')
+            if surb is None or message is None:
+                raise ValueError("REPLY mode requires surb and message")
+
+            surb_id = surb['id']
+            surb_header = surb['header']
+            print("trace_id",surb_header[0][-2])
+            # 构造回复内容
+            reply_message = self.generate_reply_message(message)
+
+            reply_header, reply_body = SphinxClient.package_surb(loopix_node.sec_params, surb_header, reply_message)
+            packet = (reply_header, reply_body)
+
+            host = self.routingtable["provider_info"].host
+            port = self.routingtable["provider_info"].port
+
+            trace_id = 'surb'
+            info = {"surb_id": surb_id}
+
+        elif mode == "FORWARD":
+            header, body = kwargs.get('packet')
+            host,port = kwargs.get('addr')
+            delay = kwargs.get('delay')
+            packet = (header, body)
+
+        else:  # 其他情况
+            message_function = kwargs.get('message_function')
+            packet_function = kwargs.get('packet_function')
             receiver = random.choice(self.routingtable["clients"])
             path = self.construct_full_path(receiver)
+
             if callable(message_function):
                 message = message_function(self)
             else:
                 raise ValueError(f"不支持的 mode 类型：{mode}，且 packet_function 未定义。")
+
             if callable(packet_function):
-                custom_arg1 = "数据1"
-                custom_arg2 = 42
                 packet, host, port = packet_function(self, message, path)
             else:
                 raise ValueError(f"不支持的 mode 类型：{mode}，且 packet_function 未定义。")
 
+
+
+        self.reactor.callLater(delay, loopix_node.sender.send, packet, host, port)
+        loopix_node.monitor.log_event(
+            trace_id=trace_id,
+            event="send",
+            src=f"{loopix_node.host}:{loopix_node.port}",
+            dst=f"{host}:{port}",
+            info=info
+
+        )
         print(f"send a {mode} message")
-        print(type_flag)
-        self.reactor.callLater(0, loopix_node.sender.send, packet, host, port)
 
+    @staticmethod
+    def generate_reply_message(message):
 
-    def make_reply_message(self,surb, packet):
-        loopix_node = self._node_ref()
-        surb_id = surb['id']
-        surb_header = surb['header']
-
-        if packet.startswith(b'FILE_START:'):
-            file_id = packet[len(b'FILE_START:'):].decode()
+        if message.startswith(b'FILE_START:'):
+            file_id = message[len(b'FILE_START:'):].decode()
             reply_message = b'FILE_START:' + (str(file_id) + "received").encode('utf-8')
-
-        elif packet.startswith(b'FILE_DATA:'):
-            _, file_id, seq, data = packet.split(b':', 3)
+        elif message.startswith(b'FILE_DATA:'):
+            _, file_id, seq, data = message.split(b':', 3)
             file_id = file_id.decode()
             seq = int(seq.decode())
             reply_message = b'FILE_START:' + (str(file_id) + str(seq) + "received").encode('utf-8')
-
-        elif packet.startswith(b'FILE_END:'):
-            file_id = packet[len(b'FILE_END:'):].decode()
+        elif message.startswith(b'FILE_END:'):
+            file_id = message[len(b'FILE_END:'):].decode()
             reply_message = b'FILE_END:' + (str(file_id) + "received").encode('utf-8')
-
-        # reply_message = "self.generate_random_string(self.config_params.NOISE_LENGTH)"
-        # reply_message = reply_message.encode('utf-8') + surb_id
-
-        reply_header, reply_body = SphinxClient.package_surb(loopix_node.sec_params, surb_header, reply_message)
-        packet = (reply_header, reply_body)
-        print("send a reply message")
-
-        if 'provider_info' in loopix_node.routingtable:
-            provider = loopix_node.routingtable['provider_info']
-            host=provider.host
-            port=provider.port
-            loopix_node.sender.send(packet, host, port)
         else:
-            raise "node is not a client"
+            reply_message = b'received'
+
+        return reply_message
+
+
 
     def generate_dummy_messages(self, num):
         dummy_messages = [('DUMMY', self.generate_random_string(self.config_params.NOISE_LENGTH),
                     self.generate_random_string(self.config_params.NOISE_LENGTH)) for _ in range(num)]
         return dummy_messages
+
+
+    def generate_trace_id(self) -> str:
+        """
+        node_name: 当前节点名称或ID
+        counter: 本地递增计数（确保唯一）
+        """
+        raw = f"{self.name}-{self.count}-{time.time_ns()}-{random.randint(0, 1 << 32)}"
+        self.count += 1
+        return hashlib.sha256(raw.encode()).hexdigest()[:12]  # 12位16进制
 
     @staticmethod
     def generate_random_string(length):
