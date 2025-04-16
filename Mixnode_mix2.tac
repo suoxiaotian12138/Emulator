@@ -19,7 +19,7 @@ created_node.startProtocol()
 
 
 drop_list=[
-        (("127.0.0.1", 9993), 0),      # 50% drop
+        (("127.0.0.1", 9993), 0.5),      # 50% drop
     ]
 
 attacker = AttackerHook(

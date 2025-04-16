@@ -16,6 +16,7 @@ class AttackerHook:
         original_recv = protocol.datagramReceived
         original_class_send = protocol.sender.__class__.send
 
+
         def should_drop(addr):
             return addr in self.drop_dict and random.random() < self.drop_dict[addr]
 
@@ -32,8 +33,19 @@ class AttackerHook:
         # Hook send - 修改这部分
         def hooked_send(this, packet, host, port, resolved_adrs=None):
             target = (host, port)
+            header,body = packet
+
+            # packet_key = protocol.monitor.packet_fingerprint(packet)
+
             if should_drop(target):
                 print(f"[Attack-Send] DROP to {target}")
+                # if protocol.monitor:
+                #     protocol.monitor.log_event(
+                #         trace_id="attack_drop",
+                #         event="drop",
+                #         dst=target,
+                #         info={"reason": "attack", "packet_key": packet_key}
+                #     )
                 return None
             return original_class_send(this, packet, host, port, resolved_adrs)
 

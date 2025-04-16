@@ -14,12 +14,13 @@ class LoopixProcess():
     def read_packet(self, packet, mode="client"):
         loopix_node = self._node_ref()
         event = 'recv'
+        info = None
+
         mode_map = {
             "client": self.read_packet_client,
             "mixnode": self.read_packet_mixnode,
             "provider": self.read_packet_provider,
         }
-
         handler = mode_map.get(mode)
         if handler:
             flag, trace_id = handler(packet)
@@ -30,14 +31,13 @@ class LoopixProcess():
             elif flag == 'DROP':
                 event = 'drop'
                 info = {"reason": "drop_message"}
-
             else:
                 return None
         else:
             print(f"[ERROR] Unknown mode: {mode}")
             return None
 
-        #loopix_node.monitor.recv_log(packet = packet,trace_id = trace_id,event = event)
+        loopix_node.monitor.recv_log(packet = packet,trace_id = trace_id,event = event,info = info)
 
 
 
@@ -55,15 +55,15 @@ class LoopixProcess():
                     loopix_node.message_maker.make_stream("REPLY",surb=surb,message=message)
 
                 else:
-                    return None, None, None
+                    return None, None
             elif flag == "LOOP":
                 pass
             else:
-                return None, None, None
+                return None, None
 
             return flag, traceid
         else:
-            return None, None, None
+            return None, None
 
     def read_packet_mixnode(self, packet):
         """ 解码和处理收到的数据包 """
@@ -77,6 +77,8 @@ class LoopixProcess():
                 loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet)
             elif flag == "LOOP":
                 pass
+            else:
+                return None, None
             return flag, traceid
 
         except Exception as exp:
@@ -91,8 +93,15 @@ class LoopixProcess():
                 return None,None
             elif decoded_packet[0] == 'PULL':
                 pulled_messages = loopix_node.receiver.pull_messages(client_id=decoded_packet[1])
-                list(map(lambda pair: loopix_node.sender.send(pair[0], *pair[1]),
-                         zip(pulled_messages, itertools.repeat(loopix_node.receiver.clients[decoded_packet[1]]))))
+                client_id = decoded_packet[1]
+                if client_id not in loopix_node.receiver.clients:
+                    print(f"[ERROR] client_id '{client_id}' not registered in receiver.clients.")
+                    return None,None
+                client_addr = loopix_node.receiver.clients[client_id]
+                list(map(
+                    lambda pair: loopix_node.sender.send(pair[0], *pair[1]),
+                    zip(pulled_messages, itertools.repeat(client_addr))
+                ))
                 return None,None
             else:
                 flag, decrypted_packet, traceid = self.process_packet(decoded_packet)
@@ -103,8 +112,7 @@ class LoopixProcess():
                     else:
                         packet = (new_header, new_body)
                         loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet)
-                else:
-                    return None, None
+
             return flag, traceid
 
 

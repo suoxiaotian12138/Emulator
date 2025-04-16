@@ -34,6 +34,8 @@ class Loopix_message_maker():
                 surb_trace_id = self.generate_trace_id()
                 header, body = self.crypto.make_sphinx_packet(receiver, path, message, trace_id=trace_id,
                                                               need_surb=True, surb_trace_id=surb_trace_id)
+                print(body)
+
                 packet = (header, body)
                 host = self.routingtable["provider_info"].host
                 port = self.routingtable["provider_info"].port
@@ -44,6 +46,8 @@ class Loopix_message_maker():
                 drop_message = self.generate_random_string(self.config_params.NOISE_LENGTH)
                 header, body = self.crypto.make_sphinx_packet(receiver, path, drop_message, drop_flag=True,
                                                               trace_id=trace_id)
+
+
                 packet = (header, body)
                 host = path[0].host
                 port = path[0].port
@@ -110,7 +114,7 @@ class Loopix_message_maker():
         loopix_node.monitor.log_event(
             trace_id=trace_id,
             event="send",
-            dst=f"{host}:{port}",
+            dst=(host, port),
             info=info
         )
         print(f"send a {mode} message")

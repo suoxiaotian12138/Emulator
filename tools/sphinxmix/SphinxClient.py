@@ -217,11 +217,14 @@ def create_forward_message(params, nodelist, keys, dest, msg, assoc=None):
     mac = p.mu(p.hpi(secrets[nu-1]), payload)
     body =  mac + payload
 
+    # print("RAW ENCODED PAYLOAD:", encode((dest, msg)))
+    # print("PADDED PAYLOAD:", payload)
+
     # Compute the delta values
     delta = p.pi(p.hpi(secrets[nu-1]), body)
     for i in range(nu-2, -1, -1):
         delta = p.pi(p.hpi(secrets[i]), delta)
-
+    # print(delta)
     return header, delta
 
 def create_surb(params, nodelist, keys, dest, assoc=None):

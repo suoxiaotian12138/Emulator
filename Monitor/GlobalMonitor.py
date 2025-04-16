@@ -1,56 +1,56 @@
+import socket
+import json
+import threading
+import time
 
-from twisted.internet import reactor, task
-from twisted.internet.protocol import DatagramProtocol
+class GlobalMonitorServer:
+    def __init__(self, host='0.0.0.0', port=9999):
+        self.addr = (host, port)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(self.addr)
 
+        self.running = True
+        self.log_buffer = []  # 可替换为数据库/持久化存储
 
+        self.start_time = time.time()
 
+        print(f"[GlobalMonitor] Listening on {host}:{port}")
 
+    def start(self):
+        t = threading.Thread(target=self.listen_loop, daemon=True)
+        t.start()
 
+    def listen_loop(self):
+        while self.running:
+            try:
+                data, addr = self.sock.recvfrom(8192)
+                log = json.loads(data.decode())
+                self.handle_log(log, addr)
+            except Exception as e:
+                print(f"[Monitor-ERROR] {e}")
 
+    def handle_log(self, log: dict, addr):
+        self.log_buffer.append(log)
+        print(f"[Monitor-RECV] from {addr}: {log}")
 
-
-
-
-
-
-
-class GlobalMonitor(DatagramProtocol):
-    def __init__(self, name, port, host):
-        self.name = name
-        self.port = port
-        self.host = host
-        self.reactor = reactor
-
-    def startProtocol(self):
-        print("[%s] > Started" % self.name)
-        self.turn_on_processing()
-
-    def datagramReceived(self, data, addr):
-        self.receiver.put((data,addr))
-
-    def turn_on_processing(self):
-        reactor.callLater(20.0, self.get_and_addCallback, self.handle_packet)
-
-    def handle_packet(self, packet_addr):
-        """ 处理收到的 UDP 数据包 """
-        packet, addr = packet_addr
-
-        self.process(packet)
-        try:
-            # 再次调用 handle_packet 以实现循环监听
-            self.reactor.callFromThread(self.get_and_addCallback, self.handle_packet)
-        except Exception as exp:
-            print(f"[{self.name}] > Exception during scheduling next get: {str(exp)}")
-
-
-    def process(self,packet):
-
-
-    def log_delay(self, src, dst, delay):
-        ...
-
-    def log_packet(self, src, dst):
-        ...
+    def stop(self):
+        self.running = False
+        self.sock.close()
 
     def summary(self):
-        ...
+        print(f"Total logs collected: {len(self.log_buffer)}")
+        print(f"Running time: {time.time() - self.start_time:.2f}s")
+
+
+if __name__ == "__main__":
+    monitor = GlobalMonitorServer(host='127.0.0.1',port=9999)
+    monitor.start()
+
+    # 可持续运行：
+    try:
+        while True:
+            time.sleep(10)
+            monitor.summary()
+    except KeyboardInterrupt:
+        print("Shutting down monitor...")
+        monitor.stop()

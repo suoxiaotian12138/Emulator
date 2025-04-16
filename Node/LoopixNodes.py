@@ -68,7 +68,7 @@ class Loopix_node(DatagramProtocol):
 
     def datagramReceived(self, data, addr):
         self.receiver.put((data,addr))
-        #self.monitor.recv_time_record(data,addr)
+        self.monitor.recv_time_record(data,addr)
 
 
     def handle_packet(self, packet):
@@ -111,7 +111,7 @@ class Loopix_Mixnode(Loopix_node):
         """ 处理收到的 UDP 数据包 """
         packet, addr = packet_addr
 
-        self.process.read_packet(mode='mixnode', packet = packet)
+        self.process.read_packet(mode= 'mixnode' ,packet = packet)
         try:
             # 再次调用 handle_packet 以实现循环监听
             self.reactor.callFromThread(self.get_and_addCallback, self.handle_packet)
@@ -133,7 +133,7 @@ class Loopix_Client(Loopix_node):
         self.plugin_initial()
         self.turn_on_processing()
         #self.message_maker.make_stream("LOOP")
-        reactor.callLater(10, self.message_maker.make_stream, "REAL")
+        reactor.callLater(50, self.message_maker.make_stream, "REAL")
 
     def plugin_initial(self,nodetype = "client"):
         self.crypto_node = LoopixCrypto(self)
