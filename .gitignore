@@ -1,2 +1,10 @@
 /.venv/
+/.venv1/
 /.idea/
+Examples/WC/Topology/Client_client1.tac
+Examples/WC/Topology/Client_client2.tac
+database.db
+Examples/WC/Topology/Mixnode_mix1.tac
+Examples/WC/Topology/Mixnode_mix3.tac
+Examples/WC/Topology/Mixnode_mix2.tac
+Examples/WC/Topology/Provider_provider1.tac
