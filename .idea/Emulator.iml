@@ -5,11 +5,11 @@
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/.venv1" />
     </content>
+<<<<<<< HEAD
     <orderEntry type="jdk" jdkName="Python 3.9 (Emulator)" jdkType="Python SDK" />
+=======
+    <orderEntry type="jdk" jdkName="Python 3.9" jdkType="Python SDK" />
+>>>>>>> 9674d5aff4a823ee230a81ba3a55f4029d763cf4
     <orderEntry type="sourceFolder" forTests="false" />
-  </component>
-  <component name="PyDocumentationSettings">
-    <option name="format" value="PLAIN" />
-    <option name="myDocStringFormat" value="Plain" />
   </component>
 </module>

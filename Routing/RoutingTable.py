@@ -1,11 +1,12 @@
 from operator import attrgetter
 import itertools
+from time import sleep
 
 from Databasemanage.LoopixDatamanager import LoopixDatamanager
 #用于初始化匿名网络内的节点保存的路由表
 
 class LoopixRoutingTable:
-    def __init__(self, nodetype, provider=None):
+    def __init__(self, nodetype, name, provider=None):
         """
         初始化 Loopix 路由表
         :param nodetype: 节点类型 ('mixnode' 或 'client')
@@ -13,6 +14,7 @@ class LoopixRoutingTable:
         """
         self.nodetype = nodetype
         self.manager = LoopixDatamanager("database.db")
+        self.name = name
 
         if nodetype == "mixnode" or nodetype == "provider":
             self.routing_table = self._initialize_mixnode()
@@ -36,7 +38,7 @@ class LoopixRoutingTable:
         provider_info = self.manager.select_provider_by_name(provider)
         mixnodelist = self.manager.select_all_mixnodes()
         providerlist = self.manager.select_all_providers()
-        clientlist = self.manager.select_all_clients()
+        clientlist = self.manager.select_all_clients(self.name)
 
         return {
             "mixnodes": mixnodelist,

@@ -14,40 +14,54 @@ class LoopixDatamanager(Datamanager):
         self.cursor = self.db.cursor()
 
     def create_clients_table(self, table_name):
-        self.cursor.execute('''CREATE TABLE IF NOT EXISTS %s (id INTEGER PRIMARY KEY,
-                            name blob,
-                            port integer,
-                            host text,
-                            pubk blob,
-                            provider blob)''' % table_name)
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS %s (
+                id INTEGER PRIMARY KEY,
+                name BLOB,
+                port INTEGER,
+                host TEXT,
+                pubk BLOB,
+                provider BLOB,
+                UNIQUE(name, port, host)
+            )
+        ''' % table_name)
         self.db.commit()
-
 
     def create_providers_table(self, table_name):
-        self.cursor.execute('''CREATE TABLE IF NOT EXISTS %s (id INTEGER PRIMARY KEY,
-                            name blob,
-                            port integer,
-                            host text,
-                            pubk blob)''' % table_name)
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS %s (
+                id INTEGER PRIMARY KEY,
+                name BLOB,
+                port INTEGER,
+                host TEXT,
+                pubk BLOB,
+                UNIQUE(name, port, host)
+            )
+        ''' % table_name)
         self.db.commit()
 
-
     def create_mixnodes_table(self, table_name):
-        self.cursor.execute('''CREATE TABLE IF NOT EXISTS %s (id INTEGER PRIMARY KEY,
-                            name blob,
-                            port integer,
-                            host text,
-                            pubk blob,
-                            groupId integer)''' % table_name)
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS %s (
+                id INTEGER PRIMARY KEY,
+                name BLOB,
+                port INTEGER,
+                host TEXT,
+                pubk BLOB,
+                groupId INTEGER,
+                UNIQUE(name, port, host, groupId)
+            )
+        ''' % table_name)
         self.db.commit()
 
 
     def drop_table(self, table_name):
         self.cursor.execute("DROP TABLE IF EXISTS %s" % table_name)
 
-
     def insert_row_into_table(self, table_name, params):
-        insert_query = "INSERT INTO %s VALUES (%s)" % (table_name, ', '.join('?' for p in params))
+        insert_query = "INSERT OR IGNORE INTO %s VALUES (%s)" % (
+            table_name, ', '.join('?' for _ in params)
+        )
         self.cursor.execute(insert_query, params)
         self.db.commit()
 
@@ -69,10 +83,12 @@ class LoopixDatamanager(Datamanager):
             providers.append(Provider(str(prv[1]), prv[2], str(prv[3]), serialization.load_pem_public_key(prv[4].encode('utf-8'))))
         return providers
 
-    def select_all_clients(self):
+    def select_all_clients(self, name):
         clients_info = self.select_all('Clients')
         clients = []
         for client in clients_info:
+            if client[1] == name:  # 跳过自身
+                continue
             provider = self.select_provider_by_name(client[5])
             clients.append(Client(str(client[1]), client[2], client[3], serialization.load_pem_public_key(client[4].encode('utf-8')), provider))
         return clients

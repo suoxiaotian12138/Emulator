@@ -1,5 +1,8 @@
+from twisted.conch.ssh.connection import messages
+from twisted.logger import eventAsText
+
 from tools.Serialization import decode
-from tools.sphinxmix.SphinxClient import Relay_flag,Dest_flag
+from tools.sphinxmix.SphinxClient import Relay_flag,Dest_flag,Surb_flag
 import weakref
 import itertools
 
@@ -8,26 +11,76 @@ class LoopixProcess():
     def __init__(self, loopixnode):
         self._node_ref = weakref.ref(loopixnode) if loopixnode else None
 
-    def read_packet(self):
-        return
+    def read_packet(self, packet, mode="client"):
+        loopix_node = self._node_ref()
+        event = 'recv'
+        info = None
+
+        mode_map = {
+            "client": self.read_packet_client,
+            "mixnode": self.read_packet_mixnode,
+            "provider": self.read_packet_provider,
+        }
+        handler = mode_map.get(mode)
+        if handler:
+            flag, trace_id = handler(packet)
+            if flag == 'NEW' or flag == 'LOOP':
+                event = 'dest'
+            elif flag == 'ROUT':
+                event = 'recv'
+            elif flag == 'DROP':
+                event = 'drop'
+                info = {"reason": "drop_message"}
+            else:
+                return None
+        else:
+            print(f"[ERROR] Unknown mode: {mode}")
+            return None
+
+        loopix_node.monitor.recv_log(packet = packet,trace_id = trace_id,event = event,info = info)
+
+
 
     def read_packet_client(self, packet):
         decoded_packet = decode(packet)
+        loopix_node = self._node_ref()
+
         if not decoded_packet[0] == 'DUMMY':
-            flag, decrypted_packet = self.process_packet(decoded_packet)
-            return flag, decrypted_packet
+            flag, decrypted_packet, traceid = self.process_packet(decoded_packet)
+            if flag == "NEW":
+                message = decrypted_packet['message']
+                loopix_node.receiver.put_real_message(message)
+                if 'surb' in decrypted_packet:
+                    surb = decrypted_packet['surb']
+                    loopix_node.message_maker.make_stream("REPLY",surb=surb,message=message)
+
+                else:
+                    return None, None
+            elif flag == "LOOP":
+                pass
+            else:
+                return None, None
+
+            return flag, traceid
+        else:
+            return None, None
 
     def read_packet_mixnode(self, packet):
         """ 解码和处理收到的数据包 """
         loopix_node = self._node_ref()
         try:
             decoded_packet = decode(packet)
-            flag, decrypted_packet = self.process_packet(decoded_packet)
+            flag, decrypted_packet, traceid = self.process_packet(decoded_packet)
             if flag == "ROUT":
                 delay, new_header, new_body, next_addr, _ = decrypted_packet
-                loopix_node.reactor.callFromThread(self._send_or_delay, delay, (new_header, new_body), next_addr)
+                packet = (new_header, new_body)
+                loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet)
             elif flag == "LOOP":
-                print(f"[{loopix_node.name}] > Received loop message")
+                pass
+            else:
+                return None, None
+            return flag, traceid
+
         except Exception as exp:
             print("ERROR:", str(exp))
 
@@ -36,28 +89,33 @@ class LoopixProcess():
         try:
             decoded_packet = decode(packet)
             if decoded_packet[0] == 'SUBSCRIBE':
-                print("receive a sub message")
                 self._subscribe_client(decoded_packet[1:])
+                return None,None
             elif decoded_packet[0] == 'PULL':
-                print("pull a message")
                 pulled_messages = loopix_node.receiver.pull_messages(client_id=decoded_packet[1])
-                list(map(lambda pair: loopix_node.sender.send(pair[0], *pair[1]),
-                         zip(pulled_messages, itertools.repeat(loopix_node.receiver.clients[decoded_packet[1]]))))
+                client_id = decoded_packet[1]
+                if client_id not in loopix_node.receiver.clients:
+                    print(f"[ERROR] client_id '{client_id}' not registered in receiver.clients.")
+                    return None,None
+                client_addr = loopix_node.receiver.clients[client_id]
+                list(map(
+                    lambda pair: loopix_node.sender.send(pair[0], *pair[1]),
+                    zip(pulled_messages, itertools.repeat(client_addr))
+                ))
+                return None,None
             else:
-                flag, decrypted_packet = self.process_packet(decoded_packet)
+                flag, decrypted_packet, traceid = self.process_packet(decoded_packet)
                 if flag == "ROUT":
                     delay, new_header, new_body, next_addr, next_name = decrypted_packet
                     if loopix_node.is_assigned_client(next_name):
-                        loopix_node.put_into_storage(next_name, (new_header, new_body))
+                        loopix_node.receiver.put_into_storage(next_name, (new_header, new_body))
                     else:
-                        loopix_node.reactor.callFromThread(self._send_or_delay,
-                                                    delay,
-                                                    (new_header, new_body),
-                                                    next_addr)
-                elif flag == "LOOP":
-                    print("[%s] > Received loop message" % loopix_node.name)
-                elif flag == "DROP":
-                    print("[%s] > Received drop message" % loopix_node.name)
+                        packet = (new_header, new_body)
+                        loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet)
+
+            return flag, traceid
+
+
         except Exception as exp:
             print("ERROR: ", str(exp))
 
@@ -69,27 +127,31 @@ class LoopixProcess():
 
         if routing_flag == Relay_flag:
             # 处理中继节点
-            print("drop message")
-            next_addr, drop_flag, type_flag, delay, next_name = meta_info[0]
-            return ("DROP", []) if drop_flag else ("ROUT", [delay, new_header, new_body, next_addr, next_name])
+            print("receive a drop message")
+            next_addr, drop_flag, trace_id, delay, next_name = meta_info[0]
+
+            return ("DROP", [], trace_id) if drop_flag else ("ROUT", [delay, new_header, new_body, next_addr, next_name], trace_id)
 
         elif routing_flag == Dest_flag:
             # 处理目标节点
-            print("dest message")
-            dest, message = loopix_node.crypto_node.handle_received_forward(new_body, mac)
-            if dest == [loopix_node.host, loopix_node.port, loopix_node.name]:
-                return ("LOOP", [message]) if message.startswith(b'HT') else ("NEW", message)
+            print("receive a dest message")
+            dest, decoded_packet = loopix_node.crypto_node.handle_received_forward(new_body, mac)
+            if dest[:-1] == [loopix_node.host, loopix_node.port, loopix_node.name]:
+                message = decoded_packet['message']
+                trace_id = dest[-1]
+                return ("LOOP", decoded_packet, trace_id) if message.startswith(b'HT') else ("NEW", decoded_packet, trace_id)
             else:
-                return "ERROR", []
-        else:
-            print(routing_flag)
+                return ("ERROR", [], None)
+
+        elif routing_flag == Surb_flag:
+            print("receive a surb message")
+            surb_id = routing[-1]
+            trace_id = routing[1][-1]
+            message = loopix_node.crypto_node.handle_receive_surb(new_body, surb_id)
+            return ("SURB", message, trace_id)
 
 
-    def _send_or_delay(self, delay, packet, addr):
-        """ 根据延迟发送或处理包 """
-        host,port = addr
-        loopix_node = self._node_ref()
-        loopix_node.reactor.callLater(delay, loopix_node.sender.send, packet, host,port)
+
 
     def _subscribe_client(self, client_data):
         loopix_node = self._node_ref()

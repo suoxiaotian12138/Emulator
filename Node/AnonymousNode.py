@@ -1,15 +1,14 @@
 from Node.LoopixNodes import *
-from Examples.WC.Nodes.AnomalyNodeAnaSender import Loopix_Sender_with_MixBarrage
+
 
 
 class AnonymousNode:
-    def __init__(self, ip: str, name, port, privk=None, pubk=None):
+    def __init__(self, ip:str, name, port, privk=None, pubk=None):
         self.name = name
         self.port = port
         self.ip = ip
         self.privk = privk
         self.pubk = pubk
-
     """
     Methods for selecting transmission paths in anonymous networks
     Must be implemented by subclasses
@@ -20,16 +19,14 @@ class AnonymousNode:
     def startProtocol(self):
         return
 
-
 anonymous_networks = {
     "Loopix": {
         "Client": Loopix_Client,
         "Mixnode": Loopix_Mixnode,
         "Provider": Loopix_Provider,
-        "MixBarrageClient": Loopix_Sender_with_MixBarrage,
+
     },
 }
-
 
 # **动态创建匿名网络节点的工厂方法**
 def Create_anonymous_node(network_type, node_type, *args, **kwargs):

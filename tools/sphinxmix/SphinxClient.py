@@ -168,9 +168,9 @@ def create_header(params, nodelist, keys, dest, assoc=None):
     # The os.urandom used to be a string of 0x00 bytes, but that's wrong
     
     final_routing = pack("b", len(dest)) + dest
-
     len_meta = sum(map(len, node_meta[1:]))
     random_pad_len = (max_len - 32) - len_meta - (nu-1)*p.k - len(final_routing)
+
 
     if random_pad_len < 0:
         raise SphinxException("Insufficient space routing info") 
@@ -217,11 +217,14 @@ def create_forward_message(params, nodelist, keys, dest, msg, assoc=None):
     mac = p.mu(p.hpi(secrets[nu-1]), payload)
     body =  mac + payload
 
+    # print("RAW ENCODED PAYLOAD:", encode((dest, msg)))
+    # print("PADDED PAYLOAD:", payload)
+
     # Compute the delta values
     delta = p.pi(p.hpi(secrets[nu-1]), body)
     for i in range(nu-2, -1, -1):
         delta = p.pi(p.hpi(secrets[i]), delta)
-
+    # print(delta)
     return header, delta
 
 def create_surb(params, nodelist, keys, dest, assoc=None):
@@ -289,6 +292,8 @@ def receive_surb(params, keytuple, delta):
     if delta[:p.k] == p.mu(ktilde, delta[p.k:]):
         msg = unpad_body(delta[p.k:])
     else:
+        msg = unpad_body(delta[p.k:])
+        print(msg)
         raise SphinxException("Modified SURB Body")
     
     return msg

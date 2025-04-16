@@ -38,9 +38,8 @@ class LoopixNodeSetup:
                 self.group = None  # 仍然设为空值，不影响程序运行
 
         self.nodetype = node_type
-        sec_params = SphinxParams(header_len=1024)
-        crypto = LoopixCrypto(sec_params)
-        setup = crypto.Loopix_setup()
+        sec_params = SphinxParams(header_len=1024, body_len=3072)
+        setup = LoopixCrypto.Loopix_setup()
         curve, private_key, public_key, generator = setup
 
 
