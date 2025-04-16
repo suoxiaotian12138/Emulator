@@ -38,10 +38,11 @@ class LoopixNodeSetup:
                 self.group = None  # 仍然设为空值，不影响程序运行
 
         self.nodetype = node_type
-        sec_params = SphinxParams(header_len=1024, body_len=3072)
         setup = LoopixCrypto.Loopix_setup()
         curve, private_key, public_key, generator = setup
-
+        sec_params = SphinxParams(header_len=1024, body_len=3072)
+        sec_params.secret = private_key
+        print(sec_params.secret)
 
         created_node = Create_anonymous_node(self.networktype,self.nodetype,sec_params, self.name, self.port, self.host,private_key,public_key,self.group)
 

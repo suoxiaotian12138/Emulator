@@ -26,5 +26,7 @@ echo Running Mixnode3.tac...
 start cmd /k twistd -n  -y D:\project\Oniverse\Mixnode_mix3.tac
 timeout /t 1 /nobreak >nul
 
+
+
 echo All processes have been started.
 pause
