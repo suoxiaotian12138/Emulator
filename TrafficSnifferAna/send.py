@@ -21,7 +21,7 @@ for pcap_file in sorted(pcap_files):
         packets = rdpcap(full_path)
         for pkt in packets:
             sendp(pkt, iface=iface, verbose=False)
-            time.sleep(0.01)  # 可调节速率
+            time.sleep(0.1)  # 可调节速率
     except Exception as e:
         print(f"发送出错: {e}")
 

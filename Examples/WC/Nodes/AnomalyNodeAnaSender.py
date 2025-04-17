@@ -15,6 +15,8 @@ import numpy as np
 import random
 from itertools import combinations
 
+output_path = "your_output_file.txt"
+
 
 def find_rank_n_paths(matrix, all_paths, n, top_k_candidates=5):
     num_paths = matrix.shape[0]
@@ -98,7 +100,7 @@ class LoopixSenderWithMixBarrage(Loopix_Client):
         self.flow_frequency = {}
         self.flow_id_pair = {}
         self.all_node_dict = {}
-
+        self.now_probe_round += 1
         # 引导每次探测
         self.now_node_list = []
         self.probe_matrix = []
@@ -211,8 +213,14 @@ class LoopixSenderWithMixBarrage(Loopix_Client):
         log_x = res.x
         x = np.exp(log_x)  # 恢复出 x ∈ [0,1]
         # 第五步：输出 node.name 与 x
+        badnode = []
         for idx, val in enumerate(x):
+            if val < 0.9:
+                badnode.append(f"{id_to_node[idx]}({val:.2f})")
             print(f"{id_to_node[idx]}: {val:.4f}")
+
+        with open(output_path, "w") as f:
+            f.write(", ".join(badnode))
         self.begin_probe()
 
     def handle_packet(self, packet_addr):

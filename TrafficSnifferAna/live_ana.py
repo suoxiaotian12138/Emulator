@@ -31,7 +31,9 @@ tags = {
     'youku': 18,
     'youtube': 19,
 }
-
+prediction_cache = []
+last_flush_time = time.time()
+output_path = "predictions.txt"  # 输出路径
 # 模型输入参数
 chunk = 3
 long = 256
@@ -97,8 +99,19 @@ def flow_to_tensor(flow_packets):
     return torch.tensor(x, dtype=torch.float32).to(device).unsqueeze(0)  # shape (1, chunk, long)
 
 
+def flush_predictions():
+    global prediction_cache
+    if prediction_cache:
+        with open(output_path, "w") as f:  # 追加写入
+            for d in prediction_cache:
+                f.write(f"{d}\n")
+        prediction_cache = []
+
+
 # 流处理逻辑
 def handle_packet(pkt):
+    global last_flush_time
+
     if not is_valid_tcp(pkt):
         return
 
@@ -115,8 +128,16 @@ def handle_packet(pkt):
             output = model(x_tensor)
             pred = torch.argmax(output, dim=1).item()
             key = next((k for k, v in tags.items() if v == pred), None)
-            print(f"[{time.strftime('%X')}] 流预测结果: 类别 {key}")
-        flow_dict.pop(flow_key)  # 预测后删除流（也可以选择保留）
+            result_str = f"[{time.strftime('%X')}] Predicted: Class {key}"
+            prediction_cache.append(result_str)
+            print(f"[{time.strftime('%X')}] Predicted: Class {key}")
+        flow_dict.pop(flow_key)
+
+    # 如果已经超过 1 秒，就刷新一次
+    now = time.time()
+    if now - last_flush_time >= 3.0:
+        flush_predictions()
+        last_flush_time = now
 
 
 # 启动抓包
