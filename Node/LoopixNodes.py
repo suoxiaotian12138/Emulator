@@ -171,7 +171,7 @@ class Loopix_Client(Loopix_node):
 
     def turn_on_processing(self):
         # self.retrieve_messages()
-        reactor.callLater(20.0, self.get_and_addCallback, self.handle_packet)
+        reactor.callLater(1, self.get_and_addCallback, self.handle_packet)
 
     def handle_packet(self, packet_addr):
         """ 处理收到的 UDP 数据包 """

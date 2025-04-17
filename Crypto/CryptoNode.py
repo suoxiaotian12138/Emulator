@@ -1,5 +1,6 @@
 import json
 import pickle
+import random
 
 from support_formats import Origin
 import os
@@ -7,16 +8,19 @@ import numpy as np
 from tools.Serialization import encode
 from tools.sphinxmix import SphinxException
 from tools.sphinxmix.SphinxNode import sphinx_process
-from tools.sphinxmix.SphinxClient import PFdecode, Nenc, create_forward_message, receive_forward, create_surb, receive_surb
+from tools.sphinxmix.SphinxClient import PFdecode, Nenc, create_forward_message, receive_forward, create_surb, \
+    receive_surb
 from cryptography.hazmat.primitives.asymmetric import ec
 import weakref
 from tools.json_reader import JSONReader
 import sys
 
+
 class LoopixCrypto(object):
     def __init__(self, loopixnode):
         self._node_ref = weakref.ref(loopixnode) if loopixnode else None
         self.sec_params = loopixnode.sec_params
+        self.id = random.Random()
         self.jsonReader = JSONReader(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json'))
         self.config = self.jsonReader.get_loopix_config_params("parametersMixnodes")
         self.surb_key_list = {}
@@ -30,7 +34,8 @@ class LoopixCrypto(object):
         generator = public_key.public_numbers().x, public_key.public_numbers().y
         return curve, private_key, public_key, generator
 
-    def make_sphinx_packet(self, receiver, path, message, need_surb = False, drop_flag=False, trace_id=None, surb_trace_id=None):
+    def make_sphinx_packet(self, receiver, path, message, need_surb=False, drop_flag=False, trace_id=None,
+                           surb_trace_id=None):
         keys_nodes = self.take_nodes_keys(path)
         routing_info = self.take_nodes_routing(path, drop_flag, trace_id)
         dest = (receiver.host, receiver.port, receiver.name, trace_id)
@@ -43,6 +48,7 @@ class LoopixCrypto(object):
                     'id': surb_id
                 }
             }
+            print('SURB:', surb_id)
             self.surb_key_list[surb_id] = surb_key
         else:
             payload = {
@@ -54,7 +60,6 @@ class LoopixCrypto(object):
         return header, body
 
     def make_sphinx_surb_block(self, path, trace_id):
-        print("make_sphinx_surb_block", trace_id)
         loopix_node = self._node_ref()
         Zero_hop = Origin(loopix_node.name, loopix_node.port, loopix_node.host, loopix_node.pubk)
         backward_path = list(reversed(path[:-1]))
@@ -93,9 +98,14 @@ class LoopixCrypto(object):
     def handle_received_forward(self, packet, mac):
         return receive_forward(self.sec_params, mac, packet)
 
-    def handle_receive_surb(self, packet, surb_id):
+    def handle_receive_surb(self, packet, surb_id, surbKeys):
+        if surbKeys is not None:
+            if surb_id in surbKeys:
+
+                surb_key = surbKeys[surb_id]
+                return receive_surb(self.sec_params, surb_key, packet)
         if surb_id in self.surb_key_list:
             surb_key = self.surb_key_list[surb_id]
-            return receive_surb(self.sec_params, surb_key ,packet)
+            return receive_surb(self.sec_params, surb_key, packet)
         else:
             raise SphinxException("Unknown surb_id: {}".format(surb_id))

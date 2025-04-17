@@ -39,20 +39,23 @@ class LoopixProcess():
 
         loopix_node.monitor.recv_log(packet=packet, trace_id=trace_id, event=event, info=info)
 
-    def read_packet_client(self, packet):
+    def read_packet_client(self, packet, replySURB=True, surbKeys=None):
         decoded_packet = decode(packet)
         loopix_node = self._node_ref()
-
+        message = ''
         if not decoded_packet[0] == 'DUMMY':
-            flag, decrypted_packet, traceid = self.process_packet(decoded_packet)
+            flag, decrypted_packet, traceid = self.process_packet(decoded_packet, surbKeys)
             if flag == "NEW":
                 message = decrypted_packet['message']
-                loopix_node.receiver.put_real_message(message)
+                if replySURB:
+                    loopix_node.receiver.put_real_message(message)
                 if 'surb' in decrypted_packet:
                     surb = decrypted_packet['surb']
-                    loopix_node.message_maker.make_stream("REPLY", surb=surb, message=message)
-
-            return flag, traceid, message
+                    if replySURB:
+                        loopix_node.message_maker.make_stream("REPLY", surb=surb, message=message)
+            if flag == "SURB":
+                message = decrypted_packet
+            return flag, traceid, (message, decrypted_packet)
         else:
             return None, None
 
@@ -111,7 +114,7 @@ class LoopixProcess():
         except Exception as exp:
             print("ERROR: ", str(exp))
 
-    def process_packet(self, packet):
+    def process_packet(self, packet, surbKeys=None):
         # 解密Sphinx包
         loopix_node = self._node_ref()
         tag, routing, new_header, new_body, mac = loopix_node.crypto_node.decrypt_sphinx_packet(packet,
@@ -124,7 +127,7 @@ class LoopixProcess():
             next_addr, drop_flag, trace_id, delay, next_name = meta_info[0]
 
             return ("DROP", [], trace_id) if drop_flag else (
-            "ROUT", [delay, new_header, new_body, next_addr, next_name], trace_id)
+                "ROUT", [delay, new_header, new_body, next_addr, next_name], trace_id)
 
         elif routing_flag == Dest_flag:
             # 处理目标节点
@@ -134,7 +137,7 @@ class LoopixProcess():
                 message = decoded_packet['message']
                 trace_id = dest[-1]
                 return ("LOOP", decoded_packet, trace_id) if message.startswith(b'HT') else (
-                "NEW", decoded_packet, trace_id)
+                    "NEW", decoded_packet, trace_id)
             else:
                 return ("ERROR", [], None)
 
@@ -142,7 +145,7 @@ class LoopixProcess():
             print("receive a surb message")
             surb_id = routing[-1]
             trace_id = routing[1][-1]
-            message = loopix_node.crypto_node.handle_receive_surb(new_body, surb_id)
+            message = loopix_node.crypto_node.handle_receive_surb(new_body, surb_id, surbKeys)
             return ("SURB", message, trace_id)
 
     def _subscribe_client(self, client_data):

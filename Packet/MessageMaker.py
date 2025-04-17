@@ -132,7 +132,7 @@ class Loopix_message_maker():
             file_id = message[len(b'FILE_END:'):].decode()
             reply_message = b'FILE_END:' + (str(file_id) + "received").encode('utf-8')
         else:
-            reply_message = b'received'
+            reply_message =message
 
         return reply_message
 
