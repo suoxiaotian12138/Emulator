@@ -268,10 +268,8 @@ def package_surb(params, nymtuple, message):
 
 def receive_forward(params, mac_key, delta):
     """ Decodes the body of a forward message, and checks its MAC tag."""
-    
     if delta[:params.k] != params.mu(mac_key, delta[params.k:]):
         raise SphinxException("Modified Body")
-
     delta = unpad_body(delta[params.k:])
     return decode(delta)
 

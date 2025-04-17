@@ -133,7 +133,7 @@ class Loopix_Client(Loopix_node):
         self.plugin_initial()
         self.turn_on_processing()
         #self.message_maker.make_stream("LOOP")
-        reactor.callLater(50, self.message_maker.make_stream, "REAL")
+        reactor.callLater(10, self.message_maker.make_stream, "REAL")
 
     def plugin_initial(self,nodetype = "client"):
         self.crypto_node = LoopixCrypto(self)
@@ -153,12 +153,12 @@ class Loopix_Client(Loopix_node):
 
         def safe_send(msg, host, port):
             try:
-                print("[LoopingCall] send start")
+                # print("[LoopingCall] send start")
 
                 # 关键：只做调度，不做耗时
                 self.sender.send(msg, host, port)
 
-                print("[LoopingCall] send finished")
+                # print("[LoopingCall] send finished")
 
             except Exception as e:
                 print("[LoopingCall] send error:", e)

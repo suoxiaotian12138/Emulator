@@ -36,7 +36,6 @@ class LoopixReceiver():
         self.data_buffer = defaultdict(list)
         self.storage_directory = "D:/project/Oniverse/file_received/" + loopixnode.name
 
-
     def __contains__(self, key):
         return key in self.queue
 
@@ -64,17 +63,18 @@ class LoopixReceiver():
             self.storage_inbox[client_id] = [packet]
 
     def pull_messages(self, client_id):
-        print("pulling messages from {}".format(client_id))
+        # print("pulling messages from {}".format(client_id))
         dummy_messages = []
         popped_messages = self.get_clients_messages(client_id)
-
+        # print('popped messages', popped_messages)
         if len(popped_messages) < self.config_params.MAX_RETRIEVE:
             dummy_messages = self.generate_dummy_messages(
                 self.config_params.MAX_RETRIEVE - len(popped_messages))
-        return popped_messages + dummy_messages
+        # return popped_messages + dummy_messages
+        return popped_messages
 
     def get_clients_messages(self, client_id):
-        print(self.storage_inbox.keys())
+        # print(self.storage_inbox.keys())
         if client_id in self.storage_inbox.keys():
             messages = self.storage_inbox[client_id]
             popped, rest = messages[:self.config_params.MAX_RETRIEVE], messages[self.config_params.MAX_RETRIEVE:]
@@ -84,7 +84,7 @@ class LoopixReceiver():
 
     def generate_dummy_messages(self, num):
         dummy_messages = [('DUMMY', self.generate_random_string(self.config_params.NOISE_LENGTH),
-                    self.generate_random_string(self.config_params.NOISE_LENGTH)) for _ in range(num)]
+                           self.generate_random_string(self.config_params.NOISE_LENGTH)) for _ in range(num)]
         return dummy_messages
 
     @staticmethod
@@ -154,8 +154,6 @@ class LoopixReceiver():
                 csvW.writerows(safe_logs)
             self.logs = []
 
-
-
     def check_new_file(self):
         if not os.path.exists(self.target_dir):
             os.makedirs(self.target_dir)
@@ -178,7 +176,7 @@ class LoopixReceiver():
                 for seq, i in enumerate(range(0, len(content), self.config_params.NOISE_LENGTH)):
                     chunk = content[i:i + self.config_params.NOISE_LENGTH]
                     header = b'FILE_DATA:' + file_id.encode() + b':' + str(seq).encode()
-                    self.output_buffer.put((header + b':' + chunk,receiver))
+                    self.output_buffer.put((header + b':' + chunk, receiver))
 
                 # 添加结束标志
                 self.output_buffer.put((b'FILE_END:' + file_id.encode(), receiver))

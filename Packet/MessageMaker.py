@@ -52,7 +52,7 @@ class Loopix_message_maker():
                 host = path[0].host
                 port = path[0].port
 
-            self.schedule_next_task(self.config_params.EXP_PARAMS_LOOPS, lambda: self.make_stream(mode="REAL"))
+            # self.schedule_next_task(self.config_params.EXP_PARAMS_LOOPS, lambda: self.make_stream(mode="REAL"))
 
         elif mode == "LOOP":
             path = self.construct_full_path()
