@@ -100,13 +100,13 @@ class LoopixProcess():
             #     return None,None
             else:
                 flag, decrypted_packet, traceid = self.process_packet(decoded_packet)
-                # if flag == "ROUT":
-                delay, new_header, new_body, next_addr, next_name = decrypted_packet
-                #     if loopix_node.is_assigned_client(next_name):
-                #         loopix_node.receiver.put_into_storage(next_name, (new_header, new_body))
-                #     else:
-                packet = (new_header, new_body)
-                loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet)
+                if flag == "ROUT":
+                    delay, new_header, new_body, next_addr, next_name = decrypted_packet
+                    if loopix_node.is_assigned_client(next_name):
+                        loopix_node.receiver.put_into_storage(next_name, (new_header, new_body))
+                    else:
+                        packet = (new_header, new_body)
+                        loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet,traceid = traceid)
 
             return flag, traceid
 

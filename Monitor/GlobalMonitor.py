@@ -76,8 +76,8 @@ class GlobalMonitorServer:
 
     def handle_log(self, log: dict):
         trace_id = log.get("trace_id")
-        print(trace_id)
         if not trace_id:
+            print(log)
             print("asdaddsadsaasdasdsdaasd")
             return
 
