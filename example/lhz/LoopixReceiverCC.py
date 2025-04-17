@@ -37,7 +37,6 @@ class LoopixReceiverCC(LoopixReceiver):
         super().put(obj)
         print(f"Received packet of length {len(obj[0])} at time {time.time()}")
         if self._on and self._sender_addr == obj[1]:
-            print(f"append a packet from {self._sender_addr} at time {time.time()}")
             self._pkt_arrival_times.append(time.time())
             if len(self._pkt_arrival_times) > self._output_batch_size:
                 self._cc_receive_batch()
