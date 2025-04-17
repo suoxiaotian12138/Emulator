@@ -1,13 +1,7 @@
 import os
-from symbol import import_stmt
-from time import sleep
-
 from twisted.internet import reactor, task
 from twisted.internet.protocol import DatagramProtocol
-from queue import Queue
-import twisted.names.client
 from twisted.internet.defer import Deferred
-import sys
 from Relay.PacketSender import Loopix_sender
 from Relay.PacketReceiver import LoopixReceiver
 from Relay.PacketProccess import LoopixProcess
@@ -17,7 +11,6 @@ from Crypto.CryptoNode import LoopixCrypto
 from tools.json_reader import JSONReader
 from Databasemanage import LoopixDatamanager
 from cryptography.hazmat.primitives import serialization
-from Attack.Passive_detect import Passive_detect_by_record
 from twisted.internet.defer import succeed
 from Monitor.LocalMonitor import LocalMonitor
 
@@ -33,6 +26,8 @@ class Loopix_node(DatagramProtocol):
         self.group = 0
         self.sec_params = sec_params
         self.jsonReader = JSONReader(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json'))
+        self.monitor = LocalMonitor(self)
+
         self.reactor = reactor
 
     def startProtocol(self):
@@ -44,10 +39,8 @@ class Loopix_node(DatagramProtocol):
         self.routingtable = LoopixRoutingTable(nodetype,self.name).routing_table
         self.crypto_node = LoopixCrypto(self)
         self.receiver = LoopixReceiver(self)
-
         self.process = LoopixProcess(self)
         self.sender = Loopix_sender(self.transport, self.reactor)
-        self.monitor = LocalMonitor(self)
         self.message_maker = Loopix_message_maker(self)
 
 
@@ -142,8 +135,7 @@ class Loopix_Client(Loopix_node):
         self.routingtable = LoopixRoutingTable(nodetype,self.name).routing_table
         self.receiver = LoopixReceiver(self)
         self.provider = self.routingtable["provider_info"]
-        self.subscribe_provider()
-        self.monitor = LocalMonitor(self)
+        # self.subscribe_provider()
         self.message_maker = Loopix_message_maker(self)
         self.register()
         self.receiver.check_new_file()
@@ -153,13 +145,8 @@ class Loopix_Client(Loopix_node):
 
         def safe_send(msg, host, port):
             try:
-                # print("[LoopingCall] send start")
-
                 # 关键：只做调度，不做耗时
                 self.sender.send(msg, host, port)
-
-                # print("[LoopingCall] send finished")
-
             except Exception as e:
                 print("[LoopingCall] send error:", e)
 
@@ -183,7 +170,7 @@ class Loopix_Client(Loopix_node):
         lc.start(self.config_params.TIME_PULL, now=True)
 
     def turn_on_processing(self):
-        self.retrieve_messages()
+        # self.retrieve_messages()
         reactor.callLater(20.0, self.get_and_addCallback, self.handle_packet)
 
     def handle_packet(self, packet_addr):
@@ -220,7 +207,6 @@ class Loopix_Provider(Loopix_node):
         self.receiver = LoopixReceiver(self)
         self.process = LoopixProcess(self)
         self.sender = Loopix_sender(self.transport, self.reactor)
-        self.monitor = LocalMonitor(self)
         self.message_maker = Loopix_message_maker(self)
         self.storagebox_initial()
 

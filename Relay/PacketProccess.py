@@ -37,7 +37,9 @@ class LoopixProcess():
             print(f"[ERROR] Unknown mode: {mode}")
             return None
 
-        loopix_node.monitor.recv_log(packet=packet, trace_id=trace_id, event=event, info=info)
+        loopix_node.monitor.recv_log(packet = packet,trace_id = trace_id,event = event,info = info)
+
+
 
     def read_packet_client(self, packet):
         decoded_packet = decode(packet)
@@ -50,13 +52,8 @@ class LoopixProcess():
                 loopix_node.receiver.put_real_message(message)
                 if 'surb' in decrypted_packet:
                     surb = decrypted_packet['surb']
-                    loopix_node.message_maker.make_stream("REPLY", surb=surb, message=message)
-                else:
-                    return message
-            elif flag == "LOOP":
-                pass
-            else:
-                return None, None
+                    loopix_node.message_maker.make_stream("REPLY",surb=surb,message=message)
+
             return flag, traceid
         else:
             return None, None
@@ -70,7 +67,7 @@ class LoopixProcess():
             if flag == "ROUT":
                 delay, new_header, new_body, next_addr, _ = decrypted_packet
                 packet = (new_header, new_body)
-                loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet)
+                loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet,traceid = traceid)
             elif flag == "LOOP":
                 pass
             else:
@@ -86,32 +83,28 @@ class LoopixProcess():
             decoded_packet = decode(packet)
             if decoded_packet[0] == 'SUBSCRIBE':
                 self._subscribe_client(decoded_packet[1:])
-                return None, None
-            elif decoded_packet[0] == 'PULL':
-                print("pull a message", len(loopix_node.receiver.storage_inbox.get(decoded_packet[1], [])))
-                pulled_messages = loopix_node.receiver.pull_messages(client_id=decoded_packet[1])
-                print("AFTER pull a message", len(loopix_node.receiver.storage_inbox.get(decoded_packet[1], [])))
-
-                client_id = decoded_packet[1]
-                if client_id not in loopix_node.receiver.clients:
-                    print(f"[ERROR] client_id '{client_id}' not registered in receiver.clients.")
-                    return None, None
-                client_addr = loopix_node.receiver.clients[client_id]
-                list(map(
-                    lambda pair: loopix_node.sender.send(pair[0], *pair[1]),
-                    zip(pulled_messages, itertools.repeat(client_addr))
-                ))
-                return None, None
+                return None,None
+            # elif decoded_packet[0] == 'PULL':
+            #     pulled_messages = loopix_node.receiver.pull_messages(client_id=decoded_packet[1])
+            #     client_id = decoded_packet[1]
+            #     if client_id not in loopix_node.receiver.clients:
+            #         print(f"[ERROR] client_id '{client_id}' not registered in receiver.clients.")
+            #         return None,None
+            #     client_addr = loopix_node.receiver.clients[client_id]
+            #     list(map(
+            #         lambda pair: loopix_node.sender.send(pair[0], *pair[1]),
+            #         zip(pulled_messages, itertools.repeat(client_addr))
+            #     ))
+            #     return None,None
             else:
                 flag, decrypted_packet, traceid = self.process_packet(decoded_packet)
-                if flag == "ROUT":
-                    delay, new_header, new_body, next_addr, next_name = decrypted_packet
-                    if loopix_node.is_assigned_client(next_name):
-                        print("storage a message")
-                        loopix_node.receiver.put_into_storage(next_name, (new_header, new_body))
-                    else:
-                        packet = (new_header, new_body)
-                        loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet)
+                # if flag == "ROUT":
+                delay, new_header, new_body, next_addr, next_name = decrypted_packet
+                #     if loopix_node.is_assigned_client(next_name):
+                #         loopix_node.receiver.put_into_storage(next_name, (new_header, new_body))
+                #     else:
+                packet = (new_header, new_body)
+                loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet)
 
             return flag, traceid
 
@@ -122,20 +115,15 @@ class LoopixProcess():
     def process_packet(self, packet):
         # 解密Sphinx包
         loopix_node = self._node_ref()
-        tag, routing, new_header, new_body, mac = loopix_node.crypto_node.decrypt_sphinx_packet(packet,
-                                                                                                loopix_node.privk)
+        tag, routing, new_header, new_body, mac = loopix_node.crypto_node.decrypt_sphinx_packet(packet, loopix_node.privk)
         routing_flag, meta_info = routing[0], routing[1:]
 
         if routing_flag == Relay_flag:
             # 处理中继节点
-            print("receive a message")
+            print("receive a drop message")
             next_addr, drop_flag, trace_id, delay, next_name = meta_info[0]
-            if drop_flag:
-                print("receive a drop message")
-                return ("DROP", [], trace_id)
-            else:
-                print("receive a ROUT message")
-                return ("ROUT", [delay, new_header, new_body, next_addr, next_name], trace_id)
+
+            return ("DROP", [], trace_id) if drop_flag else ("ROUT", [delay, new_header, new_body, next_addr, next_name], trace_id)
 
         elif routing_flag == Dest_flag:
             # 处理目标节点
@@ -144,13 +132,7 @@ class LoopixProcess():
             if dest[:-1] == [loopix_node.host, loopix_node.port, loopix_node.name]:
                 message = decoded_packet['message']
                 trace_id = dest[-1]
-                if isinstance(message, str):
-                    message = message.encode('utf-8')
-                if message.startswith(b'HT'):
-                    return ("LOOP", decoded_packet, trace_id)
-                else:
-                    return ("NEW", decoded_packet, trace_id)
-
+                return ("LOOP", decoded_packet, trace_id) if message.startswith(b'HT') else ("NEW", decoded_packet, trace_id)
             else:
                 return ("ERROR", [], None)
 

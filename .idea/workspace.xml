@@ -55,7 +55,7 @@
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.git.unshallow": "true",
     "SHARE_PROJECT_CONFIGURATION_FILES": "true",
-    "git-widget-placeholder": "main",
+    "git-widget-placeholder": "正在合并 main",
     "last_opened_file_path": "D:/Emulator/Examples/WC/Topology",
     "node.js.detected.package.eslint": "true",
     "node.js.detected.package.tslint": "true",
@@ -200,7 +200,7 @@
       <workItem from="1744077088588" duration="779000" />
       <workItem from="1744077884585" duration="6929000" />
       <workItem from="1744089782868" duration="15978000" />
-      <workItem from="1744764277528" duration="38808000" />
+      <workItem from="1744764277528" duration="39121000" />
     </task>
     <task id="LOCAL-00001" summary="add PET---DONE&#10;add MixBarrage--ING">
       <option name="closed" value="true" />
