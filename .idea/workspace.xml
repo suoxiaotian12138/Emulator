@@ -5,20 +5,12 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="828f0c2f-6c0b-4d94-94a0-ee23f0048ef8" name="更改" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/Emulator.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/Emulator.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Crypto/NodeBuild.py" beforeDir="false" afterPath="$PROJECT_DIR$/Crypto/NodeBuild.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Mixnode_mix2.tac" beforeDir="false" afterPath="$PROJECT_DIR$/Mixnode_mix2.tac" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Monitor/GlobalMonitor.py" beforeDir="false" afterPath="$PROJECT_DIR$/Monitor/GlobalMonitor.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Node/LoopixNodes.py" beforeDir="false" afterPath="$PROJECT_DIR$/Node/LoopixNodes.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/PIDcontrolVal.csv" beforeDir="false" afterPath="$PROJECT_DIR$/PIDcontrolVal.csv" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Packet/MessageMaker.py" beforeDir="false" afterPath="$PROJECT_DIR$/Packet/MessageMaker.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Relay/PacketProccess.py" beforeDir="false" afterPath="$PROJECT_DIR$/Relay/PacketProccess.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/cc_recv_bits.txt" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/config.json" beforeDir="false" afterPath="$PROJECT_DIR$/config.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/database.db" beforeDir="false" afterPath="$PROJECT_DIR$/database.db" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/start.bat" beforeDir="false" afterPath="$PROJECT_DIR$/start.bat" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tools/sphinxmix/SphinxClient.py" beforeDir="false" afterPath="$PROJECT_DIR$/tools/sphinxmix/SphinxClient.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tools/sphinxmix/SphinxNode.py" beforeDir="false" afterPath="$PROJECT_DIR$/tools/sphinxmix/SphinxNode.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tools/sphinxmix/SphinxParams.py" beforeDir="false" afterPath="$PROJECT_DIR$/tools/sphinxmix/SphinxParams.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/example/lhz/LoopixReceiverCC.py" beforeDir="false" afterPath="$PROJECT_DIR$/example/lhz/LoopixReceiverCC.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/example/lhz/torecv/cc_recv" beforeDir="false" afterPath="$PROJECT_DIR$/example/lhz/torecv/cc_recv" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -107,8 +99,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-76f8388c3a79-JavaScript-PY-243.24978.54" />
-        <option value="bundled-python-sdk-91e3b7efe1d4-466328ff949b-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-243.24978.54" />
+        <option value="bundled-js-predefined-d6986cc7102b-1632447f56bf-JavaScript-PY-243.26053.29" />
+        <option value="bundled-python-sdk-b1dbf8ef85a6-4df51de95216-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-243.26053.29" />
       </set>
     </attachedChunks>
   </component>
@@ -121,6 +113,7 @@
       <option name="presentableId" value="Default" />
       <updated>1744074847859</updated>
       <workItem from="1744074848925" duration="1188000" />
+      <workItem from="1744883012605" duration="3007000" />
     </task>
     <servers />
   </component>
