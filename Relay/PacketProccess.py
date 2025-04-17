@@ -67,7 +67,7 @@ class LoopixProcess():
             if flag == "ROUT":
                 delay, new_header, new_body, next_addr, _ = decrypted_packet
                 packet = (new_header, new_body)
-                loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet)
+                loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet,traceid = traceid)
             elif flag == "LOOP":
                 pass
             else:

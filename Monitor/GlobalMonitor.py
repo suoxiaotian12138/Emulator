@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 
 class GlobalMonitorServer:
-    def __init__(self, host='0.0.0.0', port=9999, timeout=300):
+    def __init__(self, host='0.0.0.0', port=9999, timeout=30):
         self.addr = (host, port)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(self.addr)
@@ -76,7 +76,9 @@ class GlobalMonitorServer:
 
     def handle_log(self, log: dict):
         trace_id = log.get("trace_id")
+        print(trace_id)
         if not trace_id:
+            print("asdaddsadsaasdasdsdaasd")
             return
 
         # 更新 log 信息
@@ -112,7 +114,7 @@ class GlobalMonitorServer:
         logs = self.trace_logs.get(trace_id, [])
         print(f"\n[Trace Summary] trace_id = {trace_id}")
         for log in sorted(logs, key=lambda x: x["time"]):
-            print(f"  {log['time']} | {log['event']:7} | {log['node']} <- {log.get('src')} -> {log.get('dst')}")
+            print(f"  {log['time']} | {log['event']:7} | {log['src']} <- {log.get('node')} -> {log.get('dst')}")
 
     def stop(self):
         self.running = False

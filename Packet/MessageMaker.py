@@ -27,6 +27,7 @@ class Loopix_message_maker():
         trace_id = self.generate_trace_id()
         info = {}
         delay = 0
+        event = "send"
         if mode == "REAL":
             if not self.output_buffer.empty():
                 message, receiver = self.output_buffer.get()
@@ -86,9 +87,11 @@ class Loopix_message_maker():
             host = self.routingtable["provider_info"].host
             port = self.routingtable["provider_info"].port
         elif mode == "FORWARD":
+            event = "forward"
             header, body = kwargs.get('packet')
             host,port = kwargs.get('addr')
             delay = kwargs.get('delay')
+            trace_id = kwargs.get('traceid')
             packet = (header, body)
 
         else:  # 其他情况
@@ -112,7 +115,7 @@ class Loopix_message_maker():
         self.reactor.callLater(delay, loopix_node.sender.send, packet, host, port)
         loopix_node.monitor.log_event(
             trace_id=trace_id,
-            event="send",
+            event=event,
             dst=(host, port),
             info=info
         )
