@@ -1,2 +1,16 @@
 /.venv/
 /.idea/
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+*.pyo
+
+# VS Code
+.vscode/
+
+# 虚拟环境
+venv/
+.env/
+
+# Jupyter 输出缓存
+.ipynb_checkpoints/
