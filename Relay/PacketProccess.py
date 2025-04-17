@@ -84,27 +84,27 @@ class LoopixProcess():
             if decoded_packet[0] == 'SUBSCRIBE':
                 self._subscribe_client(decoded_packet[1:])
                 return None,None
-            # elif decoded_packet[0] == 'PULL':
-            #     pulled_messages = loopix_node.receiver.pull_messages(client_id=decoded_packet[1])
-            #     client_id = decoded_packet[1]
-            #     if client_id not in loopix_node.receiver.clients:
-            #         print(f"[ERROR] client_id '{client_id}' not registered in receiver.clients.")
-            #         return None,None
-            #     client_addr = loopix_node.receiver.clients[client_id]
-            #     list(map(
-            #         lambda pair: loopix_node.sender.send(pair[0], *pair[1]),
-            #         zip(pulled_messages, itertools.repeat(client_addr))
-            #     ))
-            #     return None,None
+            elif decoded_packet[0] == 'PULL':
+                pulled_messages = loopix_node.receiver.pull_messages(client_id=decoded_packet[1])
+                client_id = decoded_packet[1]
+                if client_id not in loopix_node.receiver.clients:
+                    print(f"[ERROR] client_id '{client_id}' not registered in receiver.clients.")
+                    return None,None
+                client_addr = loopix_node.receiver.clients[client_id]
+                list(map(
+                    lambda pair: loopix_node.sender.send(pair[0], *pair[1]),
+                    zip(pulled_messages, itertools.repeat(client_addr))
+                ))
+                return None,None
             else:
                 flag, decrypted_packet, traceid = self.process_packet(decoded_packet)
-                # if flag == "ROUT":
-                delay, new_header, new_body, next_addr, next_name = decrypted_packet
-                #     if loopix_node.is_assigned_client(next_name):
-                #         loopix_node.receiver.put_into_storage(next_name, (new_header, new_body))
-                #     else:
-                packet = (new_header, new_body)
-                loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet)
+                if flag == "ROUT":
+                    delay, new_header, new_body, next_addr, next_name = decrypted_packet
+                    if loopix_node.is_assigned_client(next_name):
+                        loopix_node.receiver.put_into_storage(next_name, (new_header, new_body))
+                    else:
+                        packet = (new_header, new_body)
+                        loopix_node.message_maker.make_stream("FORWARD", delay=delay, addr=next_addr, packet=packet,traceid = traceid)
 
             return flag, traceid
 
