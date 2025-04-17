@@ -43,7 +43,7 @@ class LoopixSenderWithMixBarrage(Loopix_Client):
         self.probe_matrix_path = []
         self.probe_frequency = {}
         self.now_probe_round = 0
-        self.init_frequency = 10
+        self.init_frequency = 20
         # second
         self.round_time = 20
         self.target_server = None
@@ -63,7 +63,7 @@ class LoopixSenderWithMixBarrage(Loopix_Client):
         for node in self.now_node_list:
             self.probe_frequency[node.name] = self.init_frequency
         self.generate_probe_matrix()
-        reactor.callLater(10, self.probe_interest_scope)
+        reactor.callLater(20, self.probe_interest_scope)
 
     def probe_interest_scope(self):
         if len(self.probe_matrix_path) > 1 and self.target_server is not None:
@@ -95,6 +95,7 @@ class LoopixSenderWithMixBarrage(Loopix_Client):
             reactor.callLater(self.round_time, self.get_counter_result)
 
     def send_packets_with_interval(self, packet_pool):
+        print(len(packet_pool))
         if not packet_pool:
             return  # 所有包发送完了
 
@@ -104,7 +105,7 @@ class LoopixSenderWithMixBarrage(Loopix_Client):
 
         self.sender.send(packet, host, port)
 
-        interval = sample_from_exponential(0.2)
+        interval = sample_from_exponential(0.1)
         reactor.callLater(interval, self.send_packets_with_interval, packet_pool)
 
     def get_counter_result(self):
@@ -118,6 +119,7 @@ class LoopixSenderWithMixBarrage(Loopix_Client):
                 content = content.encode('utf-8')
             path = [self.routingtable["provider_info"]] + list(path) + [self.target_server.provider] + [
                 self.target_server]
+
             packet = self.generate_packet(content, path)
             host = self.routingtable["provider_info"].host
             port = self.routingtable["provider_info"].port

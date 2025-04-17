@@ -1,5 +1,3 @@
-
-
 from support_formats import Origin
 import json
 
@@ -10,6 +8,7 @@ import numpy as np
 import weakref
 from Routing.RoutingStrategy import execute_routing_strategy
 from tools.sphinxmix import SphinxClient
+
 
 class Loopix_message_maker():
     def __init__(self, loopixnode):
@@ -47,12 +46,11 @@ class Loopix_message_maker():
                 header, body = self.crypto.make_sphinx_packet(receiver, path, drop_message, drop_flag=False,
                                                               trace_id=trace_id)
 
-
                 packet = (header, body)
                 host = path[0].host
                 port = path[0].port
 
-            # self.schedule_next_task(self.config_params.EXP_PARAMS_LOOPS, lambda: self.make_stream(mode="REAL"))
+            self.schedule_next_task(self.config_params.EXP_PARAMS_LOOPS, lambda: self.make_stream(mode="REAL"))
 
         elif mode == "LOOP":
             path = self.construct_full_path()
@@ -89,7 +87,7 @@ class Loopix_message_maker():
         elif mode == "FORWARD":
             event = "forward"
             header, body = kwargs.get('packet')
-            host,port = kwargs.get('addr')
+            host, port = kwargs.get('addr')
             delay = kwargs.get('delay')
             trace_id = kwargs.get('traceid')
             packet = (header, body)
@@ -109,8 +107,6 @@ class Loopix_message_maker():
                 packet, host, port = packet_function(self, message, path)
             else:
                 raise ValueError(f"不支持的 mode 类型：{mode}，且 packet_function 未定义。")
-
-
 
         self.reactor.callLater(delay, loopix_node.sender.send, packet, host, port)
         loopix_node.monitor.log_event(
@@ -140,13 +136,10 @@ class Loopix_message_maker():
 
         return reply_message
 
-
-
     def generate_dummy_messages(self, num):
         dummy_messages = [('DUMMY', self.generate_random_string(self.config_params.NOISE_LENGTH),
-                    self.generate_random_string(self.config_params.NOISE_LENGTH)) for _ in range(num)]
+                           self.generate_random_string(self.config_params.NOISE_LENGTH)) for _ in range(num)]
         return dummy_messages
-
 
     def generate_trace_id(self) -> str:
         """
@@ -163,10 +156,10 @@ class Loopix_message_maker():
 
     def construct_full_path(self, receiver=None):
         """构造完整路径"""
-        #后续可能会修改loop message的路径生成逻辑
+        # 后续可能会修改loop message的路径生成逻辑
         loopix_node = self._node_ref()
         group = loopix_node.group
-        mix_chain = execute_routing_strategy("Loopix",self.routingtable["mixnodes"],group)
+        mix_chain = execute_routing_strategy("Loopix", self.routingtable["mixnodes"], group)
 
         if receiver is not None:
             return [self.routingtable["provider_info"]] + mix_chain + [receiver.provider] + [receiver]
@@ -174,7 +167,6 @@ class Loopix_message_maker():
             Zero_hop = Origin(loopix_node.name, loopix_node.port, loopix_node.host, loopix_node.pubk)
 
             return mix_chain + [random.choice(self.routingtable["providers"])] + [Zero_hop]
-
 
     def schedule_next_task(self, delay_param, method):
         """通用的定时任务调度"""

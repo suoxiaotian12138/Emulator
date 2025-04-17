@@ -34,12 +34,12 @@ if not exist %LOG_DIR% mkdir %LOG_DIR%
 
 
 echo Running Client2.tac...
-start cmd /k twistd -n  -y D:\Emulator\Examples\WC\Topology\Client_client2.tac
+start cmd /k twistd -n  -y D:\Emulator\Examples\WC\Topology\WCClient_client2.tac
 timeout /t 1 /nobreak >nul
 
 
 echo Running Client1.tac...
-start cmd /k twistd -n  -y D:\Emulator\Examples\WC\Topology\Client_client1.tac
+start cmd /k twistd -n  -y D:\Emulator\Examples\WC\Topology\WCClient_client1.tac
 timeout /t 1 /nobreak >nul
 
 
