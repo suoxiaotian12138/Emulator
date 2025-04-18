@@ -1,0 +1,11 @@
+Trace: 32, Drop: 0, LossRate: 0.00%, AvgDelay: 0.055s, Throughput: 0.98 KB/s
+Trace: 54, Drop: 0, LossRate: 0.00%, AvgDelay: 0.056s, Throughput: 0.83 KB/s
+Trace: 76, Drop: 0, LossRate: 0.00%, AvgDelay: 0.057s, Throughput: 0.78 KB/s
+Trace: 97, Drop: 0, LossRate: 0.00%, AvgDelay: 0.056s, Throughput: 0.74 KB/s
+Trace: 125, Drop: 0, LossRate: 0.00%, AvgDelay: 0.056s, Throughput: 0.77 KB/s
+Trace: 145, Drop: 0, LossRate: 0.00%, AvgDelay: 0.056s, Throughput: 0.74 KB/s
+Trace: 170, Drop: 0, LossRate: 0.00%, AvgDelay: 0.057s, Throughput: 0.74 KB/s
+Trace: 195, Drop: 0, LossRate: 0.00%, AvgDelay: 0.057s, Throughput: 0.75 KB/s
+Trace: 222, Drop: 0, LossRate: 0.00%, AvgDelay: 0.057s, Throughput: 0.76 KB/s
+Trace: 230, Drop: 0, LossRate: 0.00%, AvgDelay: 0.058s, Throughput: 0.71 KB/s
+Trace: 230, Drop: 0, LossRate: 0.00%, AvgDelay: 0.058s, Throughput: 0.64 KB/s
