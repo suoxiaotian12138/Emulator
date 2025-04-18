@@ -35,7 +35,7 @@ class LoopixReceiverCC(LoopixReceiver):
         self._filepath_output = filepath
     def put(self, obj):
         super().put(obj)
-        print(f"Received packet of length {len(obj[0])} at time {time.time()}")
+        # print(f"Received packet of length {len(obj[0])} at time {time.time()}")
         if self._on and self._sender_addr == obj[1]:
             self._pkt_arrival_times.append(time.time())
             if len(self._pkt_arrival_times) > self._output_batch_size:

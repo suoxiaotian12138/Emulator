@@ -23,7 +23,11 @@ class LoopixProcess():
         }
         handler = mode_map.get(mode)
         if handler:
-            flag, trace_id = handler(packet)
+            if mode == "client":
+                flag, trace_id, _ = handler(packet)
+            else:
+                flag, trace_id = handler(packet)
+
             if flag == 'NEW' or flag == 'LOOP':
                 event = 'dest'
             elif flag == 'ROUT':
@@ -57,7 +61,7 @@ class LoopixProcess():
                 message = decrypted_packet
             return flag, traceid, (message, decrypted_packet)
         else:
-            return None, None
+            return None, None, None
 
     def read_packet_mixnode(self, packet):
         """ 解码和处理收到的数据包 """

@@ -165,7 +165,6 @@ class Loopix_Client(Loopix_node):
         dbManager.close_connection()
 
     def retrieve_messages(self):
-        print(2)
         lc = task.LoopingCall(self.sender.send, ['PULL', self.name],self.provider.host,self.provider.port)
         lc.start(self.config_params.TIME_PULL, now=True)
 

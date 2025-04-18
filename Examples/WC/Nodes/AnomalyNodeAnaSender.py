@@ -91,7 +91,7 @@ class LoopixSenderWithMixBarrage(Loopix_Client):
         self.plugin_initial()
         self.turn_on_processing()
         self.message_maker.make_stream("REAL")
-        self.begin_probe()
+        # self.begin_probe()
 
     def begin_probe(self):
         self.surbkey = {}

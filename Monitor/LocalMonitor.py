@@ -44,12 +44,13 @@ class LocalMonitor:
     def recv_log(self, packet, trace_id ,event, info = None):
 
         packet_key = self.packet_fingerprint(packet)
-        time_record, arc_addr = self.temporary_record.get(packet_key,([],[]))
-        host,port = arc_addr
+        time_record, arc_addr = self.temporary_record.get(packet_key,([],[[], []]))
+        host, port = arc_addr
         src = (host, port),
         self.log_event(trace_id=trace_id, event=event, src=src,time_record=time_record,info=info)
-        self.temporary_record.pop(packet_key)
-        print(len(self.temporary_record))
+        if packet_key in self.temporary_record.keys():
+            self.temporary_record.pop(packet_key)
+
 
     @staticmethod
     def packet_fingerprint(packet: bytes) -> str:

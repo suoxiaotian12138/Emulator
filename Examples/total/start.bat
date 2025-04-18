@@ -19,6 +19,7 @@ timeout /t 1 /nobreak >nul
 echo Running Mixnode3.tac...
 start cmd /k twistd -n  -y D:\Oniverse\Emulator\Examples\total\Mixnode_mix3.tac
 timeout /t 1 /nobreak >nul
+
 echo Running Mixnode4.tac...
 start cmd /k twistd -n  -y D:\Oniverse\Emulator\Examples\total\Mixnode_mix4.tac
 timeout /t 1 /nobreak >nul
@@ -40,9 +41,9 @@ start cmd /k twistd -n  -y D:\Oniverse\Emulator\Examples\total\WCClient_client2.
 timeout /t 1 /nobreak >nul
 
 
-echo Running Client1.tac...
-start cmd /k twistd -n  -y D:\Oniverse\Emulator\Examples\total\WCClient_client1.tac
-timeout /t 1 /nobreak >nul
+@REM echo Running Client1.tac...
+@REM start cmd /k twistd -n  -y D:\Oniverse\Emulator\Examples\total\WCClient_client1.tac
+@REM timeout /t 1 /nobreak >nul
 
 @REM echo Running Client1.tac...
 @REM start cmd /k twistd -n  -y D:\Emulator\Examples\total\Client_client1_cc.tac
