@@ -15,7 +15,8 @@ class GlobalMonitorServer:
         self.trace_last_update = dict()          # trace_id -> last timestamp
         self.completed_traces = set()            # 已完成 trace_id
         self.timeout = timeout                   # 超时时间（秒）
-
+        self.byte_counter = 0
+        self.log_output_lock = threading.Lock()
         self.start_time = time.time()
 
         print(f"[GlobalMonitor] Listening on {host}:{port}")
@@ -24,10 +25,11 @@ class GlobalMonitorServer:
         threading.Thread(target=self.listen_loop, daemon=True).start()
         threading.Thread(target=self.cleanup_loop, daemon=True).start()
         threading.Thread(target=self.stat_loop, daemon=True).start()
+        threading.Thread(target=self.log_to_file_loop, daemon=True).start()
 
     def stat_loop(self):
         while self.running:
-            time.sleep(30)  # 每隔30秒统计一次
+            time.sleep(10)  # 每隔30秒统计一次
             self.aggregate_network_stats()
 
     def aggregate_network_stats(self):
@@ -69,16 +71,23 @@ class GlobalMonitorServer:
         while self.running:
             try:
                 data, addr = self.sock.recvfrom(8192)
+                self.byte_counter += len(data)  # 记录数据长度
                 log = json.loads(data.decode())
                 self.handle_log(log)
             except Exception as e:
                 print(f"[Monitor-ERROR] {e}")
 
+    def log_to_file_loop(self):
+        while self.running:
+            time.sleep(30)
+            with self.log_output_lock:
+                stats = self.generate_stats()
+                with open("D:/project/Emulator/frontend/network_stats.txt", "a", encoding="utf-8") as f:
+                    f.write(stats + "\n")
+
     def handle_log(self, log: dict):
         trace_id = log.get("trace_id")
         if not trace_id:
-            print(log)
-            print("asdaddsadsaasdasdsdaasd")
             return
 
         # 更新 log 信息
@@ -89,7 +98,6 @@ class GlobalMonitorServer:
         if log["event"] in ("drop", "dest"):
             self.mark_trace_complete(trace_id, reason=f"[{log['event'].upper()}]")
 
-        # print(f"[Monitor-RECV] {trace_id} -> {log['event']} @ {log['node']}")
 
     def mark_trace_complete(self, trace_id, reason="[COMPLETE]"):
         if trace_id not in self.completed_traces:
@@ -107,14 +115,51 @@ class GlobalMonitorServer:
                 if now - last_time > self.timeout:
                     self.mark_trace_complete(trace_id, reason="[TIMEOUT]")
 
+    def generate_stats(self):
+        completed = list(self.completed_traces)
+        total = len(completed)
+        dropped = 0
+        delays = []
+
+        for trace_id in completed:
+            logs = self.trace_logs.get(trace_id, [])
+            events = {log['event']: log for log in logs}
+            if 'drop' in events:
+                dropped += 1
+            elif 'dest' in events and 'send' in events:
+                delay = events['dest']['time'] - events['send']['time']
+                delays.append(delay)
+            else:
+                dropped += 1
+
+        loss_rate = dropped / total if total else 0
+        avg_delay = sum(delays) / len(delays) if delays else 0
+
+        # 吞吐量统计
+        elapsed = time.time() - self.start_time
+        throughput_kbps = self.byte_counter / 1024 / elapsed if elapsed > 0 else 0
+
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+
+        stats_str = (
+            f"[{timestamp}] "
+            f"Trace: {total}, Drop: {dropped}, "
+            f"LossRate: {loss_rate:.2%}, "
+            f"AvgDelay: {avg_delay:.3f}s, "
+            f"Throughput: {throughput_kbps:.2f} KB/s"
+        )
+
+        print("\n[FileLog] " + stats_str)
+        return stats_str
+
     def process_trace(self, trace_id):
         """
         对 trace 日志进行处理，例如打印完整路径等
         """
         logs = self.trace_logs.get(trace_id, [])
-        print(f"\n[Trace Summary] trace_id = {trace_id}")
-        for log in sorted(logs, key=lambda x: x["time"]):
-            print(f"  {log['time']} | {log['event']:7} | {log['src']} <- {log.get('node')} -> {log.get('dst')}")
+        # print(f"\n[Trace Summary] trace_id = {trace_id}")
+        # for log in sorted(logs, key=lambda x: x["time"]):
+        #     print(f"  {log['time']} | {log['event']:7} | {log['src']} <- {log.get('node')} -> {log.get('dst')}")
 
     def stop(self):
         self.running = False
