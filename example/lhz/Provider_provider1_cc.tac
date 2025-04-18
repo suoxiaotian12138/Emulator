@@ -17,7 +17,7 @@ from Relay.PacketSender import Loopix_sender
 from example.lhz.LoopixReceiverCC import LoopixReceiverCC
 
 
-CC_RECV_FILE_PATH = "example/lhz/torecv/cc_recv"
+CC_RECV_FILE_PATH = "cctorecv/cc_recv"
 SENDER_ADDR = ('127.0.0.1', 9995)
 
 def plugin_initial_cc_provider(self, nodetype = "provider"):

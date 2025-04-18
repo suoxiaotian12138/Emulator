@@ -1,0 +1,7 @@
+Sender address: ('127.0.0.1', 9995), Secoding method: FIX, Extracting method: REPLAY, Extracting feature: IPD
+Received text: hello wo
+Received 9 packets
+Extracted features: [0.985, 1.03, 1.019, 0.97, 1.027, 1.024, 1.012, 1.036]
+Extracted codes: [0, 1, 1, 0, 1, 1, 1, 1]
+Decoded bit string: 01101111
+Decoded text unit: o

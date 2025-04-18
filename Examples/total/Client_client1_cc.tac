@@ -3,7 +3,7 @@
 import os
 import sys
 import types
-sys.path.append('D:\Emulator')
+sys.path.append('D:\Oniverse\Emulator')
 from twisted.python import log
 from twisted.application import service, internet
 from Crypto.NodeBuild import LoopixNodeSetup
@@ -17,9 +17,9 @@ from Crypto.CryptoNode import LoopixCrypto
 from Relay.PacketReceiver import LoopixReceiver
 from example.lhz.LoopixSenderCC import LoopixSenderCC
 
-CC_SEND_FOLDER_PATH = "example/lhz/tosent"
+CC_SEND_FOLDER_PATH = "cctosent"
 RECV_HOST = '127.0.0.1'
-RECV_PORT = 9994
+RECV_PORT = 7774
 
 def plugin_initial_cc_client(self, nodetype = "client"):
     self.crypto_node = LoopixCrypto(self)

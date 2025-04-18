@@ -4,7 +4,25 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="828f0c2f-6c0b-4d94-94a0-ee23f0048ef8" name="更改" comment="debug" />
+    <list default="true" id="828f0c2f-6c0b-4d94-94a0-ee23f0048ef8" name="更改" comment="debug">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/Client_client1_cc.tac" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/Client_client1_cc.tac" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/Mixnode_mix1.tac" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/Mixnode_mix1.tac" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/Mixnode_mix2.tac" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/Mixnode_mix2.tac" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/Mixnode_mix3.tac" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/Mixnode_mix3.tac" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/Mixnode_mix4.tac" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/Mixnode_mix4.tac" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/Mixnode_mix5.tac" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/Mixnode_mix5.tac" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/Mixnode_mix6.tac" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/Mixnode_mix6.tac" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/Provider_provider1_cc.tac" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/Provider_provider1_cc.tac" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/WCClient_client1.tac" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/WCClient_client1.tac" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/WCClient_client2.tac" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/WCClient_client2.tac" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/start.bat" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/start.bat" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/torecv/cc_recv" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/cctorecv/cc_recv" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/tosent/test" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/cctosent/test" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Examples/total/your_output_file.txt" beforeDir="false" afterPath="$PROJECT_DIR$/Examples/total/your_output_file.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/config.json" beforeDir="false" afterPath="$PROJECT_DIR$/config.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/example/lhz/Provider_provider1_cc.tac" beforeDir="false" afterPath="$PROJECT_DIR$/example/lhz/Provider_provider1_cc.tac" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -78,8 +96,20 @@
       </set>
     </attachedChunks>
   </component>
+  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="应用程序级" UseSingleDictionary="true" transferred="true" />
   <component name="TaskManager">
+    <task active="true" id="Default" summary="默认任务">
+      <changelist id="828f0c2f-6c0b-4d94-94a0-ee23f0048ef8" name="更改" comment="debug" />
+      <created>1744891849896</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1744891849896</updated>
+      <workItem from="1744891851027" duration="1878000" />
+    </task>
     <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
   </component>
   <component name="UnknownFeatures">
     <option featureType="com.intellij.fileTypeFactory" implementationName="*.bat" />

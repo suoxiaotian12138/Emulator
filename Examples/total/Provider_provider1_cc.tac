@@ -2,7 +2,7 @@
 
 import os
 import sys
-sys.path.append('D:\Emulator')
+sys.path.append('D:\Oniverse\Emulator')
 from twisted.python import log
 from twisted.application import service, internet
 from Crypto.NodeBuild import LoopixNodeSetup
@@ -17,7 +17,7 @@ from Relay.PacketSender import Loopix_sender
 from example.lhz.LoopixReceiverCC import LoopixReceiverCC
 
 
-CC_RECV_FILE_PATH = "example/lhz/torecv/cc_recv"
+CC_RECV_FILE_PATH = "cctorecv/cc_recv"
 SENDER_ADDR = ('127.0.0.1', 9995)
 
 def plugin_initial_cc_provider(self, nodetype = "provider"):
@@ -37,7 +37,7 @@ def plugin_initial_cc_provider(self, nodetype = "provider"):
 
 
 loopix_database_initial()
-node_set = [9994, '127.0.0.1', 'provider1', 1]
+node_set = [7774, '127.0.0.1', 'provider1', 1]
 setup = LoopixNodeSetup(node_set)
 created_node = setup.NodeBuild('Provider')
 created_node.__class__.plugin_initial = plugin_initial_cc_provider

@@ -1,7 +1,7 @@
 
 import os
 import sys
-sys.path.append('D:\Emulator')
+sys.path.append('D:\Oniverse\Emulator')
 from twisted.python import log
 from twisted.application import service, internet
 from Crypto.NodeBuild import LoopixNodeSetup
