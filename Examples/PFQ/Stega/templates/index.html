@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Text Steganography</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-image: url('/static/background_image.png');
+            background-size: cover;
+            background-position: center;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            font-size: 18px; /* 增大整体字体大小 */
+        }
+
+        h1 {
+            color: #1a73e8; /* 更改标题颜色 */
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 36px; /* 增大标题字体大小 */
+        }
+
+        form {
+            background-color: rgba(255, 255, 255, 0.9);
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.2);
+            margin-bottom: 30px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 10px;
+            font-weight: bold;
+            color: #555; /* 更改标签颜色 */
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 15px;
+            margin-bottom: 20px;
+            border: 2px solid #ccc;
+            border-radius: 6px;
+            box-sizing: border-box;
+            font-size: 18px; /* 增大输入框字体大小 */
+        }
+
+        input[type="submit"] {
+            background-color: #1a73e8;
+            color: white;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+            font-size: 20px; /* 增大按钮字体大小 */
+        }
+
+        input[type="submit"]:hover {
+            background-color: #0d47a1;
+        }
+
+        h2 {
+            color: #1a73e8;
+            margin-top: 40px;
+            font-size: 30px; /* 增大副标题字体大小 */
+        }
+
+        pre {
+            background-color: rgba(236, 240, 241, 0.8);
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 16px; /* 增大文本显示区域字体大小 */
+        }
+
+        p {
+            margin: 0;
+        }
+
+        p[style="color: red;"] {
+            margin-bottom: 20px;
+        }
+
+        /* 加载动画样式 */
+       .loader {
+            border: 20px solid #f3f3f3;
+            border-top: 20px solid #1a73e8;
+            border-radius: 50%;
+            width: 150px;
+            height: 150px;
+            animation: spin 2s linear infinite;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            margin-top: -75px;
+            margin-left: -75px;
+            display: none;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+    <script>
+        function showLoader() {
+            document.getElementById('loader').style.display = 'block';
+        }
+    </script>
+</head>
+
+<body>
+    <h1>Text Steganography</h1>
+    <form method="post" onsubmit="showLoader()">
+        <label for="secret_message">请输入 16 位的 0/1 比特串作为秘密消息:</label>
+        <input type="text" id="secret_message" name="secret_message" value="{{ user_input if user_input else '' }}">
+        {% if error_message %}
+        <p style="color: red;">{{ error_message }}</p>
+        {% endif %}
+        <input type="submit" name="generate_stega" value="Generate Steganographic Text">
+    </form>
+    {% if stega_text %}
+    <h2>Steganographic Text Result</h2>
+    <pre>{{ stega_text }}</pre>
+    {% endif %}
+    <form method="post" onsubmit="showLoader()">
+        <input type="hidden" name="secret_message" value="{{ user_input if user_input else '' }}">
+        <input type="submit" name="extract_secret" value="Extract Secret Message">
+    </form>
+    {% if secret_message %}
+    <h2>Decoded Secret Message Result</h2>
+    <pre>{{ secret_message }}</pre>
+    {% endif %}
+    <!-- 加载动画元素 -->
+    <div id="loader" class="loader"></div>
+</body>
+
+</html>
