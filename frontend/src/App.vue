@@ -90,9 +90,8 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { User, Connection, Cpu } from '@element-plus/icons-vue'
-
 
 const filenames = ['WC1.txt', 'WC2.txt', 'LHZ.txt', 'PFQ.txt'];
 const tips = ['流量预测结果：', '恶意节点有：', '输出为：', '输出为：'];
@@ -104,6 +103,7 @@ const getBoxBgColor = (index) => {
 };
 
 const monitorLines = ref([]);
+let monitorIntervalId;
 
 const readMonitorFile = async () => {
   try {
@@ -115,6 +115,7 @@ const readMonitorFile = async () => {
     console.error('读取 monitor.txt 出错:', err);
   }
 };
+
 const getTitleTextColor = (index) => {
     const colors = ['text-blue-700', 'text-green-700', 'text-yellow-700', 'text-purple-700'];
     return colors[index];
@@ -139,23 +140,33 @@ const readFile = async (filename) => {
     }
 };
 
-onMounted(async () => {
+const updateFilesContent = async () => {
     for (let i = 0; i < filenames.length; i++) {
         contents.value[i] = await readFile(filenames[i]);
     }
+};
 
-  readMonitorFile();
+let intervalId;
 
-await readButtonsFromFile('client_left', 'client.txt');
-await readButtonsFromFile('provider_left', 'provider.txt');
-await readButtonsFromFile('mix1', 'mix1.txt');
-await readButtonsFromFile('mix2', 'mix2.txt');
-await readButtonsFromFile('mix3', 'mix4.txt');
-await readButtonsFromFile('provider_right', 'provider.txt');
-await readButtonsFromFile('client_right', 'client.txt');
+onMounted(async () => {
+    await updateFilesContent();
+    await readMonitorFile();
+    await readButtonsFromFile('client_left', 'client.txt');
+    await readButtonsFromFile('provider_left', 'provider.txt');
+    await readButtonsFromFile('mix1', 'mix1.txt');
+    await readButtonsFromFile('mix2', 'mix2.txt');
+    await readButtonsFromFile('mix3', 'mix4.txt');
+    await readButtonsFromFile('provider_right', 'provider.txt');
+    await readButtonsFromFile('client_right', 'client.txt');
 
+    intervalId = setInterval(updateFilesContent, 10000);
+    monitorIntervalId = setInterval(readMonitorFile, 10000);
 });
 
+onUnmounted(() => {
+    clearInterval(intervalId);
+    clearInterval(monitorIntervalId);
+});
 
 const sections = [
   { title: 'Client', key: 'client_left', type: 'primary', icon: User },
@@ -166,7 +177,6 @@ const sections = [
   { title: 'Provider', key: 'provider_right', type: 'warning', icon: Cpu },
   { title: 'Client', key: 'client_right', type: 'primary', icon: User }
 ];
-
 
 const buttons = ref({
   client_left: [],
@@ -194,8 +204,6 @@ const readButtonsFromFile = async (type, filename) => {
 const filteredButtons = (type) => {
   return buttons.value[type] || []
 }
-
-
 </script>
 
 <style scoped>
