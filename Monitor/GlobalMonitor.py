@@ -82,7 +82,7 @@ class GlobalMonitorServer:
             time.sleep(30)
             with self.log_output_lock:
                 stats = self.generate_stats()
-                with open("D:/project/Emulator/frontend/network_stats.txt", "a", encoding="utf-8") as f:
+                with open("../frontend/monitor.txt", "a", encoding="utf-8") as f:
                     f.write(stats + "\n")
 
     def handle_log(self, log: dict):
