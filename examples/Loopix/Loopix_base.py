@@ -3,6 +3,7 @@ import numpy as np
 import time
 import random
 import hashlib
+import itertools
 from urllib.parse import urlparse
 
 import socket
@@ -26,6 +27,7 @@ class Loopix_Base():
 
         self.buffer = PacketQueue()
 
+        self.routingtable = {}
         self.privk, self.pubk = self.key_set()
         self.config = self.config_set()
         self.params = self.sphinx_params_set()
@@ -58,6 +60,18 @@ class Loopix_Base():
         sock.setblocking(False)
         return sock
 
+    async def routing_request(self, interval = 180):
+        while True:
+            message = ["route", {}]  # Empty dict means request full table
+            try:
+                # Send to known directory server address
+                host, port = self.directory_address  # should be set externally
+                await self.send(self.socket, message, host, port)
+                print(f"[INFO] Sent periodic routing request to {host}:{port}")
+            except Exception as e:
+                print(f"[ERROR] Failed to send routing request: {e}")
+            await asyncio.sleep(interval)  # 3 minutes interval
+
     @staticmethod
     def get_directory_address():
         addr = os.environ.get('DIRECTORY_ADDR')
@@ -75,6 +89,16 @@ class Loopix_Base():
             raise ValueError(f"Invalid DIRECTORY_ADDR format: {addr}")
 
         return (host, port)
+    @staticmethod
+    def group_layered_topology(mixes):
+        # 按 group 字段排序（确保 groupby 正确分组）
+        sorted_mixes = sorted(mixes, key=lambda x: x["group"])
+
+        # 按 group 聚类成子列表
+        grouped_mixes = [list(group) for _, group in itertools.groupby(
+            sorted_mixes, key=lambda x: x["group"])]
+
+        return grouped_mixes
 
     async def listener(self, sock: socket.socket, interval: float = 0.01):
         """Asynchronously listen to UDP socket and print received messages"""

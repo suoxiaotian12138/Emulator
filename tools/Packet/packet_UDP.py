@@ -21,7 +21,7 @@ class PacketQueue:
         return len(self.queue)
 
 
-def send_udp(sock: socket.socket, message: bytes, target_ip: str, target_port: int):
+def send_udp(sock: socket.socket, message, target_ip: str, target_port: int):
     """Send a UDP packet with given message"""
     try:
         if not isinstance(message, bytes):
@@ -40,7 +40,7 @@ def recv_udp(sock: socket.socket, buffer_size: int = 65535):
         return None
 
 
-async def send_udp_async(sock: socket.socket, message: bytes, target_ip: str, target_port: int):
+async def send_udp_async(sock: socket.socket, message, target_ip: str, target_port: int):
     """Send a UDP packet with given message"""
     try:
         if not isinstance(message, bytes):

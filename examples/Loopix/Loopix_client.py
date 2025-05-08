@@ -18,9 +18,10 @@ class Loopix_client(Loopix_Base):
         self.provider = None
 
         self.output_buffer = Queue()
+        self.provider_ready = asyncio.Event()
 
         self.surbkeys = {}
-        self.routingtable = {}
+
 
     async def start_protocol(self):
         self.tasks['register_task'] = asyncio.create_task(self.register())
@@ -35,34 +36,25 @@ class Loopix_client(Loopix_Base):
         )
 
     async def register(self):
+        await self.provider_ready.wait()
         message = ['register', {
         "node_type": "client",
         "name": self.name,
         "host": self.host,
         "port": self.port,
         "public_key": self.pubk,
+        "provider": self.provider
         }]
-        self.send(self.socket, message, self.directory_address)
+        await self.send(self.socket, message, self.directory_address)
 
 
-    async def routing_request(self, interval = 180):
-        while True:
-            message = ["route", {}]  # Empty dict means request full table
-            try:
-                # Send to known directory server address
-                host, port = self.directory_address  # should be set externally
-                await self.send(self.socket, message, host, port)
-                print(f"[INFO] Sent periodic routing request to {host}:{port}")
-            except Exception as e:
-                print(f"[ERROR] Failed to send routing request: {e}")
-            await asyncio.sleep(interval)  # 3 minutes interval
-
-
-    async def routing_table_initial(self, content):
+    async def routing_table_update(self, content):
         try:
             self.routing_table = content.get("routes", {})
-            total = sum(len(v) for v in self.routing_table.values())
-            print("[INFO] Routing table initialized with", total, "nodes across", len(self.routing_table), "types")
+            mixs = self.group_layered_topology(self.group_layered_topology(self.routing_table['mixnode']))
+            self.routing_table['mixnode'] = mixs
+            self.provider = random.choice(self.routing_table['provider'])
+            self.provider_ready.set()
         except Exception as e:
             print(f"[ERROR] Failed to initialize routing table: {e}")
 
@@ -71,8 +63,11 @@ class Loopix_client(Loopix_Base):
             if self.buffer:
                 data, addr = self.buffer.pop()
                 try:
-                    flag, decrypted_packet, traceid = self.decrypt_packet(data)
-                    self.extra_process(flag, decrypted_packet, traceid)
+                    if data[0] == 'ROUTING_RESPONSE':
+                        await self.routing_table_update(data[1])
+                    else:
+                        flag, decrypted_packet, traceid = self.decrypt_packet(data)
+                        self.extra_process(flag, decrypted_packet, traceid)
 
                 except Exception as exp:
                     print("ERROR:", str(exp))
@@ -149,13 +144,14 @@ class Loopix_client(Loopix_Base):
     def construct_full_path(self, receiver=None):
         """构造完整路径"""
         # 后续可能会修改loop message的路径生成逻辑
-        path = []
+        if not receiver:
+            receiver = random.choice(self.routing_table['client'])
+
+        mix_chain = []
         num_all_layers = len(self.routing_table['mixnode'])
-        while layer != self.group:
-            mix = random.choice(self.routing_table['mixnode'][layer % num_all_layers])
-            path.append(mix)
-            layer = (layer + 1) % num_all_layers
-        path.insert(num_all_layers - 1 - self.group, random.choice(self.routing_table['mixnode']))
+        for i in range(num_all_layers):
+            mix = random.choice(self.routing_table['mixnode'][i])
+            mix_chain.append(mix)
 
         return [self.provider] + mix_chain + [receiver.provider] + [receiver]
 

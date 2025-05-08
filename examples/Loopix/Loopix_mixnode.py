@@ -20,8 +20,8 @@ class Loopix_Mixnode(Loopix_Base):
 
 
     async def start_protocol(self):
-        self.tasks['register_task'] = asyncio.create_task(self.listener(self.socket))
-        self.tasks['routing_task'] = asyncio.create_task(self.listener(self.socket))
+        self.tasks['register_task'] = asyncio.create_task(self.register())
+        self.tasks['routing_task'] = asyncio.create_task(self.routing_request())
         self.tasks['listener_task'] = asyncio.create_task(self.listener(self.socket))
         self.tasks['process_task'] = asyncio.create_task(self.process())
         self.tasks['periodic_send_task'] = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
@@ -31,11 +31,22 @@ class Loopix_Mixnode(Loopix_Base):
             self.tasks['process_task'], self.tasks['periodic_send_task']
         )
 
-    async def routing_table_initial(self, content):
+    async def register(self):
+        message = ['register', {
+        "node_type": "client",
+        "name": self.name,
+        "host": self.host,
+        "port": self.port,
+        "public_key": self.pubk,
+        "group": self.group,
+        }]
+        self.send(self.socket, message, self.directory_address)
+
+    async def routing_table_update(self, content):
         try:
             self.routing_table = content.get("routes", {})
-            total = sum(len(v) for v in self.routing_table.values())
-            print("[INFO] Routing table initialized with", total, "nodes across", len(self.routing_table), "types")
+            mixs = self.group_layered_topology(self.group_layered_topology(self.routing_table['mixnode']))
+            self.routing_table['mixnode'] = mixs
         except Exception as e:
             print(f"[ERROR] Failed to initialize routing table: {e}")
 
@@ -44,17 +55,20 @@ class Loopix_Mixnode(Loopix_Base):
             if self.buffer:
                 data, addr = self.buffer.pop()
                 try:
-                    flag, decrypted_packet, traceid = self.decrypt_packet(data)
-                    if flag == "ROUT":
-                        delay, new_header, new_body, next_addr, _ = decrypted_packet
-                        host, port = next_addr
-                        packet = (new_header, new_body)
-                        asyncio.create_task(self.delayed_send(packet, host, port, delay))
-                    elif flag == "LOOP":
-                        pass
+                    if data[0] == 'ROUTING_RESPONSE':
+                        await self.routing_table_update(data[1])
                     else:
-                        raise "Unknown packet type"
-                    self.extra_process(flag, decrypted_packet, traceid)
+                        flag, decrypted_packet, traceid = self.decrypt_packet(data)
+                        if flag == "ROUT":
+                            delay, new_header, new_body, next_addr, _ = decrypted_packet
+                            host, port = next_addr
+                            packet = (new_header, new_body)
+                            asyncio.create_task(self.delayed_send(packet, host, port, delay))
+                        elif flag == "LOOP":
+                            pass
+                        else:
+                            raise "Unknown packet type"
+                        self.extra_process(flag, decrypted_packet, traceid)
 
                 except Exception as exp:
                     print("ERROR:", str(exp))
@@ -68,7 +82,7 @@ class Loopix_Mixnode(Loopix_Base):
         loop_message = 'HT' + np.random.bytes(self.config.NOISE_LENGTH)
 
         trace_id = self.generate_trace_id()
-        path = self.construct_full_path_loop()
+        path = self.construct_full_path()
         keys = self.take_nodes_keys(path)
         routing_info = self.build_routing_info(path=path,trace_id=trace_id)
         header, body = make_sphinx_packet(params=self.params, message=loop_message, keys=keys, routing_info=routing_info)
@@ -80,10 +94,9 @@ class Loopix_Mixnode(Loopix_Base):
 
 
 
-    def construct_full_path_loop(self, receiver=None):
+    def construct_full_path(self, receiver=None):
         """构造完整路径"""
         # 后续可能会修改loop message的路径生成逻辑
-        group = self.group
         path = []
         num_all_layers = len(self.routing_table['mixnode'])
         layer = self.group + 1
@@ -91,7 +104,7 @@ class Loopix_Mixnode(Loopix_Base):
             mix = random.choice(self.routing_table['mixnode'][layer % num_all_layers])
             path.append(mix)
             layer = (layer + 1) % num_all_layers
-        path.insert(num_all_layers - 1 - self.group, random.choice(self.routing_table['mixnode']))
+        path.insert(num_all_layers - 1 - self.group, random.choice(self.routing_table['provider']))
 
         return path
 

@@ -1,7 +1,6 @@
 import numpy as np
 import random
 
-import socket
 import asyncio
 from tools.Packet.packet_UDP import PacketQueue
 from tools.Packet.make_packet import make_sphinx_packet
@@ -26,12 +25,33 @@ class Loopix_Provider(Loopix_Base):
         self.socket = self.socket_set(self.host, self.port)
 
     async def start_protocol(self):
-        listener_task = asyncio.create_task(self.listener(self.socket))
-        process_task = asyncio.create_task(self.process())
-        periodic_send_task = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
+        self.tasks['register_task'] = asyncio.create_task(self.register())
+        self.tasks['routing_task'] = asyncio.create_task(self.routing_request())
+        self.tasks['listener_task'] = asyncio.create_task(self.listener(self.socket))
+        self.tasks['process_task'] = asyncio.create_task(self.process())
+        self.tasks['periodic_send_task'] = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
 
-        await asyncio.gather(listener_task, process_task, periodic_send_task)
+        await asyncio.gather(
+            self.tasks['register_task'], self.tasks['routing_task'], self.tasks['listener_task'],
+            self.tasks['process_task'], self.tasks['periodic_send_task']
+        )
 
+    async def register(self):
+        message = ['register', {
+        "node_type": "client",
+        "name": self.name,
+        "host": self.host,
+        "port": self.port,
+        "public_key": self.pubk,
+        }]
+        self.send(self.socket, message, self.directory_address)
+    async def routing_table_update(self, content):
+        try:
+            self.routing_table = content.get("routes", {})
+            mixs = self.group_layered_topology(self.group_layered_topology(self.routing_table['mixnode']))
+            self.routing_table['mixnode'] = mixs
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize routing table: {e}")
 
     async def process(self):
         while True:
@@ -46,6 +66,8 @@ class Loopix_Provider(Loopix_Base):
                         for packet in pulled_messages:
                             addr = self.subscribed_clients[data[1]]
                             self.send(packet, addr)
+                    elif data[0] == 'ROUTING_RESPONSE':
+                        await self.routing_table_update(data[1])
                     else:
                         flag, decrypted_packet, traceid = self.decrypt_packet(data)
                         if flag == "ROUT":
@@ -119,13 +141,9 @@ class Loopix_Provider(Loopix_Base):
         # 后续可能会修改loop message的路径生成逻辑
         path = []
         num_all_layers = len(self.routing_table['mixnode'])
-        layer = self.group + 1
-        while layer != self.group:
-            mix = random.choice(self.routing_table['mixnode'][layer % num_all_layers])
+        for i in range(num_all_layers):
+            mix = random.choice(self.routing_table['mixnode'][i])
             path.append(mix)
-            layer = (layer + 1) % num_all_layers
-        path.insert(num_all_layers - 1 - self.group, random.choice(self.routing_table['mixnode']))
-
         return path
 
 

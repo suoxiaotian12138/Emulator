@@ -3,12 +3,6 @@ from baselib.sphinxmix.SphinxNode import sphinx_process
 from baselib.sphinxmix.SphinxClient import PFdecode, receive_forward, receive_surb
 
 
-
-
-
-
-
-
 def decrypt_sphinx_packet(params, packet, key):
     header, body = packet
     tag, info, (new_header, new_body), final_body = sphinx_process(params, key, header, body)

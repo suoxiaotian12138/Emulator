@@ -3,7 +3,7 @@ import json
 from tools.Packet.packet_UDP import send_udp, recv_udp
 from tools.Packet.make_packet import RoutingInfo
 from examples.Loopix.Loopix_base import Loopix_Base
-
+from tools.Crypt.serialization import decode
 class LoopixNodeHandler(Loopix_Base):
     def __init__(self, name: str, host: str, port: int):
         super().__init__(name, host, port)
@@ -25,12 +25,12 @@ class LoopixNodeHandler(Loopix_Base):
             if result:
                 data, addr = result
                 try:
-                    message = json.loads(data.decode())
+                    message = decode(data)
                     if isinstance(message, list) and len(message) == 2:
                         msg_type, content = message
-                        if msg_type == "register":
+                        if msg_type == "REGISTER":
                             await self.handle_register(content, addr)
-                        elif msg_type == "route":
+                        elif msg_type == "ROUTING":
                             await self.routing_buffer.put((content, addr))
 
                         else:
@@ -44,15 +44,10 @@ class LoopixNodeHandler(Loopix_Base):
         node_name = content.get("name")
         node_type = content.get("node_type")
         if node_name and node_type:
-            node_info = {
-                "name": node_name,
-                "host": content.get("host", addr[0]),
-                "port": content.get("port", addr[1]),
-                "pubk": content.get("public_key", ""),
-                "extra": content.get("extra", dict)
-            }
+            # Copy entire content, fallback for host/port if missing
+            node_info = content.copy()
             self.registered_nodes[node_name] = node_info
-            print(f"[INFO] Registered node {node_name} as {node_type} from {addr}")
+            # print(f"[INFO] Registered node {node_name} as {node_type} from {addr}")
 
     async def routing_dispatcher(self):
         while True:
@@ -61,7 +56,7 @@ class LoopixNodeHandler(Loopix_Base):
             for info in self.registered_nodes.values():
                 node_type = info.get("extra", {}).get("type", "unknown")
                 response.setdefault(node_type, []).append(info)
-            payload = ["routing_response", {"routes": response}]
+            payload = ["ROUTING_RESPONSE", {"routes": response}]
             send_udp(self.socket, payload, addr[0], addr[1])
             print(f"[INFO] Sent full routing table to {addr}")
 
