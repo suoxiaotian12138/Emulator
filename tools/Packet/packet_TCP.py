@@ -9,13 +9,6 @@ import socket
 from typing import Dict, Tuple, Optional, Callable
 
 
-
-
-
-
-
-
-
 def recv_tcp(sock: socket.socket, buffer_size: int = 65535):
     """Non-blocking receive from TCP socket, returns data or None"""
     try:
@@ -298,6 +291,22 @@ class ByteBuffer:
 
     def __len__(self):
         return len(self.buffer)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def buffer_consumer(wrapper: ByteBuffer, stop_event, name="Consumer"):
