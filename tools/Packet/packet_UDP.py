@@ -7,18 +7,19 @@ import asyncio
 
 
 class PacketQueue:
-    """Packet queue with address info, stores (data, addr)"""
+    """Asynchronous Packet Queue with (data, addr) support."""
     def __init__(self):
-        self.queue = deque()
+        self.queue = asyncio.Queue()
 
-    def add(self, data: bytes, addr):
-        self.queue.append((data, addr))
+    async def add(self, data: bytes, addr):
+        await self.queue.put((data, addr))
 
-    def pop(self):
-        return decode(self.queue.popleft()) if self.queue else None
+    async def pop(self):
+        data, addr = await self.queue.get()
+        return decode(data), addr
 
     def __len__(self):
-        return len(self.queue)
+        return self.queue.qsize()
 
 
 def send_udp(sock: socket.socket, message, target_ip: str, target_port: int):
@@ -41,19 +42,21 @@ def recv_udp(sock: socket.socket, buffer_size: int = 65535):
 
 
 async def send_udp_async(sock: socket.socket, message, target_ip: str, target_port: int):
-    """Send a UDP packet with given message"""
+    """真正异步发送 UDP 消息"""
     try:
         if not isinstance(message, bytes):
             message = encode(message)
-        sock.sendto(encode(message), (target_ip, target_port))
+        loop = asyncio.get_running_loop()
+        await loop.sock_sendto(sock, message, (target_ip, target_port))
+
     except Exception as e:
         print(f"[Send Error] {e}")
 
 
 async def recv_udp_async(sock: socket.socket, buffer_size: int = 65535):
     """Proper non-blocking UDP receive using asyncio"""
-    loop = asyncio.get_event_loop()
     try:
+        loop = asyncio.get_running_loop()
         data, addr = await loop.sock_recvfrom(sock, buffer_size)
         return data, addr
     except BlockingIOError:
@@ -63,12 +66,14 @@ async def recv_udp_async(sock: socket.socket, buffer_size: int = 65535):
         return None
 
 
-def handle_udp(result, buffer: PacketQueue):
+async def handle_udp(result, buffer: PacketQueue):
     """Store received (data, addr) into packet queue"""
     if result is None:
         return
     data, addr = result
-    buffer.add(data, addr)
+    await buffer.add(data, addr)
+
+
 
 
 

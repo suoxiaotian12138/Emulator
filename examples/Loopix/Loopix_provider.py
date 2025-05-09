@@ -18,73 +18,74 @@ class Loopix_Provider(Loopix_Base):
         self.buffer = PacketQueue()
         self.subscribed_clients = {}
         self.client_messages = {}
-
         self.config = self.config_set()
-        self.privk, self.pubk = self.key_set()
-        self.params = self.sphinx_params_set()
-        self.socket = self.socket_set(self.host, self.port)
+        self.routing_ready = asyncio.Event()
+
 
     async def start_protocol(self):
         self.tasks['register_task'] = asyncio.create_task(self.register())
         self.tasks['routing_task'] = asyncio.create_task(self.routing_request())
         self.tasks['listener_task'] = asyncio.create_task(self.listener(self.socket))
         self.tasks['process_task'] = asyncio.create_task(self.process())
-        self.tasks['periodic_send_task'] = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
+        # self.tasks['periodic_send_task'] = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
 
-        await asyncio.gather(
-            self.tasks['register_task'], self.tasks['routing_task'], self.tasks['listener_task'],
-            self.tasks['process_task'], self.tasks['periodic_send_task']
-        )
+        await asyncio.gather(*self.tasks.values())
+
+
 
     async def register(self):
-        message = ['register', {
-        "node_type": "client",
+        message = ['REGISTER', {
+        "node_type": "provider",
         "name": self.name,
         "host": self.host,
         "port": self.port,
         "public_key": self.pubk,
         }]
-        self.send(self.socket, message, self.directory_address)
+        addr, port = self.directory_address
+        await self.send(self.socket, message, addr, port)
+
     async def routing_table_update(self, content):
         try:
-            self.routing_table = content.get("routes", {})
-            mixs = self.group_layered_topology(self.group_layered_topology(self.routing_table['mixnode']))
-            self.routing_table['mixnode'] = mixs
+            temp_routing_table = content.get("routes", {})
+            self.routing_table['client'] =temp_routing_table.get('client', [])
+            self.routing_table['provider'] =temp_routing_table.get('provider', [])
+            self.routing_table['mixnode'] = self.group_layered_topology(temp_routing_table.get('mixnode', []))
+            if len(self.routing_table['mixnode']) >= 3 and all(len(v) > 0 for v in self.routing_table.values()):
+                self.routing_ready.set()
         except Exception as e:
-            print(f"[ERROR] Failed to initialize routing table: {e}")
+            self.print(f"[ERROR] Failed to initialize routing table: {e}")
 
     async def process(self):
         while True:
-            if self.buffer:
-                data, addr = self.buffer.pop()
-                try:
-                    if data[0] == 'SUBSCRIBE':
-                        subscribe_name, subscribe_host, subscribe_port = data[1:]
-                        self.subscribed_clients[subscribe_name] = (subscribe_host, subscribe_port)
-                    elif data[0] == 'PULL':
-                        pulled_messages = self.pull_messages(client_id=data[1])
-                        for packet in pulled_messages:
-                            addr = self.subscribed_clients[data[1]]
-                            self.send(packet, addr)
-                    elif data[0] == 'ROUTING_RESPONSE':
-                        await self.routing_table_update(data[1])
-                    else:
-                        flag, decrypted_packet, traceid = self.decrypt_packet(data)
-                        if flag == "ROUT":
-                            delay, new_header, new_body, next_addr, next_name = decrypted_packet
-                            if next_name in self.subscribed_clients.keys():
-                                self.client_messages.setdefault(next_name, []).append((new_header, new_body))
-                            else:
-                                host, port = next_addr
-                                packet = (new_header, new_body)
-                                asyncio.create_task(self.delayed_send(packet, host, port, delay))
-                        elif flag == "LOOP" or flag == "DROP":
-                            pass
+            data, addr = await self.buffer.pop()
+            try:
+                if data[0] == 'SUBSCRIBE':
+                    subscribe_name, subscribe_host, subscribe_port = data[1:]
+                    self.subscribed_clients[subscribe_name] = (subscribe_host, subscribe_port)
+                elif data[0] == 'PULL':
+                    pulled_messages = self.pull_messages(client_id=data[1])
+                    for packet in pulled_messages:
+                        addr = self.subscribed_clients[data[1]]
+                        self.send(packet, addr)
+                elif data[0] == 'ROUTING_RESPONSE':
+                    await self.routing_table_update(data[1])
+                else:
+                    flag, decrypted_packet, traceid = self.decrypt_packet(data)
+                    if flag == "ROUT":
+                        delay, new_header, new_body, next_addr, next_name = decrypted_packet
+                        if next_name in self.subscribed_clients.keys():
+                            self.client_messages.setdefault(next_name, []).append((new_header, new_body))
+                        else:
+                            host, port = next_addr
+                            packet = (new_header, new_body)
+                            asyncio.create_task(self.delayed_send(packet, host, port, delay))
+                    elif flag == "LOOP" or flag == "DROP":
+                        pass
 
-                        self.extra_process(flag, decrypted_packet, traceid)
+                    self.extra_process(flag, decrypted_packet, traceid)
 
-                except Exception as exp:
-                    print("ERROR:", str(exp))
+            except Exception as exp:
+                self.print("ERROR:", str(exp))
 
     def decrypt_packet(self, packet):
         try:
@@ -112,10 +113,10 @@ class Loopix_Provider(Loopix_Base):
             else:
                 raise "Wrong flag"
         except Exception as exp:
-            print("ERROR:", str(exp))
-
+            self.print("ERROR:", str(exp))
 
     async def periodic_make_stream(self, interval):
+        await self.routing_ready.wait()
         while True:
             await asyncio.sleep(interval)
             await self.make_stream_loop()

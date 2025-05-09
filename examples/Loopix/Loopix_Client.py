@@ -11,7 +11,7 @@ from baselib.sphinxmix.SphinxClient import Dest_flag, Surb_flag
 from examples.Loopix.Loopix_base import Loopix_Base
 
 
-class Loopix_client(Loopix_Base):
+class Loopix_Client(Loopix_Base):
 
     def __init__(self, name: str, host: str, port: int):
         super().__init__(name, host, port)
@@ -19,6 +19,7 @@ class Loopix_client(Loopix_Base):
 
         self.output_buffer = Queue()
         self.provider_ready = asyncio.Event()
+        self.routing_ready = asyncio.Event()
 
         self.surbkeys = {}
 
@@ -30,14 +31,11 @@ class Loopix_client(Loopix_Base):
         self.tasks['process_task'] = asyncio.create_task(self.process())
         self.tasks['periodic_send_task'] = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
 
-        await asyncio.gather(
-            self.tasks['register_task'], self.tasks['routing_task'], self.tasks['listener_task'],
-            self.tasks['process_task'], self.tasks['periodic_send_task']
-        )
+        await asyncio.gather(*self.tasks.values())
 
     async def register(self):
         await self.provider_ready.wait()
-        message = ['register', {
+        message = ['REGISTER', {
         "node_type": "client",
         "name": self.name,
         "host": self.host,
@@ -45,32 +43,38 @@ class Loopix_client(Loopix_Base):
         "public_key": self.pubk,
         "provider": self.provider
         }]
-        await self.send(self.socket, message, self.directory_address)
-
+        addr, port = self.directory_address
+        await self.send(self.socket, message, addr, port)
 
     async def routing_table_update(self, content):
         try:
-            self.routing_table = content.get("routes", {})
-            mixs = self.group_layered_topology(self.group_layered_topology(self.routing_table['mixnode']))
-            self.routing_table['mixnode'] = mixs
-            self.provider = random.choice(self.routing_table['provider'])
-            self.provider_ready.set()
+            temp_routing_table = content.get("routes", {})
+            self.routing_table['client'] = temp_routing_table.get('client', [])
+            self.routing_table['provider'] = temp_routing_table.get('provider', [])
+            self.routing_table['mixnode'] = self.group_layered_topology(temp_routing_table.get('mixnode', []))
+
+            if not self.provider and self.routing_table.get('provider', []):
+                self.provider = random.choice(self.routing_table['provider'])
+                self.provider_ready.set()
+            if len(self.routing_table['mixnode']) >= 3 and all(len(v) > 0 for v in self.routing_table.values()):
+                self.print("ready to send message")
+                self.routing_ready.set()
+
         except Exception as e:
-            print(f"[ERROR] Failed to initialize routing table: {e}")
+            self.print(f"[ERROR] Failed to initialize routing table: {e}")
 
     async def process(self):
         while True:
-            if self.buffer:
-                data, addr = self.buffer.pop()
-                try:
-                    if data[0] == 'ROUTING_RESPONSE':
-                        await self.routing_table_update(data[1])
-                    else:
-                        flag, decrypted_packet, traceid = self.decrypt_packet(data)
-                        self.extra_process(flag, decrypted_packet, traceid)
+            data, addr = await self.buffer.pop()
+            try:
+                if data[0] == 'ROUTING_RESPONSE':
+                    await self.routing_table_update(data[1])
+                else:
+                    flag, decrypted_packet, traceid = self.decrypt_packet(data)
+                    self.extra_process(flag, decrypted_packet, traceid)
 
-                except Exception as exp:
-                    print("ERROR:", str(exp))
+            except Exception as exp:
+                self.print("ERROR:", str(exp))
 
     def decrypt_packet(self, packet):
         try:
@@ -99,16 +103,18 @@ class Loopix_client(Loopix_Base):
                 raise "Unknown packet type"
 
         except Exception as exp:
-            print("ERROR:", str(exp))
+            self.print("ERROR:", str(exp))
 
 
-    async def periodic_make_stream(self, interval):
+    async def periodic_make_stream(self, interval=1):
+        await self.routing_ready.wait()
         while True:
+            self.print("send a loop message")
             await asyncio.sleep(interval)
             await self.make_stream_loop()
 
     async def make_stream_loop(self):
-        loop_message = 'HT' + np.random.bytes(self.config.NOISE_LENGTH)
+        loop_message = b'HT' + np.random.bytes(self.config.NOISE_LENGTH)
 
         trace_id = self.generate_trace_id()
         path = self.construct_full_path(receiver=self)
@@ -122,12 +128,13 @@ class Loopix_client(Loopix_Base):
         port = path[0].port
         await self.send(self.socket, packet, host, port)
 
+
     async def make_stream_real(self):
         if not self.output_buffer.empty():
             message, receiver = self.output_buffer.get()
         else:
             message = self.generate_random_string(self.config.NOISE_LENGTH)
-            receiver = random.choice(self.routingtable["clients"])
+            receiver = random.choice(self.routing_table["clients"])
 
         trace_id = self.generate_trace_id()
         path = self.construct_full_path(receiver)
