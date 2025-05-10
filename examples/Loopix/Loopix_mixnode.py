@@ -25,7 +25,7 @@ class Loopix_Mixnode(Loopix_Base):
         self.tasks['routing_task'] = asyncio.create_task(self.routing_request())
         self.tasks['listener_task'] = asyncio.create_task(self.listener(self.socket))
         self.tasks['process_task'] = asyncio.create_task(self.process())
-        # self.tasks['periodic_send_task'] = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
+        self.tasks['periodic_send_task'] = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
 
         await asyncio.gather(*self.tasks.values())
 
@@ -36,7 +36,7 @@ class Loopix_Mixnode(Loopix_Base):
         "name": self.name,
         "host": self.host,
         "port": self.port,
-        "public_key": self.pubk,
+        "pubk": self.pubk,
         "group": self.group,
         }]
         addr, port = self.directory_address
@@ -81,11 +81,12 @@ class Loopix_Mixnode(Loopix_Base):
     async def periodic_make_stream(self, interval):
         await self.routing_ready.wait()
         while True:
+            self.print("send a loop message")
             await asyncio.sleep(interval)
             await self.make_stream_loop()
 
     async def make_stream_loop(self):
-        loop_message = 'HT' + np.random.bytes(self.config.NOISE_LENGTH)
+        loop_message = b'HT' + np.random.bytes(self.config.NOISE_LENGTH)
 
         trace_id = self.generate_trace_id()
         path = self.construct_full_path()
@@ -94,10 +95,9 @@ class Loopix_Mixnode(Loopix_Base):
         header, body = make_sphinx_packet(params=self.params, message=loop_message, keys=keys, routing_info=routing_info)
         packet = (header, body)
 
-        host = path[0].host
-        port = path[0].port
-        self.send(self.socket, packet, host, port)
-
+        host = path[0]["host"]
+        port = path[0]["port"]
+        await self.send(self.socket, packet, host, port)
 
 
     def construct_full_path(self, receiver=None):
@@ -111,7 +111,7 @@ class Loopix_Mixnode(Loopix_Base):
             path.append(mix)
             layer = (layer + 1) % num_all_layers
         path.insert(num_all_layers - 1 - self.group, random.choice(self.routing_table['provider']))
-
+        self.print(path)
         return path
 
 
@@ -125,7 +125,8 @@ class Loopix_Mixnode(Loopix_Base):
             routing_flag, meta_info = routing[0], routing[1:]
 
             if routing_flag == Relay_flag:
-                next_addr, drop_flag, trace_id, delay, next_name = meta_info[0]
+                next_addr, next_name, extra = meta_info[0]
+                trace_id, drop_flag, delay = extra
                 return "ROUT", [delay, new_header, new_body, next_addr, next_name], trace_id
 
             elif routing_flag == Dest_flag:
@@ -133,9 +134,10 @@ class Loopix_Mixnode(Loopix_Base):
                 if dest[:-1] == [self.host, self.port, self.name]:
                     message = decoded_packet['message']
                     trace_id = dest[-1]
-                    if message.startswith('HT'):
+                    if message.startswith(b'HT'):
+                        self.print("receive a loop message")
                         return "LOOP", decoded_packet, trace_id
                     else:
                         return "ERROR", [], None
         except Exception as exp:
-            print("ERROR:", str(exp))
+            self.print("ERROR:", str(exp))

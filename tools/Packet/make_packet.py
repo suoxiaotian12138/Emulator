@@ -10,7 +10,7 @@ class RoutingInfo:
     host: str
     port: int
     name: str
-    extra: dict
+    extra: list
 
 
 def make_sphinx_packet(params: SphinxParams, keys: list, message: bytes, routing_info: List[RoutingInfo]):

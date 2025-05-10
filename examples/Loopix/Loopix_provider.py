@@ -18,7 +18,7 @@ class Loopix_Provider(Loopix_Base):
         self.buffer = PacketQueue()
         self.subscribed_clients = {}
         self.client_messages = {}
-        self.config = self.config_set()
+        self.config = self.config_set("parametersProviders")
         self.routing_ready = asyncio.Event()
 
 
@@ -39,7 +39,7 @@ class Loopix_Provider(Loopix_Base):
         "name": self.name,
         "host": self.host,
         "port": self.port,
-        "public_key": self.pubk,
+        "pubk": self.pubk,
         }]
         addr, port = self.directory_address
         await self.send(self.socket, message, addr, port)
@@ -66,7 +66,8 @@ class Loopix_Provider(Loopix_Base):
                     pulled_messages = self.pull_messages(client_id=data[1])
                     for packet in pulled_messages:
                         addr = self.subscribed_clients[data[1]]
-                        self.send(packet, addr)
+                        host, port = addr
+                        await self.send(self.socket, packet, host, port)
                 elif data[0] == 'ROUTING_RESPONSE':
                     await self.routing_table_update(data[1])
                 else:
@@ -80,6 +81,7 @@ class Loopix_Provider(Loopix_Base):
                             packet = (new_header, new_body)
                             asyncio.create_task(self.delayed_send(packet, host, port, delay))
                     elif flag == "LOOP" or flag == "DROP":
+                        self.print("send a loop message")
                         pass
 
                     self.extra_process(flag, decrypted_packet, traceid)
@@ -93,7 +95,8 @@ class Loopix_Provider(Loopix_Base):
             routing_flag, meta_info = routing[0], routing[1:]
 
             if routing_flag == Relay_flag:
-                next_addr, drop_flag, trace_id, delay, next_name = meta_info[0]
+                next_addr, next_name, extra = meta_info[0]
+                trace_id, drop_flag, delay = extra
                 if drop_flag:
                     return "DROP", []
                 else:
@@ -104,7 +107,7 @@ class Loopix_Provider(Loopix_Base):
                 if dest[:-1] == [self.host, self.port, self.name]:
                     message = decoded_packet['message']
                     trace_id = dest[-1]
-                    if message.startswith('HT'):
+                    if message.startswith(b'HT'):
                         return "LOOP", message, trace_id
                     else:
                         raise "Wrong destination"
@@ -122,7 +125,7 @@ class Loopix_Provider(Loopix_Base):
             await self.make_stream_loop()
 
     async def make_stream_loop(self):
-        loop_message = 'HT' + np.random.bytes(self.config.NOISE_LENGTH)
+        loop_message = b'HT' + np.random.bytes(self.config.NOISE_LENGTH)
 
         trace_id = self.generate_trace_id()
         path = self.construct_full_path_loop()
@@ -131,8 +134,8 @@ class Loopix_Provider(Loopix_Base):
         header, body = make_sphinx_packet(params=self.params, message=loop_message, keys=keys, routing_info=routing_info)
         packet = (header, body)
 
-        host = path[0].host
-        port = path[0].port
+        host = path[0]["host"]
+        port = path[0]["port"]
         await self.send(self.socket, packet, host, port)
 
 

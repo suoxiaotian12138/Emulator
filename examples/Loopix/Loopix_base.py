@@ -75,14 +75,13 @@ class Loopix_Base():
         sock.setblocking(False)
         return sock
 
-    async def routing_request(self, interval=10):
+    async def routing_request(self, interval=1):
         while True:
             message = ["ROUTING", {}]  # Empty dict means request full table
             try:
                 # Send to known directory server address
                 host, port = self.directory_address  # should be set externally
                 await self.send(self.socket, message, host, port)
-                self.print(f"[INFO] Sent periodic routing request to {host}:{port}")
             except Exception as e:
                 self.print(f"[ERROR] Failed to send routing request: {e}")
             await asyncio.sleep(interval)  # 3 minutes interval
@@ -122,8 +121,8 @@ class Loopix_Base():
         routing_info = []
         for node in path:
             delay = self.generate_random_delay(self.config.EXP_PARAMS_DELAY)
-            extra = {'trace_id': trace_id, 'drop_flag': drop_flag, 'delay': delay}
-            routing_info.append(RoutingInfo(host=node.host, port=node.port, name=node.name, extra=extra))
+            extra = [trace_id, drop_flag, delay]
+            routing_info.append(RoutingInfo(host=node['host'], port=node['port'], name=node['name'], extra=extra))
         return routing_info
 
 
@@ -138,7 +137,7 @@ class Loopix_Base():
 
     @staticmethod
     def take_nodes_keys(nodes):
-        return [n.pubk for n in nodes]
+        return [n.get("pubk", "") for n in nodes]
 
     @staticmethod
     def generate_random_delay(delay_param):
@@ -155,3 +154,23 @@ class Loopix_Base():
     def generate_random_string(length):
         return np.random.bytes(length)
 
+    @staticmethod
+    def build_node_info(node):
+        node_info = {
+            "host": node.host,
+            "port": node.port,
+            "pubk": node.pubk,
+            "name": node.name,
+        }
+        return node_info
+
+    @staticmethod
+    def build_client_info(node):
+        node_info = {
+            "host": node.host,
+            "port": node.port,
+            "pubk": node.pubk,
+            "name": node.name,
+            "provider": node.provider
+        }
+        return node_info

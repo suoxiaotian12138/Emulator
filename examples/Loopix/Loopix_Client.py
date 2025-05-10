@@ -20,13 +20,15 @@ class Loopix_Client(Loopix_Base):
         self.output_buffer = Queue()
         self.provider_ready = asyncio.Event()
         self.routing_ready = asyncio.Event()
-
+        self.config = self.config_set("parametersClients")
         self.surbkeys = {}
 
 
     async def start_protocol(self):
         self.tasks['register_task'] = asyncio.create_task(self.register())
         self.tasks['routing_task'] = asyncio.create_task(self.routing_request())
+        self.tasks['subscribe_task'] = asyncio.create_task(self.subscribe_to_provider(self.config.TIME_PULL))
+        self.tasks['pull_task'] = asyncio.create_task(self.pull_message(self.config.TIME_PULL))
         self.tasks['listener_task'] = asyncio.create_task(self.listener(self.socket))
         self.tasks['process_task'] = asyncio.create_task(self.process())
         self.tasks['periodic_send_task'] = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
@@ -40,7 +42,7 @@ class Loopix_Client(Loopix_Base):
         "name": self.name,
         "host": self.host,
         "port": self.port,
-        "public_key": self.pubk,
+        "pubk": self.pubk,
         "provider": self.provider
         }]
         addr, port = self.directory_address
@@ -57,7 +59,6 @@ class Loopix_Client(Loopix_Base):
                 self.provider = random.choice(self.routing_table['provider'])
                 self.provider_ready.set()
             if len(self.routing_table['mixnode']) >= 3 and all(len(v) > 0 for v in self.routing_table.values()):
-                self.print("ready to send message")
                 self.routing_ready.set()
 
         except Exception as e:
@@ -69,11 +70,12 @@ class Loopix_Client(Loopix_Base):
             try:
                 if data[0] == 'ROUTING_RESPONSE':
                     await self.routing_table_update(data[1])
-                else:
+                elif not data[0] == 'DUMMY':
                     flag, decrypted_packet, traceid = self.decrypt_packet(data)
                     self.extra_process(flag, decrypted_packet, traceid)
 
             except Exception as exp:
+                print("pb:02")
                 self.print("ERROR:", str(exp))
 
     def decrypt_packet(self, packet):
@@ -86,9 +88,11 @@ class Loopix_Client(Loopix_Base):
                 if dest[:-1] == [self.host, self.port, self.name]:
                     message = decoded_packet['message']
                     trace_id = dest[-1]
-                    if message.startswith('HT'):
+                    if message.startswith(b'HT'):
+                        self.print("receive a loop message")
                         return "LOOP", decoded_packet, trace_id
                     else:
+                        self.print("receive a new message")
                         return "NEW", decoded_packet, trace_id
                 else:
                     raise "Destination has been tampered with"
@@ -103,29 +107,35 @@ class Loopix_Client(Loopix_Base):
                 raise "Unknown packet type"
 
         except Exception as exp:
+            print("pb:01")
             self.print("ERROR:", str(exp))
 
 
-    async def periodic_make_stream(self, interval=1):
+    async def periodic_make_stream(self, interval=0.1):
+        import time
         await self.routing_ready.wait()
         while True:
             self.print("send a loop message")
-            await asyncio.sleep(interval)
             await self.make_stream_loop()
+            self.print("send a real message")
+            await self.make_stream_real()
+            await asyncio.sleep(interval)
+
 
     async def make_stream_loop(self):
+
         loop_message = b'HT' + np.random.bytes(self.config.NOISE_LENGTH)
 
         trace_id = self.generate_trace_id()
-        path = self.construct_full_path(receiver=self)
+        path = self.construct_full_path(receiver=self.build_client_info(self))
         keys = self.take_nodes_keys(path)
         routing_info = self.build_routing_info(path=path, trace_id=trace_id)
         header, body = make_sphinx_packet(params=self.params, message=loop_message, keys=keys,
                                           routing_info=routing_info)
         packet = (header, body)
 
-        host = path[0].host
-        port = path[0].port
+        host = path[0]["host"]
+        port = path[0]["port"]
         await self.send(self.socket, packet, host, port)
 
 
@@ -134,7 +144,7 @@ class Loopix_Client(Loopix_Base):
             message, receiver = self.output_buffer.get()
         else:
             message = self.generate_random_string(self.config.NOISE_LENGTH)
-            receiver = random.choice(self.routing_table["clients"])
+            receiver = random.choice(self.routing_table["client"])
 
         trace_id = self.generate_trace_id()
         path = self.construct_full_path(receiver)
@@ -144,8 +154,8 @@ class Loopix_Client(Loopix_Base):
                                           routing_info=routing_info)
         packet = (header, body)
 
-        host = path[0].host
-        port = path[0].port
+        host = path[0]["host"]
+        port = path[0]["port"]
         await self.send(self.socket, packet, host, port)
 
     def construct_full_path(self, receiver=None):
@@ -160,8 +170,23 @@ class Loopix_Client(Loopix_Base):
             mix = random.choice(self.routing_table['mixnode'][i])
             mix_chain.append(mix)
 
-        return [self.provider] + mix_chain + [receiver.provider] + [receiver]
+        return [self.provider] + mix_chain + [receiver.get('provider', '')] + [receiver]
 
     def extra_process(self, flag, decrypted_packet, traceid):
         pass
+
+    async def subscribe_to_provider(self, interval=10):
+        await self.provider_ready.wait()
+        while True:
+            message = ['SUBSCRIBE', self.name, self.host, self.port]
+            await self.send(self.socket, message, self.provider['host'], self.provider['port'])
+            await asyncio.sleep(interval)
+
+    async def pull_message(self, interval=10):
+        await self.provider_ready.wait()
+        while True:
+            message = ['PULL', self.name]
+            await self.send(self.socket, message, self.provider['host'], self.provider['port'])
+            await asyncio.sleep(interval)
+
 

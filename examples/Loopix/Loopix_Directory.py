@@ -31,14 +31,13 @@ class Loopix_Directory(Loopix_Base):
                     if isinstance(message, list) and len(message) == 2:
                         msg_type, content = message
                         if msg_type == "REGISTER":
-                            print("receive a register message")
                             await self.handle_register(content, addr)
                         elif msg_type == "ROUTING":
                             await self.routing_buffer.put((content, addr))
                         else:
-                            print(f"[WARN] Unsupported message type: {msg_type}")
+                            self.print(f"[WARN] Unsupported message type: {msg_type}")
                     else:
-                        print("[WARN] Unexpected message format:", message)
+                        self.print("[WARN] Unexpected message format:", message)
                 except Exception as e:
                     print(f"[ERROR] Failed to parse or handle message: {e}")
 
@@ -63,6 +62,5 @@ class Loopix_Directory(Loopix_Base):
             _, addr = await self.routing_buffer.get()
             payload = ["ROUTING_RESPONSE", {"routes": self.registered_nodes}]
             await self.send(self.socket, payload, addr[0], addr[1])
-            print(f"[INFO] Sent full routing table to {addr}")
 
 

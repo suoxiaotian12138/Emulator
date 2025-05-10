@@ -67,12 +67,13 @@ async def recv_udp_async(sock: socket.socket, buffer_size: int = 65535):
 
 
 async def handle_udp(result, buffer: PacketQueue):
-    """Store received (data, addr) into packet queue"""
+    """Store received (data, addr) into packet queue only if valid"""
     if result is None:
         return
     data, addr = result
+    if not data or addr is None:
+        return
     await buffer.add(data, addr)
-
 
 
 

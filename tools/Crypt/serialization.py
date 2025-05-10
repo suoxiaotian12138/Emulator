@@ -3,6 +3,8 @@ import base64
 from typing import Any, Union
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+import asyncio
+
 
 
 def encode(data: Any) -> bytes:
