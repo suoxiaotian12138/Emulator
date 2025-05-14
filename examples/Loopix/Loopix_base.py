@@ -11,8 +11,10 @@ import asyncio
 
 from tools.Log.LogPrinter import LogPrinter
 from tools.Packet.packet_UDP import send_udp_async, recv_udp_async, handle_udp, PacketQueue
-from tools.Crypt.key_generator import SECP256R1_setup
-from tools.Packet.make_packet import make_sphinx_packet, RoutingInfo
+from tools.Packet.make_packet import make_sphinx_packet, RoutingInfo, make_sphinx_packet_with_surb
+from tools.Crypt.key_generator import SECP256R1_setup, sphinx_SECP256R1_setup
+from tools.Monitor.LocalMonitor import LocalMonitor
+
 
 from baselib.sphinxmix.SphinxParams import SphinxParams
 from baselib.json_reader import JSONReader
@@ -28,9 +30,9 @@ class Loopix_Base():
         self.buffer = PacketQueue()
 
         self.routing_table = {}
-        self.privk, self.pubk = self.key_set()
+        self.params = self.sphinx_params_set(body_len=2048)
+        self.privk, self.pubk = self.key_set(self.params)
         self.config = self.config_set()
-        self.params = self.sphinx_params_set()
         self.socket = self.socket_set(self.host, self.port)
         self.directory_address = self.get_directory_address()
         self.tasks = {}  # save handles
@@ -42,6 +44,8 @@ class Loopix_Base():
         # Unified log output format
         printer = LogPrinter(name)
         self.print = printer.print
+        self.monitor = LocalMonitor(self.socket)
+        self.monitor.disable()
 
 
     async def listener(self, sock: socket.socket, interval: float = 0.01):
@@ -61,11 +65,12 @@ class Loopix_Base():
 
     @staticmethod
     def sphinx_params_set(header_len=1024, body_len=1024):
+        # The default body length is 1024. If you need to use surb, you need to increase it to 2048.
         return SphinxParams(header_len=header_len, body_len=body_len)
 
     @staticmethod
-    def key_set():
-        curve, private_key, public_key, generator = SECP256R1_setup()
+    def key_set(params):
+        curve, private_key, public_key, generator = sphinx_SECP256R1_setup(params)
         return private_key, public_key
 
     @staticmethod
@@ -135,6 +140,13 @@ class Loopix_Base():
         await asyncio.sleep(delay)
         await self.send(self.socket, packet, host, port)
 
+    async def extra_process(self, flag, decrypted_packet, trace_id, addr):
+        if flag == "ROUT":
+            event = 'recv'
+        else:
+            event = 'dest'
+        await self.monitor.log_event(trace_id=trace_id, event=event, src=addr)
+
     @staticmethod
     def take_nodes_keys(nodes):
         return [n.get("pubk", "") for n in nodes]
@@ -174,3 +186,27 @@ class Loopix_Base():
             "provider": node.provider
         }
         return node_info
+
+    async def make_packet(self, message, path):
+        trace_id = self.generate_trace_id()
+        message = [message, trace_id]
+        keys = self.take_nodes_keys(path)
+        routing_info = self.build_routing_info(path=path, trace_id=trace_id)
+        header, body = make_sphinx_packet(params=self.params, message=message, keys=keys, routing_info=routing_info)
+        await self.monitor.log_event(trace_id=trace_id, event="send", dst=(path[0]['host'], path[0]['port']))
+
+        return (header, body)
+
+    async def make_packet_with_surb(self, message, path, surb_path, surbkeys_storage):
+        trace_id = self.generate_trace_id()
+        message = [message, trace_id]
+        keys = self.take_nodes_keys(path)
+        routing_info = self.build_routing_info(path=path, trace_id=trace_id)
+        surb_trace_id = self.generate_trace_id()
+        surb_keys = self.take_nodes_keys(surb_path)
+        surb_routing_info = self.build_routing_info(path=surb_path, trace_id=surb_trace_id)
+        header, body = make_sphinx_packet_with_surb(self.params, keys, message, routing_info,
+                                                    surb_keys, surb_routing_info, surbkeys_storage)
+        await self.monitor.log_event(trace_id=trace_id, event="send", dst=(path[0]['host'], path[0]['port']))
+
+        return (header, body)

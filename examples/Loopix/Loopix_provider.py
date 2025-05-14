@@ -31,15 +31,13 @@ class Loopix_Provider(Loopix_Base):
 
         await asyncio.gather(*self.tasks.values())
 
-
-
     async def register(self):
         message = ['REGISTER', {
-        "node_type": "provider",
-        "name": self.name,
-        "host": self.host,
-        "port": self.port,
-        "pubk": self.pubk,
+            "node_type": "provider",
+            "name": self.name,
+            "host": self.host,
+            "port": self.port,
+            "pubk": self.pubk,
         }]
         addr, port = self.directory_address
         await self.send(self.socket, message, addr, port)
@@ -81,10 +79,10 @@ class Loopix_Provider(Loopix_Base):
                             packet = (new_header, new_body)
                             asyncio.create_task(self.delayed_send(packet, host, port, delay))
                     elif flag == "LOOP" or flag == "DROP":
-                        self.print("send a loop message")
+                        self.print("receive a loop message")
                         pass
 
-                    self.extra_process(flag, decrypted_packet, traceid)
+                    await self.extra_process(flag, decrypted_packet, traceid, addr)
 
             except Exception as exp:
                 self.print("ERROR:", str(exp))
@@ -92,29 +90,28 @@ class Loopix_Provider(Loopix_Base):
     def decrypt_packet(self, packet):
         try:
             tag, routing, new_header, new_body, mac = decrypt_sphinx_packet(self.params, packet, self.privk)
-            routing_flag, meta_info = routing[0], routing[1:]
 
+            routing_flag, meta_info = routing[0], routing[1:]
             if routing_flag == Relay_flag:
                 next_addr, next_name, extra = meta_info[0]
                 trace_id, drop_flag, delay = extra
                 if drop_flag:
-                    return "DROP", []
+                    return "DROP", [], None
                 else:
                     return "ROUT", [delay, new_header, new_body, next_addr, next_name], trace_id
 
             elif routing_flag == Dest_flag:
                 dest, decoded_packet = handle_forward_sphinx(self.params, new_body, mac)
-                if dest[:-1] == [self.host, self.port, self.name]:
-                    message = decoded_packet['message']
-                    trace_id = dest[-1]
+                if dest == [self.host, self.port, self.name]:
+                    message, trace_id = decoded_packet['message']
                     if message.startswith(b'HT'):
                         return "LOOP", message, trace_id
                     else:
-                        raise "Wrong destination"
+                        raise ValueError("Wrong destination")
                 else:
-                    raise "Destination has been tampered with"
+                    raise ValueError("Destination has been tampered with")
             else:
-                raise "Wrong flag"
+                raise ValueError("Wrong flag")
         except Exception as exp:
             self.print("ERROR:", str(exp))
 
@@ -126,21 +123,13 @@ class Loopix_Provider(Loopix_Base):
 
     async def make_stream_loop(self):
         loop_message = b'HT' + np.random.bytes(self.config.NOISE_LENGTH)
-
-        trace_id = self.generate_trace_id()
-        path = self.construct_full_path_loop()
-        keys = self.take_nodes_keys(path)
-        routing_info = self.build_routing_info(path=path,trace_id=trace_id)
-        header, body = make_sphinx_packet(params=self.params, message=loop_message, keys=keys, routing_info=routing_info)
-        packet = (header, body)
-
+        path = self.construct_full_path(receiver=self.build_client_info(self))
+        packet = await self.make_packet(message=loop_message, path=path)
         host = path[0]["host"]
         port = path[0]["port"]
         await self.send(self.socket, packet, host, port)
 
-
-
-    def construct_full_path_loop(self, receiver=None):
+    def construct_full_path(self, receiver=None):
         """构造完整路径"""
         # 后续可能会修改loop message的路径生成逻辑
         path = []
@@ -151,8 +140,6 @@ class Loopix_Provider(Loopix_Base):
         return path
 
 
-    def extra_process(self, flag, decrypted_packet, traceid):
-        pass
 
     def pull_messages(self, client_id):
         dummy_messages = []

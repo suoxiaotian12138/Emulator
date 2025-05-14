@@ -5,6 +5,7 @@ from baselib.sphinxmix.SphinxClient import PFdecode, receive_forward, receive_su
 
 def decrypt_sphinx_packet(params, packet, key):
     header, body = packet
+
     tag, info, (new_header, new_body), final_body = sphinx_process(params, key, header, body)
     routing = PFdecode(params, info)
     return tag, routing, new_header, new_body, final_body

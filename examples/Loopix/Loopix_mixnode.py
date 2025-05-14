@@ -1,9 +1,7 @@
 import numpy as np
 import random
 
-import socket
 import asyncio
-from tools.Packet.make_packet import make_sphinx_packet, RoutingInfo
 from tools.Packet.decrypt_packet import decrypt_sphinx_packet, handle_forward_sphinx
 
 from baselib.sphinxmix.SphinxClient import Relay_flag, Dest_flag
@@ -25,19 +23,19 @@ class Loopix_Mixnode(Loopix_Base):
         self.tasks['routing_task'] = asyncio.create_task(self.routing_request())
         self.tasks['listener_task'] = asyncio.create_task(self.listener(self.socket))
         self.tasks['process_task'] = asyncio.create_task(self.process())
-        self.tasks['periodic_send_task'] = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
+        # self.tasks['periodic_send_task'] = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
 
         await asyncio.gather(*self.tasks.values())
 
 
     async def register(self):
         message = ['REGISTER', {
-        "node_type": "mixnode",
-        "name": self.name,
-        "host": self.host,
-        "port": self.port,
-        "pubk": self.pubk,
-        "group": self.group,
+            "node_type": "mixnode",
+            "name": self.name,
+            "host": self.host,
+            "port": self.port,
+            "pubk": self.pubk,
+            "group": self.group,
         }]
         addr, port = self.directory_address
         await self.send(self.socket, message, addr, port)
@@ -45,12 +43,10 @@ class Loopix_Mixnode(Loopix_Base):
 
     async def routing_table_update(self, content):
         try:
-
             temp_routing_table = content.get("routes", {})
             self.routing_table['client'] =temp_routing_table.get('client', [])
             self.routing_table['provider'] =temp_routing_table.get('provider', [])
             self.routing_table['mixnode'] = self.group_layered_topology(temp_routing_table.get('mixnode', []))
-
             if len(self.routing_table['mixnode']) >= 3 and all(len(v) > 0 for v in self.routing_table.values()):
                 self.routing_ready.set()
         except Exception as e:
@@ -72,8 +68,8 @@ class Loopix_Mixnode(Loopix_Base):
                     elif flag == "LOOP":
                         pass
                     else:
-                        raise "Unknown packet type"
-                    self.extra_process(flag, decrypted_packet, traceid)
+                        self.print("Unknown packet type")
+                    await self.extra_process(flag, decrypted_packet, traceid, addr)
 
             except Exception as exp:
                 self.print("ERROR:", str(exp))
@@ -87,14 +83,8 @@ class Loopix_Mixnode(Loopix_Base):
 
     async def make_stream_loop(self):
         loop_message = b'HT' + np.random.bytes(self.config.NOISE_LENGTH)
-
-        trace_id = self.generate_trace_id()
-        path = self.construct_full_path()
-        keys = self.take_nodes_keys(path)
-        routing_info = self.build_routing_info(path=path,trace_id=trace_id)
-        header, body = make_sphinx_packet(params=self.params, message=loop_message, keys=keys, routing_info=routing_info)
-        packet = (header, body)
-
+        path = self.construct_full_path(receiver=self.build_client_info(self))
+        packet = await self.make_packet(message=loop_message, path=path)
         host = path[0]["host"]
         port = path[0]["port"]
         await self.send(self.socket, packet, host, port)
@@ -111,12 +101,8 @@ class Loopix_Mixnode(Loopix_Base):
             path.append(mix)
             layer = (layer + 1) % num_all_layers
         path.insert(num_all_layers - 1 - self.group, random.choice(self.routing_table['provider']))
-        self.print(path)
         return path
 
-
-    def extra_process(self, flag, decrypted_packet, traceid):
-        pass
 
 
     def decrypt_packet(self, packet):
@@ -131,9 +117,8 @@ class Loopix_Mixnode(Loopix_Base):
 
             elif routing_flag == Dest_flag:
                 dest, decoded_packet = handle_forward_sphinx(self.params, new_body, mac)
-                if dest[:-1] == [self.host, self.port, self.name]:
-                    message = decoded_packet['message']
-                    trace_id = dest[-1]
+                if dest == [self.host, self.port, self.name]:
+                    message, trace_id = decoded_packet['message']
                     if message.startswith(b'HT'):
                         self.print("receive a loop message")
                         return "LOOP", decoded_packet, trace_id

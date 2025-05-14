@@ -3,19 +3,19 @@
 # Copyright 2011 Ian Goldberg
 # Copyright 2016 George Danezis (UCL InfoSec Group)
 #
-# This file is part of sphinxmix.
+# This file is part of Sphinx.
 #
-# sphinxmix is free software: you can redistribute it and/or modify
+# Sphinx is free software: you can redistribute it and/or modify
 # it under the terms of version 3 of the GNU Lesser General Public
 # License as published by the Free Software Foundation.
 #
-# sphinxmix is distributed in the hope that it will be useful,
+# Sphinx is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public
-# License along with sphinxmix.  If not, see
+# License along with Sphinx.  If not, see
 # <http://www.gnu.org/licenses/>.
 #
 # The LIONESS implementation and the xcounter CTR mode class are adapted
@@ -42,19 +42,19 @@ zero_iv = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
 # Copyright 2011 Ian Goldberg
 # Copyright 2016 George Danezis (UCL InfoSec Group)
 #
-# This file is part of sphinxmix.
+# This file is part of Sphinx.
 #
-# sphinxmix is free software: you can redistribute it and/or modify
+# Sphinx is free software: you can redistribute it and/or modify
 # it under the terms of version 3 of the GNU Lesser General Public
 # License as published by the Free Software Foundation.
 #
-# sphinxmix is distributed in the hope that it will be useful,
+# Sphinx is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public
-# License along with sphinxmix.  If not, see
+# License along with Sphinx.  If not, see
 # <http://www.gnu.org/licenses/>.
 #
 # The LIONESS implementation and the xcounter CTR mode class are adapted
@@ -64,159 +64,139 @@ zero_iv = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
 from os import urandom
 from hashlib import sha256
 import hmac
-
-# Replaced petlib with cryptography
-
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from tools.Crypt.serialization import decode
 
 # Python 2/3 compatibility
 from builtins import bytes
 
 zero_iv = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
 
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.backends import default_backend
-from hashlib import sha256
 
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
 from hashlib import sha256
 
 class Group_ECC:
     """Group operations in ECC"""
 
     def __init__(self, gid=713):
-        # 使用SECP256R1曲线作为默认
         self.G = ec.SECP256R1()
-        # 生成私钥
-        self.private_key = ec.generate_private_key(self.G, default_backend())
-        # 公钥作为生成器
-        self.g = self.private_key.public_key()
+        self.backend = default_backend()
+        self.k = 16
+
+        # 不再使用随机私钥的公钥作为生成器！
+        # self.private_key = ec.generate_private_key(self.G, self.backend)
+        # self.g = self.private_key.public_key()  # ❌错误
+
+        # ✅ 使用曲线的固定生成元表示（不可直接取 G 点，但我们用 keygen 一致生成）
+        self.g = self.make_generator_point()  # 用于“代表性输出”，但建议不参与实际运算
+
+    def make_generator_point(self):
+        """生成一个确定性的公钥作为 g 的代表值，仅用于打印"""
+        test_sk = ec.derive_private_key(1, self.G, self.backend)
+        return test_sk.public_key()
 
     def gensecret(self):
-        """生成一个随机密钥"""
-        return ec.generate_private_key(self.G, default_backend())
+        """生成一个随机私钥对象"""
+        return ec.generate_private_key(self.G, self.backend)
+
+    def keygen(self):
+        """返回 (私钥, 公钥)，供发送方/接收方安全使用"""
+        priv = self.gensecret()
+        pub = priv.public_key()
+        return priv, pub
 
     def expon(self, base, exp):
-        """使用私钥导出公钥"""
-        # 确保基点是公钥类型
-        if isinstance(base, ec.EllipticCurvePublicKey):
-            pub_key = base
-        else:
+        """
+        Perform ECDH(base, exp) where:
+        - base: ec.EllipticCurvePublicKey
+        - exp[0]: ec.EllipticCurvePrivateKey
+        """
+        if not isinstance(base, ec.EllipticCurvePublicKey):
             raise TypeError("Base must be an EC public key")
 
-        # 处理exp作为私钥或公钥的情况
-        if isinstance(exp[0], ec.EllipticCurvePrivateKey):
-            pub_key_exp = exp[0].public_key()
-        elif isinstance(exp[0], ec.EllipticCurvePublicKey):
-            pub_key_exp = exp[0]
-        else:
-            raise TypeError("Exponentiation base should be an EC public key or ECPrivateKey")
+        if not isinstance(exp[0], ec.EllipticCurvePrivateKey):
+            raise TypeError("Exponent must be an EC private key")
 
-        # 将exp转换为整数
-        exp_int = int.from_bytes(sha256(pub_key_exp.public_bytes(
-            encoding=serialization.Encoding.X962, format=serialization.PublicFormat.UncompressedPoint)).digest(), "big")
-
-        # 使用衍生的私钥
-        derived_private_key = ec.derive_private_key(exp_int, self.G, default_backend())
-        return derived_private_key.public_key()
+        # True ECDH shared secret
+        shared = exp[0].exchange(ec.ECDH(), base)
+        return shared  # This is a byte string
 
     def expon_base(self, exp):
-        """以基点进行指数运算"""
+        """Get public key of a blinded secret (exp must be private key)"""
         if isinstance(exp[0], ec.EllipticCurvePrivateKey):
-            pub_key_exp = exp[0].public_key()
-        elif isinstance(exp[0], ec.EllipticCurvePublicKey):
-            pub_key_exp = exp[0]
+            return exp[0].public_key()
         else:
-            raise TypeError("Exponentiation base should be an EC public key or ECPrivateKey")
-
-        # 将exp转换为整数
-        exp_int = int.from_bytes(sha256(pub_key_exp.public_bytes(
-            encoding=serialization.Encoding.X962, format=serialization.PublicFormat.UncompressedPoint)).digest(), "big")
-
-        # 使用衍生的私钥
-        derived_private_key = ec.derive_private_key(exp_int, self.G, default_backend())
-        return derived_private_key.public_key()
+            raise TypeError("Expon_base must receive a private key")
 
     def makeexp(self, data):
-        """将二进制数据转换为私钥"""
+        """将原始字节映射为 ECC 私钥"""
         digest = sha256(data).digest()
-        int_val = int.from_bytes(digest, byteorder="big")  # 转换为整数
-        return ec.derive_private_key(int_val, self.G, default_backend())
+        int_val = int.from_bytes(digest, byteorder="big")
+        return ec.derive_private_key(int_val, self.G, self.backend)
 
     def in_group(self, alpha):
-        """检查一个点是否在ECC群中"""
-        if isinstance(alpha, ec.EllipticCurvePublicKey):
-            return True
-        return False
-
-    def printable(self, alpha):
-        """将ECC点转换为字节"""
-        if isinstance(alpha, ec.EllipticCurvePublicKey):
-            return alpha.public_bytes(
+        if not isinstance(alpha, ec.EllipticCurvePublicKey):
+            print(alpha)
+            print("pb:01")
+            return False
+        try:
+            # 检查是否属于正确曲线
+            if not isinstance(alpha.curve, ec.SECP256R1):
+                print("pb:02")
+                return False
+            alpha.public_bytes(
                 encoding=serialization.Encoding.X962,
                 format=serialization.PublicFormat.UncompressedPoint
             )
-        else:
-            raise TypeError("alpha必须是EC公钥")
+            return True
+        except Exception:
+            print("pb:03")
+            return False
 
- # Additional functions from the provided code
+    def pubkey_from_bytes(self, data: bytes):
+        """将字节转换为公钥对象"""
+        return ec.EllipticCurvePublicKey.from_encoded_point(self.G, data)
+
+    def printable(self, alpha):
+        """将公钥转换为字节表示（Uncompressed Point）"""
+        if not self.in_group(alpha):
+            raise TypeError("alpha 必须是 EC 公钥")
+        return alpha.public_bytes(
+            encoding=serialization.Encoding.X962,
+            format=serialization.PublicFormat.UncompressedPoint
+        )
+
+
+
+    # ========= 派生密钥函数（保留原样） =========
     def derive_key(self, k, flavor):
-        """Derive the key from the given k and flavor."""
         assert len(k) == len(flavor) == self.k
-        iv = flavor
-        m = b"\x00" * self.k
-        K = self.aes.enc(k, iv).update(m)
-        return K
+        cipher = Cipher(algorithms.AES(k), modes.CTR(flavor), backend=self.backend)
+        encryptor = cipher.encryptor()
+        return encryptor.update(b"\x00" * self.k)
 
-    def hb(self, k):
-        "Compute a hash of alpha and s to use as a blinding factor"
-        K = self.derive_key(k, b"hbhbhbhbhbhbhbhb")
-        return self.group.makeexp(K)
-
-    def hrho(self, k):
-        "Compute a hash of s to use as a key for the PRG rho"
-        K = self.derive_key(k, b"hrhohrhohrhohrho")
-        return K
-
-    def hmu(self, k):
-        "Compute a hash of s to use as a key for the HMAC mu"
-        K = self.derive_key(k, b"hmu:hmu:hmu:hmu:")
-        return K
-
-    def hpi(self, k):
-        "Compute a hash of s to use as a key for the PRP pi"
-        K = self.derive_key(k, b"hpi:hpi:hpi:hpi:")
-        return K
-
-    def htau(self, k):
-        "Compute a hash of s to use to see if we've seen s before"
-        K = self.derive_key(k, b"htauhtauhtauhtau")
-        return K
-
-    def h_body_K(self, k):
-        "The Ultrix key to protect the user data."
-        K = self.derive_key(k, b"UbodUbodUbodUbod")
-        return K
-
-    def h_root_K(self, k):
-        "The Ultrix key to protect the root key."
-        K = self.derive_key(k, b"UrooUrooUrooUroo")
-        return K
+    def hb(self, k): return self.makeexp(self.derive_key(k, b"hbhbhbhbhbhbhbhb"))
+    def hrho(self, k): return self.derive_key(k, b"hrhohrhohrhohrho")
+    def hmu(self, k): return self.derive_key(k, b"hmu:hmu:hmu:hmu:")
+    def hpi(self, k): return self.derive_key(k, b"hpi:hpi:hpi:hpi:")
+    def htau(self, k): return self.derive_key(k, b"htauhtauhtauhtau")
+    def h_body_K(self, k): return self.derive_key(k, b"UbodUbodUbodUbod")
+    def h_root_K(self, k): return self.derive_key(k, b"UrooUrooUrooUroo")
 
     def derive_user_keys(self, k, iv, number=2):
-        """Derive multiple keys."""
-        material = self.aes.enc(k, iv).update(b"\x00" * self.k * number)
-        st_ranges = range(0, self.k * number, self.k)
+        cipher = Cipher(algorithms.AES(k), modes.CTR(iv), backend=self.backend)
+        encryptor = cipher.encryptor()
+        material = encryptor.update(b"\x00" * (self.k * number))
+        return [material[i:i + self.k] for i in range(0, len(material), self.k)]
 
-        return [material[st:st + self.k] for st in st_ranges]
 
 class SphinxParams:
 
-    def __init__(self, group=None, header_len = 192, body_len = 1024, assoc_len=0, k=16, dest_len=16):
+    def __init__(self, group=None, header_len=192, body_len=1024, assoc_len=0, k=16, dest_len=16):
         # Replaced petlib AES cipher with cryptography's Cipher
-        self.aes = Cipher(algorithms.AES(bytes(k)), modes.CTR(zero_iv), backend=default_backend())
-        self.cbc = Cipher(algorithms.AES(bytes(k)), modes.CBC(zero_iv), backend=default_backend())
 
         self.assoc_len = assoc_len
         self.max_len = header_len
@@ -232,21 +212,22 @@ class SphinxParams:
             self.group = Group_ECC()
 
     def aes_ctr(self, k, m, iv = zero_iv):
-        # AES-CTR encryption
-        encryptor = self.aes.encryptor()
-        c = encryptor.update(m)
-        return bytes(c)
+        cipher = Cipher(algorithms.AES(k), modes.CTR(iv), backend=default_backend())
+        encryptor = cipher.encryptor()
+        return encryptor.update(m) + encryptor.finalize()
 
     def aes_cbc_enc(self, k, m, iv = zero_iv):
         # AES-CBC encryption
-        cipher = self.cbc.encryptor()
+        cbc = Cipher(algorithms.AES(bytes(k)), modes.CBC(iv), backend=default_backend())
+        cipher = cbc.encryptor()
         cipher.set_padding(False)
         c = cipher.update(m)
         return bytes(c)
 
     def aes_cbc_dec(self, k, m, iv = zero_iv):
         # AES-CBC decryption
-        cipher = self.cbc.decryptor()
+        cbc = Cipher(algorithms.AES(bytes(k)), modes.CBC(iv), backend=default_backend())
+        cipher = cbc.decryptor()
         cipher.set_padding(False)
         c = cipher.update(m)
         return bytes(c)
@@ -272,6 +253,7 @@ class SphinxParams:
         # Round 4
         c = self.aes_ctr(key, r3[self.k:], r3[:self.k])
         r4 = r3[:self.k] + c
+        assert r4 != message, "[ERROR] Encryption failed: output equals input!"
 
         return r4
 
@@ -316,7 +298,6 @@ class SphinxParams:
     def pi(self, key, data):
         assert len(key) == self.k
         assert len(data) == self.m
-
         return self.lioness_enc(key, data)
 
     # The inverse PRP; key is of length k, data is of length m
@@ -328,39 +309,37 @@ class SphinxParams:
 
     def small_perm(self, key, data):
         assert len(data) == self.k
-        enc = self.cbc.encryptor()
-        enc.set_padding(False)
-        c = enc.update(data)
-        return c
+        cipher = Cipher(algorithms.AES(key), modes.CBC(zero_iv), backend=default_backend())
+        enc = cipher.encryptor()
+        return enc.update(data)
 
     def small_perm_inv(self, key, data):
         assert len(data) == self.k
-        dec = self.cbc.decryptor()
-        dec.set_padding(False)
-        c = dec.update(data)
-        return c
+        cipher = Cipher(algorithms.AES(key), modes.CBC(zero_iv), backend=default_backend())
+        dec = cipher.decryptor()
+        return dec.update(data)
 
     # The various hashes
     def hash(self, data):
         return sha256(data).digest()
 
     def get_aes_key(self, s):
-        group = self.group
-        return bytes(self.hash(b"aes_key:" + group.printable(s))[:self.k])
+        if isinstance(s, bytes):
+            material = s
+        elif self.group.in_group(s):  # EC 公钥
+            material = self.group.printable(s)
+        else:
+            raise TypeError("Unsupported key type passed to get_aes_key.")
 
-    def get_aes_key_all(self, s):
-        group = self.group
-        k = self.hash
+        return bytes(self.hash(b"aes_key:" + material)[:self.k])
+
 
  # Additional functions from the provided code
     def derive_key(self, k, flavor):
-        """Derive the key from the given k and flavor."""
         assert len(k) == len(flavor) == self.k
-        iv = flavor
-        m = b"\x00" * self.k
-        encryptor = self.aes.encryptor()
-        K = encryptor.update(m)
-        return K
+        cipher = Cipher(algorithms.AES(k), modes.CTR(flavor), backend=default_backend())
+        encryptor = cipher.encryptor()
+        return encryptor.update(b"\x00" * self.k)
 
     def hb(self, k):
         "Compute a hash of alpha and s to use as a blinding factor"
@@ -398,11 +377,11 @@ class SphinxParams:
         return K
 
     def derive_user_keys(self, k, iv, number=2):
-        """Derive multiple keys."""
-        material = self.aes.enc(k, iv).update(b"\x00" * self.k * number)
-        st_ranges = range(0, self.k * number, self.k)
+        cipher = Cipher(algorithms.AES(k), modes.CTR(iv), backend=default_backend())
+        encryptor = cipher.encryptor()
+        material = encryptor.update(b"\x00" * (self.k * number))
+        return [material[i:i + self.k] for i in range(0, len(material), self.k)]
 
-        return [material[st:st + self.k] for st in st_ranges]
 
 def test_group():
     G = Group_ECC()
@@ -447,3 +426,17 @@ def test_params():
     assert len(ctxt) == len(plain)
     ptxt = params.aes_cbc_dec(k, ctxt)
     assert ptxt == plain
+
+def test_lioness_roundtrip():
+    from os import urandom
+    params = SphinxParams()
+    key = urandom(params.k)
+    msg = urandom(params.k * 2)
+
+    cipher = params.lioness_enc(key, msg)
+    plain = params.lioness_dec(key, cipher)
+
+    assert cipher != msg, "加密未生效：cipher 等于明文！"
+    assert plain == msg, "解密失败：无法还原明文！"
+
+
