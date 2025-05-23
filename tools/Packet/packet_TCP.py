@@ -1,12 +1,67 @@
 from typing import Set
-from tools.Crypt.serialization import encode, decode
-import threading
 import time
-from queue import Empty
-import asyncio
+import ssl
 import socket
 
 from typing import Dict, Tuple, Optional, Callable
+
+
+import asyncio
+from typing import Optional
+from tools.Crypt.serialization import decode
+
+
+class ByteBuffer:
+    """
+    An asyncio-aware ByteBuffer that supports:
+    - extract_by_head(): length-prefixed decoding
+    - extract_by_size(n): fixed-length byte extraction
+    """
+
+    def __init__(self):
+        self.buffer = bytearray()
+        self.condition = asyncio.Condition()
+
+    async def add(self, data: bytes):
+        """Append raw data and notify waiting consumers."""
+        async with self.condition:
+            self.buffer.extend(data)
+            self.condition.notify_all()
+
+    async def extract_by_head(self):
+        """Extract a message with 4-byte big-endian length prefix."""
+        while True:
+            async with self.condition:
+                length = self.get_next_length()
+                if length is not None and len(self.buffer) >= 4 + length:
+                    raw = self.read(4 + length)
+                    return decode(raw[4:])
+                await self.condition.wait()
+
+    async def extract_by_size(self, size: int = 514) -> bytes:
+        """Extract exactly `size` bytes, wait if not enough data."""
+        while True:
+            async with self.condition:
+                if len(self.buffer) >= size:
+                    return self.read(size)
+                await self.condition.wait()
+
+    def get_next_length(self) -> Optional[int]:
+        """Return next message's length if available."""
+        if len(self.buffer) < 4:
+            return None
+        return int.from_bytes(self.buffer[:4], 'big')
+
+    def read(self, size: int) -> bytes:
+        """Read and remove first `size` bytes from buffer."""
+        if len(self.buffer) < size:
+            raise ValueError("Insufficient data")
+        result = self.buffer[:size]
+        del self.buffer[:size]
+        return result
+
+    def __len__(self):
+        return len(self.buffer)
 
 
 def recv_tcp(sock: socket.socket, buffer_size: int = 65535):
@@ -20,28 +75,19 @@ def recv_tcp(sock: socket.socket, buffer_size: int = 65535):
         return None
 
 
-def handle_tcp(result, buffer):
+async def handle_tcp(result, buffer):
     """Decode received TCP data and store in byte buffer"""
     if result is None:
         return
     data, _ = result
-    # obj = decode(data)
-    buffer.add(data)
+    await buffer.add(data)
 
 
-def handle_tcp_with_addr(result, buffer):
-    """Store received (data, addr) into packet queue"""
-    if result is None:
-        return
-    data, addr = result
-    # obj = decode(data)
-    buffer.add(data, addr)
 
 def send_tcp(sock: socket.socket, message: bytes) -> bool:
     """Use an existing TCP socket to send a message (long connection)"""
     try:
-        if not isinstance(message, bytes):
-            message = encode(message)
+        assert isinstance(message, bytes), "Expected bytes"
         sock.sendall(message)
         return True
     except Exception as e:
@@ -49,12 +95,8 @@ def send_tcp(sock: socket.socket, message: bytes) -> bool:
         return False
 
 
-
-
-
-
 async def connection_manager(
-        connection_map: Dict[socket.socket, Tuple[str, int]],
+        connection_map: Dict[Tuple[str, int], socket.socket],
         lock: asyncio.Lock,
         buffer,
         buffer_size: int = 4096,
@@ -74,7 +116,7 @@ async def connection_manager(
         monitored_ids = {t.get_name() for t in active_tasks}
 
         # 为新连接创建监控任务
-        for conn, addr in current_connections:
+        for addr, conn in current_connections:
             conn_id = str(id(conn))
             if conn_id not in monitored_ids:
                 task = asyncio.create_task(
@@ -92,10 +134,10 @@ async def monitor_connection(
         conn: socket.socket,
         addr: Tuple[str, int],
         lock: asyncio.Lock,
-        connection_map: Dict[socket.socket, Tuple[str, int]],
+        connection_map: Dict[Tuple[str, int], socket.socket],
         buffer,
         buffer_size: int = 4096,
-        timeout: float = 600.0,
+        timeout: float = 60.0,
         handler: Optional[Callable[[Tuple[bytes, Tuple[str, int]], any], None]] = None,
 ):
     if handler is None:
@@ -126,7 +168,7 @@ async def monitor_connection(
 
                 # 有效数据，更新活跃时间
                 last_recv_time = now
-                handler((data, addr), buffer)
+                await handler((data, addr), buffer)
 
             except asyncio.TimeoutError:
                 print(f"[Hard Timeout] {identifier} - Socket call hung, closing")
@@ -153,7 +195,7 @@ async def monitor_connection(
 
 async def accept_connections(
         listener_socket: socket.socket,
-        connection_map: Dict[socket.socket, Tuple[str, int]],
+        connection_map: Dict[Tuple[str, int], socket.socket],
         lock: asyncio.Lock,
 ):
     """持续接受新的TCP连接"""
@@ -164,11 +206,11 @@ async def accept_connections(
             # 尝试接受新连接
             conn, addr = await asyncio.get_event_loop().sock_accept(listener_socket)
             conn.setblocking(False)
-            print(f"[Accepted] {addr[0]}:{addr[1]}")
+            # print(f"[Accepted] {addr[0]}:{addr[1]}")
 
             # 添加到连接映射
             async with lock:
-                connection_map[conn] = addr
+                connection_map[addr] = conn
 
         except asyncio.CancelledError:
             # 任务被取消时退出
@@ -181,11 +223,11 @@ async def accept_connections(
 
 async def listen_to_tcp(
         listener_socket: socket.socket,
-        connection_map: Dict[socket.socket, Tuple[str, int]],
+        connection_map: Dict[Tuple[str, int], socket.socket],
         lock: asyncio.Lock,
         buffer,
         buffer_size: int = 4096,
-        timeout: float = 600.0,
+        timeout: float = 60.0,
         handler: Optional[Callable[[Tuple[bytes, Tuple[str, int]], any], None]] = None,
 ):
     """
@@ -220,179 +262,94 @@ async def listen_to_tcp(
 
 
 
+async def accept_tls_connections(
+    listener_socket: socket.socket,
+    connection_map: Dict[Tuple[str, int], socket.socket],
+    lock: asyncio.Lock,
+    ssl_context: ssl.SSLContext,
+):
+    """
+    Accept only TLS connections, wrap using ssl_context,
+    and store the TLS sockets in connection_map.
+    """
+    loop = asyncio.get_running_loop()
+    listener_socket.setblocking(False)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-class ByteBuffer:
-    """Byte-oriented buffer (like Tor's buf_t), stores raw data with length-based decoding."""
-
-    def __init__(self):
-        self.buffer = bytearray()
-
-    def add(self, data: bytes):
-        """Append raw data to the buffer."""
-        self.buffer.extend(data)
-
-    def extract_message_by_size(self, size: int) -> bytes:
-        """Remove and return 'size' bytes from the buffer."""
-        if len(self.buffer) < size:
-            raise ValueError("Not enough data")
-        result = self.buffer[:size]
-        del self.buffer[:size]
-        return decode(result)
-
-    def extract_message_by_head(self):
-        """
-        Try to decode a complete message from the buffer.
-        Returns the decoded object if a full message is available, else None.
-        """
-        length = self.get_next_length()
-
-        if length is None or len(self.buffer) < 4 + length:
-            return None  # Not enough data
-
-        raw_data = self.read(4 + length)
-        encoded_payload = raw_data[4:]
-        print("raw_data",raw_data)
-        print("encode_data",encoded_payload)
-        return decode(encoded_payload)
-
-    def read(self, size: int) -> bytes:
-        """Peek at the first 'size' bytes without removing them."""
-        if len(self.buffer) < size:
-            raise ValueError("Not enough data to peek")
-        result = self.buffer[:size]
-        del self.buffer[:size]
-        return result
-
-    def get_next_length(self) -> Optional[int]:
-        """Read the next message length from the buffer (4 bytes), return None if not ready."""
-        if len(self.buffer) < 4:
-            return None
-        return int.from_bytes(self.buffer[:4], 'big')
-
-    def __len__(self):
-        return len(self.buffer)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def buffer_consumer(wrapper: ByteBuffer, stop_event, name="Consumer"):
-    while not stop_event.is_set():
+    while True:
         try:
+            # 等待连接
+            raw_conn, addr = await loop.sock_accept(listener_socket)
+            raw_conn.setblocking(True)  # 必须为 blocking 才能进行 TLS 握手
+            print("pb:01")
+            # 尝试进行 TLS 握手包装
+            try:
+                tls_conn = await loop.run_in_executor(
+                    None,  # 使用默认线程池
+                    lambda: ssl_context.wrap_socket(raw_conn, server_side=True)
+                )
 
-            while True:
-                obj = wrapper.extract_message_by_head()
-                if obj is None:
-                    break
-                print(f"[{name}] Decoded from : {obj}")
-        except Empty:
-            continue
+                tls_conn.setblocking(False)  # ✅ handshake 完成后恢复非阻塞
+                print("pb:02")
+                # 保存到映射表
+                async with lock:
+                    connection_map[addr] = tls_conn
 
-def encode_with_length(obj: any) -> bytes:
-    body = encode(obj)
-    return len(body).to_bytes(4, 'big') + body
+                print(f"[TLS Accepted] {addr[0]}:{addr[1]}")
+            except ssl.SSLError as e:
+                print(f"[TLS Handshake Failed] {addr}: {e}")
+                raw_conn.close()
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[Accept Error] {e}")
+            await asyncio.sleep(0.1)
 
 
-def start_server(port=8888, buffer=None):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_sock.bind(('127.0.0.1', port))
-    server_sock.listen()
+async def listen_to_tls(
+        listener_socket: socket.socket,
+        connection_map: Dict[Tuple[str, int], socket.socket],
+        lock: asyncio.Lock,
+        buffer,
+        ssl_context: ssl.SSLContext,
+        buffer_size: int = 4096,
+        timeout: float = 60.0,
+        handler: Optional[Callable[[Tuple[bytes, Tuple[str, int]], any], None]] = None,
 
-    conn_map = {}
-    lock = asyncio.Lock()
+):
+    listener_socket.setblocking(False)
+    print(f"[Listening] Tls server on {listener_socket.getsockname()}")
+
+    # 创建接受连接和管理连接的任务
+    accept_task = asyncio.create_task(accept_tls_connections(listener_socket, connection_map, lock, ssl_context))
+    manager_task = asyncio.create_task(connection_manager(connection_map, lock, buffer, buffer_size, timeout, handler))
 
     try:
-        loop.run_until_complete(
-            listen_to_tcp(
-                server_sock,
-                conn_map,
-                lock,
-                buffer,
-                handler=lambda res, buf: handle_tcp(res, buf),
-            )
-        )
-    except KeyboardInterrupt:
-        pass
+        # 等待这两个任务，直到被取消
+        await asyncio.gather(accept_task, manager_task)
+    except asyncio.CancelledError:
+        # 取消所有任务
+        accept_task.cancel()
+        manager_task.cancel()
+
+        # 等待任务完成取消
+        await asyncio.gather(accept_task, manager_task, return_exceptions=True)
+
+
+
+def is_socket_alive(sock: socket.socket) -> bool:
+    if sock is None:
+        return False
+    try:
+        sock.setblocking(False)
+        sock.recv(0)
+        return True  # 没有异常表示还连着
+    except BlockingIOError:
+        return True  # 没有数据，但连接仍存在
+    except ConnectionResetError:
+        return False  # 对方关闭了连接
+    except OSError:
+        return False  # socket 出错了
     finally:
-        loop.close()
-
-def mock_client(name: str, message: str, port=8888, repeat=5, delay=0.001):
-    time.sleep(1)
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(('127.0.0.1', port))
-
-        for i in range(repeat):
-            msg = encode_with_length(f"{name} says {message} [{i}]")
-            if not send_tcp(s, msg):
-                break
-            time.sleep(delay)
-
-        s.close()
-    except Exception as e:
-        print(f"[Client-{name}] Error: {e}")
-
-def run_test():
-    wrapper = ByteBuffer()
-    stop_event = threading.Event()
-
-    server_thread = threading.Thread(target=start_server, args=(8888, wrapper), daemon=True)
-    consumer_thread = threading.Thread(target=buffer_consumer, args=(wrapper, stop_event), daemon=True)
-
-    server_thread.start()
-    consumer_thread.start()
-
-    client_threads = []
-    for i in range(5):
-        t = threading.Thread(target=mock_client, args=(f"client{i}", f"hello from {i}"))
-        t.start()
-        client_threads.append(t)
-
-    for t in client_threads:
-        t.join()
-
-    time.sleep(5)
-    stop_event.set()
-    consumer_thread.join()
-
-
-
-if __name__ == "__main__":
-    run_test()
+        sock.setblocking(True)

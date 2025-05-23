@@ -112,10 +112,8 @@ class Loopix_Base():
 
     @staticmethod
     def group_layered_topology(mixes):
-        # 按 group 字段排序（确保 groupby 正确分组）
         sorted_mixes = sorted(mixes, key=lambda x: x["group"])
 
-        # 按 group 聚类成子列表
         grouped_mixes = [list(group) for _, group in itertools.groupby(
             sorted_mixes, key=lambda x: x["group"])]
 
