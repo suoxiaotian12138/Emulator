@@ -8,7 +8,7 @@ from tools.Crypt.serialization import decode
 
 
 from examples.Tor_simplified.Tor_base import Tor_base
-from examples.Tor_simplified.Tor_Circuit import TorCircuit, CircuitsList
+from examples.Tor_simplified.Tor_Circuit import TorCircuit, Tor_CircuitsList
 
 class Tor_Client(Tor_base):
     def __init__(self, name: str, host: str, port: int):
@@ -18,7 +18,7 @@ class Tor_Client(Tor_base):
         self._version = 4
         self._send_lock = asyncio.Lock()
         self.guard = None
-        self.circuit_list = CircuitsList(self.guard)
+        self.circuit_list = Tor_CircuitsList(self.guard)
 
     async def start_protocol(self):
         # self.tasks['routing_task'] = asyncio.create_task(self.routing_request())

@@ -1,35 +1,25 @@
 import os
-import ssl
-import numpy as np
-import time
-import random
-import hashlib
-import itertools
+
 from urllib.parse import urlparse
 
 import socket
 import asyncio
 
 from tools.Log.LogPrinter import LogPrinter
-from tools.Packet.packet_TCP import send_tcp, listen_to_tls, ByteBuffer, handle_tcp,listen_to_tcp
+from tools.Packet.packet_TCP import accept_tls_connections
 from tools.Crypt.key_generator import generate_cert_and_key_from_ed25519, create_server_context, ed25519_setup
-from tools.Monitor.LocalMonitor import LocalMonitor
-from torpy.cells import TorCell
 
-from baselib.json_reader import JSONReader
-
-
+from examples.Tor_simplified.Tor_Router import Tor_Socket
 
 class Tor_base:
-    def __init__(self, name: str, host: str, port: int):
-        self.version = 4
+
+    def __init__(self, name: str, host: str, port: int, model="local"):
 
         self.host = host
         self.port = port
         self.name = name
         self.addr = (host, port)
 
-        self.buffer = ByteBuffer()
         self.lock = asyncio.Lock()
         self.routing_table = {}
 
@@ -37,14 +27,13 @@ class Tor_base:
         self.socket = self.socket_recv_set(self.host, self.port)   # Used to accept socket connections,not to send or receive data directly.
         self.socket_map = {}   # dict[Tuple[str, int], socket.socket]
         self.directory_address = self.get_directory_address()
+        self.model = model
         self.tasks = {}  # save handles
 
         self.tls_privt, self.tls_pubk = ed25519_setup()
         self.cert_file, self.key_file = generate_cert_and_key_from_ed25519(self.tls_privt)
         self.context = create_server_context(self.cert_file, self.key_file)
 
-        self.send = send_tcp
-        self.put_into_buffer = handle_tcp
 
         # Unified log output format
         printer = LogPrinter(name)
@@ -66,25 +55,6 @@ class Tor_base:
         sock.listen()
         return sock
 
-    def create_tls_connection(self, local_addr=None, remote_addr=None):
-        if remote_addr is None:
-            raise ValueError("remote_addr must be specified")
-        context = ssl.create_default_context()
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        if local_addr is not None:
-            sock.bind(local_addr)
-        server_hostname = remote_addr[0]
-        sock = context.wrap_socket(sock, server_hostname=server_hostname)
-        self.socket_map[remote_addr] = sock
-        self.tor_handshake(sock)
-        return sock
-
-    def tor_handshake(self, socket):
-        from torpy.cell_socket import TorHandshake, TorProtocol
-        protocal = TorProtocol()
-        handshake = TorHandshake(socket, protocal)
-        handshake.initiate()
-
     @staticmethod
     def get_directory_address(default=None):
         addr = os.environ.get('DIRECTORY_ADDR', default)
@@ -103,17 +73,27 @@ class Tor_base:
 
         return (host, port)
 
-    async def listener(self):
-        """将您的listen_to_tcp包装成一个任务"""
-        await listen_to_tls(
-            listener_socket=self.socket,
-            connection_map=self.socket_map,
-            lock=self.lock,
-            buffer=self.buffer,
-            ssl_context=self.context,
-            handler=self.put_into_buffer,
+    async def serve_tor_socket(self):
+        """
+        持续监听新 TLS 连接，为每个连接创建独立的 Tor_Socket 管理任务
+        """
+        async for tls_socket, addr in accept_tls_connections(self.socket, self.context):
+            # ✅ 每个连接开一个任务，不阻塞主监听循环
 
-        )
+            tor_sock = Tor_Socket(remote_addr=addr, sock=tls_socket, on_cell=self.handle_cell)
+            asyncio.create_task(self.handle_connection(addr, tor_sock))
+
+    async def handle_connection(self, addr, tor_sock):
+        try:
+            self.socket_map[addr] = tor_sock
+            handle = await tor_sock.start_all()  # 返回 monitor_handle task
+            await handle  # 等连接断开
+        finally:
+            self.socket_map.pop(addr, None)
+            print(f"[Monitor] Connection {addr} closed and removed from map.")
+
+    def handle_cell(self, cell):
+        pass
 
     async def stop_protocol(self):
         """停止所有任务，包括TCP服务器"""
@@ -122,25 +102,5 @@ class Tor_base:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*self.tasks.values(), return_exceptions=True)
-
-    @property
-    def header_format(self):
-        #    CircuitID                          [CIRCUIT_ID_LEN octets]
-        #    Command                            [1 byte]
-        if self.version < 4:
-            return '!HB'
-        else:
-            # Link protocol 4 increases circuit ID width to 4 bytes.
-            return '!IB'
-
-    def deserialize(self, command, payload, circuit_id=0):
-        # parse depending on version
-        # ...
-        return TorCell.deserialize(command, circuit_id, payload, self.version)
-
-    def serialize(self, cell):
-        # get bytes depending on version
-        # ...
-        return cell.serialize(self.version)
 
 

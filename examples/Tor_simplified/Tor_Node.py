@@ -1,62 +1,77 @@
 import asyncio
-from queue import Queue
+import requests
 
-
-from tools.Packet.packet_TCP import accept_tls_connections
-from tools.Crypt.key_generator import curve25519_setup
+from torpy.cells import *
 
 from examples.Tor_simplified.Tor_base import Tor_base
 from examples.Tor_simplified.Tor_Circuit import Tor_CircuitsList
-from examples.Tor_simplified.Tor_Consensus import Tor_Consensus
-from examples.Tor_simplified.Tor_Router import Tor_Router, Tor_Socket
-from torpy.cells import *
+from examples.Tor_simplified.Tor_Descriptor import TorDescriptor_build
+from examples.Tor_simplified.Tor_Router import Tor_Router
+
+from tools.Crypt.key_generator import curve25519_setup, ed25519_setup, rsa_setup
 
 
-class Tor_Client(Tor_base):
-    def __init__(self, name: str, host: str, port: int, model="local"):
-        super().__init__(name, host, port, model)
-        self.output_buffer = Queue()
-        self.privk_ntor, self.pubk_ntor = curve25519_setup()
 
-        self.consensus = Tor_Consensus()
+class Tor_Guard(Tor_base):
+    def __init__(self, name: str, host: str, port: int):
+        super().__init__(name, host, port)
 
-        self.guard = Tor_Router(self.consensus.get_random_guard_node())
-        self.guard.set_descriptor(self.consensus.get_descriptor_by_fingerprint(self.guard.fingerprint_str))
-        socket = Tor_Socket(remote_addr=self.guard.addr, on_cell=self.handle_cell)
-        asyncio.create_task(self.handle_connection(self.guard.addr, socket))
+        self.ntor_pvk, self.ntor_puk = curve25519_setup()
+        self.ed_pvk, self.ed_puk = ed25519_setup()
+        self.rsa_pvk, _ = rsa_setup()
         self.circuit_list = Tor_CircuitsList()
 
-    def consensus_init(self):
-        consensus = None
-        if self.model == "local":
-            pass
-        else:
-            consensus = Tor_Consensus
-
-        return consensus
 
     async def start_protocol(self):
-        # self.tasks['routing_task'] = asyncio.create_task(self.routing_request())
+        self.tasks['routing_task'] = asyncio.create_task(self.register_to_dire())
         self.tasks['listener_task'] = asyncio.create_task(self.serve_tor_socket())
         # self.tasks['periodic_send_task'] = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
 
         await asyncio.gather(*self.tasks.values())
 
+    async def register_to_dire(self):
+        descriptor = self.generate_descriptor()
+        await self.upload_descriptor_to_dirserver(descriptor, "127.0.0.1", 9030)
 
-    async def make_stream(self, message, addr, hops_count=3, extend_routers=None):
-        socket = self.socket_map.get(self.guard.addr, None)   #之后补充guard的查验逻辑，即guard是否断线，如果没断就一直保持socket连通
-        if socket is None:
-            socket = Tor_Socket(remote_addr=self.guard.addr, on_cell=self.handle_cell)
-            asyncio.create_task(self.handle_connection(self.guard.addr, socket))
+    async def upload_descriptor_to_dirserver(self,
+                                             descriptor_text: str,
+                                             dirserver_ip: str,
+                                             dirserver_port: int = 80,
+                                             path: str = "/tor/post/dir"
+                                             ) -> None:
+        """
+        异步上传 server descriptor 到目录服务器
+        """
+        url = f"http://{dirserver_ip}:{dirserver_port}{path}"
+        headers = {
+            "User-Agent": "Tor 0.4.8.x on Python",
+            "Content-Type": "application/x-tor-server-descriptor",
+        }
 
-        circuit = await self.create_circuit(socket, hops_count, extend_routers)
-        stream = circuit.create_stream()
-        connect_cell = stream.make_connect(addr)
-        await socket.send_cell(connect_cell)
-        await stream.wait_connect_ack()
-        cells = stream.make_relays(message)
+        def sync_post():
+            return requests.post(url, headers=headers, data=descriptor_text.encode("utf-8"), timeout=10)
 
-        await socket.send_cells(cells)
+        try:
+            response = await asyncio.to_thread(sync_post)
+            print(f"[+] Descriptor uploaded. HTTP {response.status_code}")
+            print("Response body:")
+            print(response.text)
+        except Exception as e:
+            print(f"[!] Failed to upload descriptor: {e}")
+
+    def generate_descriptor(self):
+        desc_build = TorDescriptor_build(
+            nickname=self.name,
+            ip=self.host,
+            ed_sk=self.ed_pvk,
+            ed_pk=self.ed_puk,
+            curve_sk=self.ntor_pvk,
+            curve_pk=self.ntor_puk,
+            rsa_sk=self.rsa_pvk,
+            or_port=self.port
+        )
+        descriptor = desc_build.build()
+        return descriptor
 
     async def create_circuit(self, socket, hops_count=3, extend_routers=None):
         """Quickly select several random nodes and freely add nodes, such as exit nodes"""
@@ -139,6 +154,16 @@ class Tor_Client(Tor_base):
 
         stream.close()
 
+if __name__ == "__main__":
+    from torpy.parsers import RouterDescriptorParser
+    from torpy.consesus import Descriptor
 
-
-
+    guard = Tor_Guard("guard1", "127.0.0.1", 9001)
+    descriptor_txt = guard.generate_descriptor()
+    print(descriptor_txt)
+    descriptor_info = RouterDescriptorParser.parse(descriptor_txt)
+    aas = Descriptor(**descriptor_info)
+    print(aas)
+    print(aas.onion_key)
+    print(aas.ntor_key)
+    print(aas.signing_key)

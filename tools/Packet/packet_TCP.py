@@ -3,7 +3,7 @@ import time
 import ssl
 import socket
 
-from typing import Dict, Tuple, Optional, Callable
+from typing import Dict, Tuple, Callable
 
 
 import asyncio
@@ -68,6 +68,7 @@ def recv_tcp(sock: socket.socket, buffer_size: int = 65535):
     """Non-blocking receive from TCP socket, returns data or None"""
     try:
         data = sock.recv(buffer_size)
+        print("data:", data)
         if not data:
             return None  # Connection closed
         return data
@@ -83,16 +84,13 @@ async def handle_tcp(result, buffer):
     await buffer.add(data)
 
 
-
-def send_tcp(sock: socket.socket, message: bytes) -> bool:
+async def send_tcp(sock: socket.socket, message: bytes):
     """Use an existing TCP socket to send a message (long connection)"""
     try:
         assert isinstance(message, bytes), "Expected bytes"
         sock.sendall(message)
-        return True
     except Exception as e:
         print(f"[TCP Send Error] Failed to send via socket -> {e}")
-        return False
 
 
 async def connection_manager(
@@ -137,7 +135,7 @@ async def monitor_connection(
         connection_map: Dict[Tuple[str, int], socket.socket],
         buffer,
         buffer_size: int = 4096,
-        timeout: float = 60.0,
+        timeout: float = 600.0,
         handler: Optional[Callable[[Tuple[bytes, Tuple[str, int]], any], None]] = None,
 ):
     if handler is None:
@@ -263,38 +261,31 @@ async def listen_to_tcp(
 
 
 async def accept_tls_connections(
-    listener_socket: socket.socket,
-    connection_map: Dict[Tuple[str, int], socket.socket],
-    lock: asyncio.Lock,
-    ssl_context: ssl.SSLContext,
+        listener_socket,
+        ssl_context,
 ):
     """
-    Accept only TLS connections, wrap using ssl_context,
-    and store the TLS sockets in connection_map.
+    异步生成器：仅接受 TLS 连接，每建立成功就 yield (tls_socket, addr)
     """
     loop = asyncio.get_running_loop()
     listener_socket.setblocking(False)
 
     while True:
         try:
-            # 等待连接
             raw_conn, addr = await loop.sock_accept(listener_socket)
-            raw_conn.setblocking(True)  # 必须为 blocking 才能进行 TLS 握手
-            print("pb:01")
-            # 尝试进行 TLS 握手包装
+            raw_conn.setblocking(True)  # 必须阻塞才能进行 TLS 握手
+
             try:
                 tls_conn = await loop.run_in_executor(
-                    None,  # 使用默认线程池
+                    None,
                     lambda: ssl_context.wrap_socket(raw_conn, server_side=True)
                 )
 
-                tls_conn.setblocking(False)  # ✅ handshake 完成后恢复非阻塞
-                print("pb:02")
-                # 保存到映射表
-                async with lock:
-                    connection_map[addr] = tls_conn
-
+                tls_conn.setblocking(False)
                 print(f"[TLS Accepted] {addr[0]}:{addr[1]}")
+
+                yield tls_conn, addr  # ✅ 连接建立后 yield 出去
+
             except ssl.SSLError as e:
                 print(f"[TLS Handshake Failed] {addr}: {e}")
                 raw_conn.close()
@@ -307,34 +298,60 @@ async def accept_tls_connections(
 
 
 
-async def listen_to_tls(
-        listener_socket: socket.socket,
-        connection_map: Dict[Tuple[str, int], socket.socket],
-        lock: asyncio.Lock,
+async def monitor_connection_tls(
+        conn: socket.socket,
+        addr: Tuple[str, int],
         buffer,
-        ssl_context: ssl.SSLContext,
-        buffer_size: int = 4096,
-        timeout: float = 60.0,
+        buffer_size: int = 4094,
+        timeout: float = 600.0,
         handler: Optional[Callable[[Tuple[bytes, Tuple[str, int]], any], None]] = None,
-
 ):
-    listener_socket.setblocking(False)
-    print(f"[Listening] Tls server on {listener_socket.getsockname()}")
+    if handler is None:
+        handler = handle_tcp
 
-    # 创建接受连接和管理连接的任务
-    accept_task = asyncio.create_task(accept_tls_connections(listener_socket, connection_map, lock, ssl_context))
-    manager_task = asyncio.create_task(connection_manager(connection_map, lock, buffer, buffer_size, timeout, handler))
+    loop = asyncio.get_running_loop()
+    conn.setblocking(True)  # ✅ run_in_executor 内允许阻塞
+    identifier = f"{addr[0]}:{addr[1]}"
+    last_recv_time = time.time()
 
     try:
-        # 等待这两个任务，直到被取消
-        await asyncio.gather(accept_task, manager_task)
-    except asyncio.CancelledError:
-        # 取消所有任务
-        accept_task.cancel()
-        manager_task.cancel()
+        while True:
+            try:
+                # 通过线程池执行阻塞接收，最多等待 timeout 秒
+                data = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: recv_tcp(conn, buffer_size)),
+                    timeout=timeout
+                )
 
-        # 等待任务完成取消
-        await asyncio.gather(accept_task, manager_task, return_exceptions=True)
+                now = time.time()
+
+                if data is None or len(data) == 0:
+                    if now - last_recv_time > timeout:
+                        print(f"[Timeout] {identifier} - No data for {timeout}s, closing")
+                        break
+                    await asyncio.sleep(0.1)
+                    continue
+
+                # 有效数据，更新活跃时间
+                last_recv_time = now
+                await handler((data, addr), buffer)
+
+            except asyncio.TimeoutError:
+                print(f"[Hard Timeout] {identifier} - Socket call hung, closing")
+                break
+            except Exception as e:
+                print(f"[Recv Error] {identifier} -> {e}")
+                break
+
+    finally:
+        try:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            conn.close()
+        except Exception:
+            pass
 
 
 

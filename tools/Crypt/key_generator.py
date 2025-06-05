@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey, X25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from baselib.sphinxmix.SphinxParams import SphinxParams
 
@@ -32,6 +33,11 @@ def sphinx_SECP256R1_setup(params: SphinxParams):
 # Keys for the ntor protocol, Generate session key via dh exchange, 32bytes
 def curve25519_setup():
     private_key = X25519PrivateKey.generate()
+    public_key = private_key.public_key()
+    return private_key, public_key
+
+def rsa_setup():
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
     public_key = private_key.public_key()
     return private_key, public_key
 
@@ -95,6 +101,27 @@ def generate_cert_and_key_from_ed25519(private_key: ed25519.Ed25519PrivateKey):
 
     return cert_file.name, key_file.name
 
+def generate_cert_from_ed25519(private_key: ed25519.Ed25519PrivateKey) -> bytes:
+    """Generate a throw-away X.509 cert (only to mimic the *-cert* section)."""
+    pub = private_key.public_key()
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "CN"),
+        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Beijing"),
+        x509.NameAttribute(NameOID.LOCALITY_NAME, "Haidian"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "OnionNode"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1"),
+    ])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(pub)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.utcnow() - datetime.timedelta(days=1))
+        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=365))
+        .sign(private_key, algorithm=None)          # fake self-sign
+    )
+    return cert.public_bytes(serialization.Encoding.DER)
 
 def create_server_context(certfile: str, keyfile: str) -> ssl.SSLContext:
     """

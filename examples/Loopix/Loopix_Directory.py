@@ -1,7 +1,5 @@
 import asyncio
-import json
-from tools.Packet.packet_UDP import send_udp, recv_udp
-from tools.Packet.make_packet import RoutingInfo
+
 from examples.Loopix.Loopix_base import Loopix_Base
 from tools.Crypt.serialization import decode
 

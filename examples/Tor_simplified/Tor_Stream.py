@@ -25,9 +25,8 @@ class StreamsList:
 
     @staticmethod
     def get_next_stream_id():
-        with StreamsList.LOCK:
-            StreamsList.GLOBAL_STREAM_ID += 1
-            return StreamsList.GLOBAL_STREAM_ID
+        StreamsList.GLOBAL_STREAM_ID += 1
+        return StreamsList.GLOBAL_STREAM_ID
 
     def create_new(self):
         stream = TorStream(self.get_next_stream_id(), self._circuit)
@@ -56,7 +55,7 @@ class TorStream:
 
         self._buffer = bytearray()
         self._data_lock = asyncio.Lock()
-        self._has_data = asyncio.Event()
+        self.data_event = asyncio.Event()
         self._received_callbacks = []
 
         self._conn_timeout = 30
@@ -65,7 +64,7 @@ class TorStream:
         self._state = StreamState.Closed
         self._close_lock = asyncio.Lock()
 
-        self._window = TorWindow(start=500, increment=50)
+        self.window = TorWindow(start=500, increment=50)
 
         self.connect_event = self._make_new_event()
 
@@ -82,29 +81,13 @@ class TorStream:
     def id(self):
         return self._id
 
-    @property
-    def state(self):
-        return self._state
-
     @staticmethod
     def _make_new_event():
         return asyncio.Event()
 
-    def register(self, callback):
-        self._received_callbacks.append(callback)
-
-    def unregister(self, callback):
-        self._received_callbacks.remove(callback)
-
-    def _append(self, data):
-        with self._close_lock, self._data_lock:
-            if self._state == StreamState.Closed:
-                logger.warning('Stream #%i: closed (but received %r)', self.id, data)
-                return
-
-            logger.debug('Stream #%i: append %i (to buffer)', self.id, len(data))
-            self._buffer.extend(data)
-            self._has_data.set()
+    def append(self, data):
+        self._buffer.extend(data)
+        self.data_event.set()
 
     def close(self):
         logger.info('Stream #%i: closing (state = %s)...', self.id, self._state.name)
@@ -122,40 +105,9 @@ class TorStream:
     async def wait_connect_ack(self):
         try:
             await asyncio.wait_for(self.connect_event.wait(), self._conn_timeout)
+            self.connect_event = self._make_new_event()
         except asyncio.TimeoutError:
             raise TimeoutError("Timed out waiting for CONNECT ACK")
-
-    def on_connect_ack(self):
-        self.connect_event.set()
-
-
-    def recv(self, bufsize):
-        if self._state == StreamState.Closed:
-            raise Exception("You can't recv closed stream")
-
-        signaled = self._has_data.wait(self._recv_timeout)
-        if not signaled:
-            raise Exception('recv timeout')
-
-        # If remote side already send 'end cell' but we still
-        # has some data - we keep receiving
-        if self._state == StreamState.Disconnected and not self._buffer:
-            return b''
-
-        with self._data_lock:
-            if bufsize == -1:
-                to_read = len(self._buffer)
-            else:
-                to_read = min(len(self._buffer), bufsize)
-            result = self._buffer[:to_read]
-            self._buffer = self._buffer[to_read:]
-            logger.debug('Stream #%i: read %i (left %i)', self.id, to_read, len(self._buffer))
-
-            # Clear 'has_data' flag only if we don't have more data and not disconnected
-            if not self._buffer and self._state != StreamState.Disconnected:
-                self._has_data.clear()
-
-        return result
 
 
     @staticmethod
@@ -183,3 +135,19 @@ class TorStream:
     def make_cell(self, inner_cell):
         return self._circuit.make_relay(inner_cell, stream_id=self.id)
 
+    def set_end(self, cell_end):
+        logger.info('Stream #%i: remote disconnected (reason = %s)', self.id, cell_end.reason.name)
+        self.data_event.set()
+
+    async def recv(self, bufsize):
+
+        await self.data_event.wait()
+        if bufsize == -1:
+            to_read = len(self._buffer)
+        else:
+            to_read = min(len(self._buffer), bufsize)
+        result = self._buffer[:to_read]
+        self._buffer = self._buffer[to_read:]
+        self.data_event = self._make_new_event()
+
+        return result
