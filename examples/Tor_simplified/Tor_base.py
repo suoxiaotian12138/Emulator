@@ -1,19 +1,20 @@
 import os
 
 from urllib.parse import urlparse
+from typing import Literal
 
 import socket
 import asyncio
 
 from tools.Log.LogPrinter import LogPrinter
 from tools.Packet.packet_TCP import accept_tls_connections
-from tools.Crypt.key_generator import generate_cert_and_key_from_ed25519, create_server_context, ed25519_setup
+from tools.Crypt.key_generator import generate_cert_and_key_from_rsa, create_server_context, ed25519_setup, rsa_setup, generate_cert_and_key_from_ed25519
 
 from examples.Tor_simplified.Tor_Router import Tor_Socket
 
 class Tor_base:
 
-    def __init__(self, name: str, host: str, port: int, model="local"):
+    def __init__(self, name: str, host: str, port: int, model: Literal["sim", "real"] = "sim"):
 
         self.host = host
         self.port = port
@@ -31,6 +32,8 @@ class Tor_base:
         self.tasks = {}  # save handles
 
         self.tls_privt, self.tls_pubk = ed25519_setup()
+        self.rsa_pvk, _ = rsa_setup()
+
         self.cert_file, self.key_file = generate_cert_and_key_from_ed25519(self.tls_privt)
         self.context = create_server_context(self.cert_file, self.key_file)
 
@@ -80,19 +83,19 @@ class Tor_base:
         async for tls_socket, addr in accept_tls_connections(self.socket, self.context):
             # ✅ 每个连接开一个任务，不阻塞主监听循环
 
-            tor_sock = Tor_Socket(remote_addr=addr, sock=tls_socket, on_cell=self.handle_cell)
+            tor_sock = Tor_Socket(sock=tls_socket, on_cell=self.handle_cell)
             asyncio.create_task(self.handle_connection(addr, tor_sock))
 
     async def handle_connection(self, addr, tor_sock):
         try:
             self.socket_map[addr] = tor_sock
-            handle = await tor_sock.start_all()  # 返回 monitor_handle task
+            handle = await tor_sock.start_listen()  # 返回 monitor_handle task
             await handle  # 等连接断开
         finally:
             self.socket_map.pop(addr, None)
             print(f"[Monitor] Connection {addr} closed and removed from map.")
 
-    def handle_cell(self, cell):
+    def handle_cell(self, cell, sock):
         pass
 
     async def stop_protocol(self):

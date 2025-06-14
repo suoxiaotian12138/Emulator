@@ -139,13 +139,10 @@ class Group_ECC:
 
     def in_group(self, alpha):
         if not isinstance(alpha, ec.EllipticCurvePublicKey):
-            print(alpha)
-            print("pb:01")
             return False
         try:
             # 检查是否属于正确曲线
             if not isinstance(alpha.curve, ec.SECP256R1):
-                print("pb:02")
                 return False
             alpha.public_bytes(
                 encoding=serialization.Encoding.X962,
@@ -153,7 +150,6 @@ class Group_ECC:
             )
             return True
         except Exception:
-            print("pb:03")
             return False
 
     def pubkey_from_bytes(self, data: bytes):

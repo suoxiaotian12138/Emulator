@@ -3,31 +3,14 @@ import asyncio
 from queue import Queue
 
 from examples.Tor_simplified.Tor_Stream import StreamsList
-from examples.Tor_simplified.Tor_Router import Tor_Router
+from examples.Tor_simplified.Tor_Router import Tor_Router, Tor_Router_simple
 
-from torpy.keyagreement import KeyAgreement, TapKeyAgreement, NtorKeyAgreement, FastKeyAgreement
+from torpy.keyagreement import NtorKeyAgreement
 from functools import partial
 from torpy.crypto_state import CryptoState
 from torpy.http.client import HttpStreamClient
 from torpy.circuit import TorCircuitState, check_connected, CircuitNode, CircuitExtendError
-from torpy.cells import (
-    CellRelay,
-    CellCreateFast,
-    CellCreate2,
-    CellDestroy,
-    CellCreatedFast,
-    CellCreated2,
-    CellRelayEnd,
-    CellRelayData,
-    CircuitReason,
-    CellRelayEarly,
-    RelayedTorCell,
-    CellRelaySendMe,
-    CellRelayExtend2,
-    CellRelayConnected,
-    CellRelayExtended2,
-    CellRelayTruncated,
-)
+from examples.Tor_simplified.TorCell import *
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +24,7 @@ class Tor_CircuitsList:
         self._circuits_map = {}
 
     def values(self):
-        return self._circuits_map.values()
+        return self._circuits_map.items()
 
     async def _get_next_circuit_id(self):
         async with Tor_CircuitsList.LOCK:
@@ -53,6 +36,11 @@ class Tor_CircuitsList:
 
     async def create_new(self):
         circuit_id = await self._get_next_circuit_id()
+        circuit = TorCircuit(circuit_id)
+        self._circuits_map[circuit.id] = circuit
+        return circuit
+
+    def set_circuit(self, circuit_id):
         circuit = TorCircuit(circuit_id)
         self._circuits_map[circuit.id] = circuit
         return circuit
@@ -79,19 +67,17 @@ class TorCircuit:
         self.connect_event = self._make_new_event()
 
 
-
-
     def initialize(self, guard):
         logger.debug('Circuit created')
-
         key_agreement_cls = NtorKeyAgreement
-        create_cls = partial(CellCreate2, key_agreement_cls.TYPE)
         circuit_node = guard
         onion_skin = circuit_node.create_onion_skin()
-
+        print("create onion:", onion_skin)
         self.circuit_nodes.append(circuit_node)
-        cell_create = create_cls(onion_skin, self.id)
+
+        cell_create = Cell_Create2(key_agreement_cls.TYPE, onion_skin, self.id)
         self.created_cell = None  #便于后续传入cell
+
         return cell_create
 
     async def guard_handsake(self, wait_time=60):
@@ -115,18 +101,20 @@ class TorCircuit:
 
         logger.debug('Sending Extend2...')
         skin = extend_node.create_onion_skin()
+        print("extend onion:", skin)
+
         inner_cell = CellRelayExtend2(
             extend_node.ip, extend_node.or_port, extend_node.fingerprint, skin
         )
-        extend_cell = self.make_relay(inner_cell, relay_type=CellRelayEarly)
+        extend_cell = self.make_relay(inner_cell, relay_type=Cell_RelayEarly)
         self.circuit_nodes.append(extend_node)
-        self.extend_cell = None
+        self.extended_cell = None
         return extend_cell
 
     async def extend_handshake(self, descriptor_str, wait_time=60):
         try:
             await asyncio.wait_for(self.connect_event.wait(), wait_time)
-            recv_cell = self.extend_cell
+            recv_cell = self.extended_cell
             if isinstance(recv_cell, CellRelayTruncated):
                 raise CircuitExtendError('Extend error {}'.format(recv_cell.reason.name))
             extend_node = self.last_node
@@ -140,36 +128,25 @@ class TorCircuit:
     def handle_relay(self, cell):
         # tor ref: circuit_receive_relay_cell
         # tor ref: connection_edge_process_relay_cell
-        circuit_node, inner_cell = self._decrypt(cell)
-        logger.debug('Decrypted relay cell received from %s: %r', circuit_node.nickname, inner_cell)
+        inner_cell = self._decrypt_client(cell)
+        print("succeful")
+        logger.debug('Decrypted relay cell received from %s: %r', inner_cell)
         return inner_cell
 
+    def handle_relay_server(self, cell):
+        relay_cell = self._decrypt_server(cell)
+        logger.debug('Decrypted relay cell received from %s: %r', relay_cell)
+        return relay_cell
 
-
-    def create_dir_client(self):
-        stream = self.create_stream()
-        stream.connect_dir()
-        return HttpStreamClient(stream, host=self.last_node.router.ip)
+    def circuit_build_server(self, protocol, create_cell, sock):
+        payload, share_key = protocol.handle_create2(create_cell.serialize_payload())
+        created_cell = CellCreated2(payload, create_cell.circuit_id)
+        simple_node = Tor_Router_simple(sock, share_key)
+        self.circuit_nodes.append(simple_node)
+        return created_cell
 
     def destroy(self, send_destroy=True):
-        with self._state_lock:
-            logger.debug('#%x circuit: destroying (state: %s)...', self.id, self._state.name)
-
-            if self._state == TorCircuitState.Unknown:
-                raise Exception('#{:x} circuit is not yet connected'.format(self.id))
-
-            if self._state == TorCircuitState.Destroyed:
-                logger.warning('#%x circuit: has been destroyed already', self.id)
-                return
-
-            if self._state == TorCircuitState.Connected:
-                # Destroy all streams belonging to the current circuit
-                self.close_all_streams()
-                if send_destroy:
-                    # Destroy the circuit itself
-                    self._send(CellDestroy(CircuitReason.FINISHED, self.id))
-
-            self._state = TorCircuitState.Destroyed
+        pass
 
     def close_all_streams(self):
         for stream in list(self.streams.values()):
@@ -182,30 +159,58 @@ class TorCircuit:
         for circuit_node in self.circuit_nodes[::-1]:
             circuit_node.encrypt_forward(relay_cell)
 
-    def _decrypt(self, relay_cell):
+    def _encrypt_server(self, relay_cell):
+        assert isinstance(relay_cell, RelayedTorCell)
+        assert not relay_cell.is_encrypted
+        circuit_node = self.circuit_nodes[0]
+        circuit_node.encrypt_forward(relay_cell)
+
+
+    def _decrypt_client(self, relay_cell):
         # tor ref: relay_decrypt_cell
         assert relay_cell.is_encrypted
+        print("circuit_nodes", self.circuit_nodes)
 
-        from_node = None
         for i, circuit_node in enumerate(self.circuit_nodes):
+            print("i:", i)
+            print("circuit_node", circuit_node)
             logger.debug('Decrypting by [%i] %s...', i, circuit_node)
             if not relay_cell.is_encrypted:
                 break
 
             # Continue decrypting...
             circuit_node.decrypt_backward(relay_cell)
-            from_node = circuit_node
 
-        return from_node, relay_cell.get_decrypted()
+        return relay_cell.get_decrypted()
 
+    def _decrypt_server(self, relay_cell):
+        # tor ref: relay_decrypt_cell
+        assert relay_cell.is_encrypted
+        circuit_node = self.circuit_nodes[0]
+        circuit_node.decrypt_backward(relay_cell)
+        if relay_cell.is_encrypted:
+            forwarded_cell = type(relay_cell)(
+                inner_cell=None,
+                circuit_id=relay_cell.circuit_id,
+                encrypted=relay_cell.get_encrypted()
+            )
+        else:
+            forwarded_cell = relay_cell.get_decrypted()
+
+        return forwarded_cell
 
     def make_relay(self, inner_cell, relay_type=None, stream_id=0):
         relay_type = relay_type or CellRelay
         assert issubclass(relay_type, RelayedTorCell)
-        print("relay_type", relay_type)
         relay_cell = relay_type(inner_cell, stream_id=stream_id, circuit_id=self.id)
-
         self._encrypt(relay_cell)
+        return relay_cell
+
+    def make_relay_server(self, inner_cell, relay_type=None, stream_id=0):
+        relay_type = relay_type or CellRelay
+        assert issubclass(relay_type, RelayedTorCell)
+        relay_cell = relay_type(inner_cell, stream_id=stream_id, circuit_id=self.id)
+        self._encrypt_server(relay_cell)
         return relay_cell
 
     def create_stream(self):

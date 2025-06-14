@@ -11,7 +11,7 @@ def setup_loop():
     return loop
 
 async def main():
-    client = Tor_Client(name="client1", host='10.108.10.20', port=9001, model='remote')
+    client = Tor_Client(name="client1", host='10.108.10.20', port=9001, model='real')
     message = b"GET /get HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n"
     addr = ('httpbin.org', 80)
     hop = 3
@@ -21,7 +21,7 @@ async def main():
     print("[Main] Listener started. Waiting 10 seconds before sending...")
 
     # 等待10秒后再开始发送流
-    await asyncio.sleep(1)
+    await asyncio.sleep(20)
 
     client_task = asyncio.create_task(client.make_stream(message=message, addr=addr, hops_count=hop))
     print("[Main] make_stream started.")
@@ -46,11 +46,6 @@ if __name__ == "__main__":
         loop.run_until_complete(main())
     finally:
         loop.close()
-
-
-
-
-
 
 
 

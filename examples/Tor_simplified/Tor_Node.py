@@ -1,31 +1,35 @@
 import asyncio
 import requests
 
-from torpy.cells import *
-
+from examples.Tor_simplified.TorCell import *
 from examples.Tor_simplified.Tor_base import Tor_base
 from examples.Tor_simplified.Tor_Circuit import Tor_CircuitsList
 from examples.Tor_simplified.Tor_Descriptor import TorDescriptor_build
-from examples.Tor_simplified.Tor_Router import Tor_Router
+from examples.Tor_simplified.Tor_Router import Tor_Socket, Tor_Router_simple
 
 from tools.Crypt.key_generator import curve25519_setup, ed25519_setup, rsa_setup
+from examples.Tor_simplified.Tor_Crypt import NtorServerKeyAgreement, RelayCryptoState
 
-
+import hashlib
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import padding
+from textwrap import wrap
 
 class Tor_Guard(Tor_base):
-    def __init__(self, name: str, host: str, port: int):
+    def __init__(self, name: str, host: str, port: int, role: str = 'Guard'):
         super().__init__(name, host, port)
 
         self.ntor_pvk, self.ntor_puk = curve25519_setup()
         self.ed_pvk, self.ed_puk = ed25519_setup()
-        self.rsa_pvk, _ = rsa_setup()
         self.circuit_list = Tor_CircuitsList()
-
+        fingerprint = self.rsa_identity_digest(self.rsa_pvk)
+        self.protocol = NtorServerKeyAgreement(fingerprint, self.ntor_pvk)
+        self.role = role
 
     async def start_protocol(self):
         self.tasks['routing_task'] = asyncio.create_task(self.register_to_dire())
         self.tasks['listener_task'] = asyncio.create_task(self.serve_tor_socket())
-        # self.tasks['periodic_send_task'] = asyncio.create_task(self.periodic_make_stream(interval=self.config.EXP_PARAMS_LOOPS))
 
         await asyncio.gather(*self.tasks.values())
 
@@ -53,8 +57,6 @@ class Tor_Guard(Tor_base):
 
         try:
             response = await asyncio.to_thread(sync_post)
-            print(f"[+] Descriptor uploaded. HTTP {response.status_code}")
-            print("Response body:")
             print(response.text)
         except Exception as e:
             print(f"[!] Failed to upload descriptor: {e}")
@@ -68,61 +70,120 @@ class Tor_Guard(Tor_base):
             curve_sk=self.ntor_pvk,
             curve_pk=self.ntor_puk,
             rsa_sk=self.rsa_pvk,
-            or_port=self.port
+            or_port=self.port,
+            sim_flag=self.get_sim_flag()
         )
         descriptor = desc_build.build()
         return descriptor
 
-    async def create_circuit(self, socket, hops_count=3, extend_routers=None):
+    def get_sim_flag(self) -> str:
+        sim_flag = "sim-flags" + ' ' + self.role
+        return sim_flag
+
+    async def create_circuit(self, create_cell, sock, circuit_id):
         """Quickly select several random nodes and freely add nodes, such as exit nodes"""
-        circuit = await self.circuit_list.create_new()
-        create_cell = circuit.initialize(self.guard)
-        await socket.send_cell(create_cell)
-        await circuit.guard_handsake(wait_time=60)
-
-        while circuit.nodes_count < hops_count:
-            if circuit.nodes_count == hops_count - 1:
-                router = self.consensus.get_random_exit_node()
-            else:
-                router = self.consensus.get_random_middle_node()
-            descriptor_str = self.consensus.get_descriptor_by_fingerprint(router['fingerprint'])
-            extend_node = Tor_Router(router)
-            extend_node.set_descriptor(descriptor_str)
-
-            extend_cell = circuit.extend(extend_node)
-            await socket.send_cell(extend_cell)
-
-            await circuit.extend_handshake(descriptor_str, wait_time=60)
-
-        if extend_routers:
-            for router in extend_routers:
-                extend_cell = circuit.extend(router)
-                await socket.send_cell(extend_cell)
-                descriptor_str = self.consensus.get_descriptor_by_fingerprint(router['fingerprint'])
-                await circuit.extend_handshake(descriptor_str, wait_time=60)
-
+        circuit = self.circuit_list.set_circuit(circuit_id)
+        created_cell = circuit.circuit_build_server(self.protocol, create_cell, sock)
+        await sock.send_cell(created_cell)
         return circuit
 
+    async def extend_next_node(self, cell: CellRelayExtend2, circuit_id: int):
+        ip = cell.ip
+        port = cell.port
+        addr = (ip, port)
+        skin = cell.skin
+        handshake_type = cell.finger_type
 
-    async def handle_cell(self, cell):
+        create2 = Cell_Create2(handshake_type=handshake_type, onion_skin=skin, circuit_id=circuit_id)
+
+        sock = Tor_Socket(on_cell=self.handle_cell)
+        await sock.setup_socket(remote_addr=addr)
+        asyncio.create_task(self.handle_connection(addr, sock))
+        await sock.tor_handshake_client()
+
+        circuit = self.circuit_list.get_by_id(circuit_id)
+        self.print("circuit:", circuit)
+        simple_node = Tor_Router_simple(sock)
+        circuit.circuit_nodes.append(simple_node)
+
+        await sock.send_cell(create2)
+
+    async def reply_extend(self, cell: CellCreated2):
+
+        circuit_id = cell.circuit_id
+        handshake_data = cell.handshake_data
+        extend_cell = CellRelayExtended2(handshake_data, circuit_id)
+        self.print(circuit_id)
+        self.print(cell.circuit_id)
+        self.print(self.circuit_list.values())
+        circuit = self.circuit_list.get_by_id(circuit_id)
+        cell = circuit.make_relay_server(inner_cell=extend_cell, relay_type=CellRelay)
+        sock = circuit.circuit_nodes[0].sock
+        await sock.send_cell(cell)
+
+
+
+    async def handle_cell(self, cell, sock):
         self.print("receive client cell_type:", type(cell))
-        if isinstance(cell, CellCreated2):
+        self.print("cell content:", cell)
+        if isinstance(cell, CellVersions):
+            if not sock.handshake_initiator:
+                await sock.tor_handshake_server(cell, self.cert_file)
+            else:
+                sock.protocal.version = sock.handshake.retrieve_versions(cell)
+        elif isinstance(cell, CellCerts):
+            sock.handshake.retrieve_certs(cell)
+        elif isinstance(cell, CellAuthChallenge):
+            sock.handshake.retrieve_certs(cell)
+        elif isinstance(cell, CellNetInfo):
+            sock.handshake.retrieve_net_info(cell)
+        elif isinstance(cell, Cell_Create2):
+            await self.create_circuit(cell, sock, cell.circuit_id)
+        elif isinstance(cell, CellCreated2):
+            await self.reply_extend(cell)
+        elif isinstance(cell, CellRelay):
             circuit = self.circuit_list.get_by_id(cell.circuit_id)
-            circuit.created_cell = cell
-            circuit.connect_event.set()
-            self.print('guard is ready')
-        if isinstance(cell, CellRelay):
+            if sock == circuit.circuit_nodes[0].sock:
+                inner_cell = circuit.handle_relay_server(cell)
+                await self.handle_cell_relay(inner_cell, circuit, cell, sock)
+            else:
+                next_node = circuit.circuit_nodes[0]
+                next_node.encrypt_forward(cell)
+                print('relay cell:', cell)
+                await next_node.sock.send_cell(cell)
+
+        elif isinstance(cell, Cell_RelayEarly):
             circuit = self.circuit_list.get_by_id(cell.circuit_id)
-            print("check cell content", cell)
-            print("check if encrypt:", cell.is_encrypted)
-            inner_cell = circuit.handle_relay(cell)
-            await self.handle_cell_relay(inner_cell, circuit, cell)
+            inner_cell = circuit.handle_relay_server(cell)
+            await self.handle_cell_relay(inner_cell, circuit, cell, sock)
 
-    async def handle_cell_relay(self, cell, circuit, origin_cell):
+    async def handle_cell_relay(self, cell, circuit, origin_cell, sock):
+        self.print("inner_cell:", cell)
+        if isinstance(cell, CellRelayExtend2):
+            await self.extend_next_node(cell, circuit.id)
+        elif isinstance(cell, Cell_RelayEarly):
+            if sock == circuit.circuit_nodes[0].sock:
+                next_hop_sock = circuit.circuit_nodes[-1].sock
+            else:
+                next_hop_sock = circuit.circuit_nodes[0].sock
+            await next_hop_sock.send_cell(cell)
+        elif isinstance(cell, CellRelay):
+            if sock == circuit.circuit_nodes[0].sock:
+                next_hop_sock = circuit.circuit_nodes[-1].sock
+            else:
+                next_hop_sock = circuit.circuit_nodes[0].sock
+            await next_hop_sock.send_cell(cell)
+        elif isinstance(cell, CellRelayBegin):
+            host = cell.port
+            port = cell.port
+            addr = (host, port)
+            circuit.streams.set_stream(stream_id=origin_cell.stream_id, target_addr=addr)
+            connected_cell = CellRelayConnected(addr, 0, origin_cell.circuit_id)
+            self.print(connected_cell)
+            relay_cell = circuit.make_relay_server(connected_cell, relay_type = CellRelay)
+            self.print(relay_cell)
 
-        if isinstance(cell, CellRelayExtended2):
-            circuit.extend_cell = cell
-            circuit.connect_event.set()
+            await sock.send_cell(relay_cell)
         elif isinstance(cell, CellRelayConnected):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.connect_event.set()
@@ -141,29 +202,36 @@ class Tor_Guard(Tor_base):
                 socket.send_cell(sendme_cell)
         elif isinstance(cell, CellRelaySendMe):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
-            logger.debug('Stream #%i: sendme received', stream.id)
             stream.window.package_inc()
 
+    async def resolve_ipv4_async(self, domain: str) -> str:
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(domain, None, proto=socket.IPPROTO_TCP)
+        for family, _, _, _, sockaddr in infos:
+            if family == socket.AF_INET:
+                return sockaddr[0]
+        raise ValueError(f"No IPv4 address found for {domain}")
 
     async def close_stream(self, stream):
-        socket = self.socket_map.get(self.guard.addr, None)  # 之后补充guard的查验逻辑，即guard是否断线，如果没断就一直保持socket连通
-        if not socket:
-            raise "socket has closed before stream"
-        end_cell = stream.make_end
-        await socket.send_cell( end_cell)
-
+        items = self.socket_map.items()
+        for addr, sock in items:
+            if sock:
+                end_cell = stream.make_end
+                await sock.send_cell(end_cell)
+            else:
+                raise "socket has closed before stream"
         stream.close()
 
-if __name__ == "__main__":
-    from torpy.parsers import RouterDescriptorParser
-    from torpy.consesus import Descriptor
+    @staticmethod
+    def rsa_identity_digest(rsa_priv: rsa.RSAPrivateKey) -> bytes:
+        """
+        Return the raw 20-byte SHA-1 digest of the RSA identity public key.
+        Pass this value to NtorServerKeyAgreement(...).
 
-    guard = Tor_Guard("guard1", "127.0.0.1", 9001)
-    descriptor_txt = guard.generate_descriptor()
-    print(descriptor_txt)
-    descriptor_info = RouterDescriptorParser.parse(descriptor_txt)
-    aas = Descriptor(**descriptor_info)
-    print(aas)
-    print(aas.onion_key)
-    print(aas.ntor_key)
-    print(aas.signing_key)
+        :param rsa_priv: server's long-term RSA *private* key object
+        """
+        der = rsa_priv.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        return hashlib.sha1(der).digest()

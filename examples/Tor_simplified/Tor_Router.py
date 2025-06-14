@@ -3,13 +3,18 @@ from torpy.keyagreement import NtorKeyAgreement
 from torpy.crypto_state import CryptoState
 from torpy.consesus import Descriptor
 from torpy.parsers import RouterDescriptorParser
-from torpy.cells import TorCell, CellCerts, CellNetInfo, TorCommands, CellVersions, CellAuthChallenge
-import time
 from torpy.cell_socket import TorProtocol
+import time
 import asyncio
 import logging
 from torpy.stream import TorWindow
+from examples.Tor_simplified.TorCell import *
+from examples.Tor_simplified.Tor_Crypt import RelayCryptoState
+
+
 logger = logging.getLogger(__name__)
+
+
 
 class Tor_Router:
     def __init__(self, router: dict):
@@ -35,6 +40,7 @@ class Tor_Router:
         self.key_agreement_cls = NtorKeyAgreement(self)
         self._crypto_state = None
         self.descriptor_str = None
+
     def create_onion_skin(self):
         return self.key_agreement_cls.handshake
 
@@ -47,7 +53,6 @@ class Tor_Router:
 
     def decrypt_backward(self, relay_cell):
         self._crypto_state.decrypt_backward(relay_cell)
-        self.key_agreement_cls = NtorKeyAgreement(self)
 
     @property
     def descriptor(self):
@@ -59,6 +64,20 @@ class Tor_Router:
         self.descriptor_str = descriptor_str
 
 
+
+class Tor_Router_simple:
+    def __init__(self, sock, sharekey=None):
+        self.sock = sock
+        self._crypto_state = None
+        if sharekey is not None:
+            print("------------------------------------------------------")
+            self._crypto_state = RelayCryptoState(sharekey)
+
+    def encrypt_forward(self, relay_cell):
+        self._crypto_state.encrypt_forward(relay_cell)
+
+    def decrypt_backward(self, relay_cell):
+        self._crypto_state.decrypt_backward(relay_cell)
 
 class TorHandshake:
     def __init__(self, tor_socket, tor_protocol=TorProtocol):
@@ -111,41 +130,65 @@ from typing import Optional, Tuple, Callable, Awaitable
 
 
 class Tor_Socket():
-    def __init__(self, remote_addr, on_cell=None, sock=None):
+    def __init__(self, on_cell=None, sock=None):
         self.protocal = TorProtocol()
-        self.socket = self.create_socket(remote_addr, sock)
+        self.socket = sock
         self._send_lock = asyncio.Lock()
         self.handshake = TorHandshake(socket)
         self.send = send_tcp
         self.print = print
         self.buffer = ByteBuffer()
-        self.on_cell: Optional[Callable[[TorCell], Awaitable[None]]] = on_cell
+        self.on_cell: Optional[Callable[[TorCell, Tor_Socket], Awaitable[None]]] = on_cell
+        self.handshake_initiator = False
 
-
-    def create_socket(self, remote_addr, sock=None):
+    async def setup_socket(self, remote_addr, sock=None):
         if sock is None:
-            sock = ssl.wrap_socket(
-                socket.socket(socket.AF_INET, socket.SOCK_STREAM), ssl_version=ssl.PROTOCOL_TLSv1_2
-            )
-            sock.connect(remote_addr)
-        return sock
+            self.handshake_initiator = True
+            loop = asyncio.get_running_loop()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setblocking(False)
+            await loop.sock_connect(sock, remote_addr)
 
-    async def tor_handshake(self):
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+            def tls_wrap():
+                # 握手期间 socket 必须阻塞！
+                sock.setblocking(True)
+                ssl_sock = ctx.wrap_socket(sock, server_hostname=None, do_handshake_on_connect=True)
+                ssl_sock.setblocking(False)  # 握手后恢复非阻塞（可选）
+                return ssl_sock
+
+            sock = await loop.run_in_executor(None, tls_wrap)
+        print("create socket successfully")
+        self.socket = sock
+
+    async def tor_handshake_client(self):
         version_cell = self.handshake.make_versions()
         await self.send_cell(version_cell)
+        net_info_cell = await self.handshake.make_net_info(self.socket.getsockname(), self.socket.getpeername())
+        await self.send_cell(net_info_cell)
 
-        # await self.handshake.retrieve_certs()
-        # await self.handshake.retrieve_net_info()
+    async def tor_handshake_server(self, cell: CellVersions, certs_path):
+        version_cell = self.handshake.make_versions()
+        await self.send_cell(version_cell)
+        self.protocal.version = self.handshake.retrieve_versions(cell)
+        certs = load_cert_for_cellcerts(certs_path)
+        certs_cell = CellCerts([(3, certs)])
+        await self.send_cell(certs_cell)
+        auth_cell = CellAuthChallenge()        # For simplicity, no verification is performed at this time
+
+        await self.send_cell(auth_cell)
 
         net_info_cell = await self.handshake.make_net_info(self.socket.getsockname(), self.socket.getpeername())
         await self.send_cell(net_info_cell)
 
-    async def start_all(self) -> asyncio.Task:
+    async def start_listen(self) -> asyncio.Task:
         """
         启动监听、处理、监控三大任务，并返回生命周期句柄 task。
         """
         loop = asyncio.get_running_loop()
-
         # 启动监听和处理任务
         self._recv_task = loop.create_task(
             monitor_connection_tls(
@@ -156,8 +199,6 @@ class Tor_Socket():
         )
         self._process_task = loop.create_task(self.process())
         self._handle_task = loop.create_task(self.monitor_handle())
-
-        await self.tor_handshake()
         return self._handle_task  # ⬅ 上层 await 这个任务就可以知道连接是否中断
 
 
@@ -190,30 +231,16 @@ class Tor_Socket():
         while True:
             try:
                 cell = await self.recv_and_parse_cell()
-                print("cell content:", cell)
                 if not cell:
                     continue
-                await self.handle_cell_router(cell)
+                await self.on_cell(cell, self)
             except Exception as e:
                 self.print(f"Cell parse error: {e}")
-
-    async def handle_cell_router(self, cell):
-        if isinstance(cell, CellVersions):
-            self.protocal.version = self.handshake.retrieve_versions(cell)
-        elif isinstance(cell, CellCerts):
-            self.handshake.retrieve_certs(cell)
-        elif isinstance(cell, CellAuthChallenge):
-            self.handshake.retrieve_certs(cell)
-        elif isinstance(cell, CellNetInfo):
-            self.handshake.retrieve_net_info(cell)
-        else:
-            self.print("client cell_type:", type(cell))
-            await self.on_cell(cell)
 
     async def send_cells(self, cells):
         for cell in cells:
             print("send cell_type:", type(cell))
-            print("send cell:",cell)
+            print("send cell:", cell)
             cell = self.protocal.serialize(cell)
             async with self._send_lock:
                 try:
@@ -225,7 +252,6 @@ class Tor_Socket():
         print("send cell_type:", type(cell))
         print("send cell:", cell)
         buffer = self.protocal.serialize(cell)
-        print("size of cell", len(buffer))
         async with self._send_lock:
             try:
                 await self.send(self.socket, buffer)
@@ -260,6 +286,7 @@ class Tor_Socket():
 
             # Step 4: 直接构造并返回cell对象
             cell = self.protocal.deserialize(cell_type, payload, circuit_id)
+            print("return cell successfully")
             return cell
 
         except struct.error as e:
@@ -278,7 +305,6 @@ class Tor_Socket():
 
         try:
             circuit_id, command_num = struct.unpack(self.protocal.header_format, header)
-            print("command num：", command_num)
             cell_type = TorCommands.get_by_num(command_num)
             if not cell_type:
                 raise ValueError(f"Unknown command number: {command_num}")
@@ -317,4 +343,29 @@ class Tor_Socket():
 
         return payload
 
-from torpy.http.client import recv_all
+
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
+from pathlib import Path
+
+def load_cert_for_cellcerts(path: str):
+    """
+    读取 PEM 或 DER 格式证书，转换为 Tor CellCerts 的格式元组 (type, cert_bytes)
+
+    :param path: 证书文件路径（支持 .crt / .pem / .der）
+    :param cert_type: 对应的 Tor 证书类型（如 2 表示 Link cert）
+    :return: (cert_type, cert_bytes)
+    """
+    file_path = Path(path)
+    cert_bytes = file_path.read_bytes()
+
+    try:
+        # 尝试解析为 PEM
+        cert = x509.load_pem_x509_certificate(cert_bytes, default_backend())
+        raw = cert.public_bytes(encoding=serialization.Encoding.DER)
+    except ValueError:
+        # 可能是 DER 格式，直接返回原始数据
+        raw = cert_bytes
+
+    return raw

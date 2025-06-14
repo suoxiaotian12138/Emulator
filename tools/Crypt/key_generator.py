@@ -6,7 +6,8 @@ import datetime
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import serialization, hashes
+
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey, X25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -37,7 +38,7 @@ def curve25519_setup():
     return private_key, public_key
 
 def rsa_setup():
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     public_key = private_key.public_key()
     return private_key, public_key
 
@@ -52,10 +53,9 @@ def ed25519_setup():
     return private_key, public_key
 
 def generate_cert_and_key_from_ed25519(private_key: ed25519.Ed25519PrivateKey):
-    # 1. 获取公钥
+    """原始的Ed25519证书生成函数"""
     public_key = private_key.public_key()
 
-    # 2. 构造证书字段
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COUNTRY_NAME, u"CN"),
         x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"Beijing"),
@@ -64,7 +64,6 @@ def generate_cert_and_key_from_ed25519(private_key: ed25519.Ed25519PrivateKey):
         x509.NameAttribute(NameOID.COMMON_NAME, u"127.0.0.1"),
     ])
 
-    # 3. 构造自签名 X.509 证书
     cert = x509.CertificateBuilder().subject_name(
         subject
     ).issuer_name(
@@ -83,9 +82,8 @@ def generate_cert_and_key_from_ed25519(private_key: ed25519.Ed25519PrivateKey):
             x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
         ]),
         critical=False
-    ).sign(private_key, algorithm=None)  # Ed25519 不需要手动指定哈希算法
+    ).sign(private_key, algorithm=None)
 
-    # 4. 写入临时文件
     cert_file = tempfile.NamedTemporaryFile(delete=False, suffix=".crt", mode='wb')
     key_file = tempfile.NamedTemporaryFile(delete=False, suffix=".key", mode='wb')
 
@@ -94,7 +92,7 @@ def generate_cert_and_key_from_ed25519(private_key: ed25519.Ed25519PrivateKey):
 
     key_file.write(private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,  # 可用于 SSL/TLS
+        format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption()
     ))
     key_file.close()
@@ -123,25 +121,32 @@ def generate_cert_from_ed25519(private_key: ed25519.Ed25519PrivateKey) -> bytes:
     )
     return cert.public_bytes(serialization.Encoding.DER)
 
-def create_server_context(certfile: str, keyfile: str) -> ssl.SSLContext:
-    """
-    模拟 Tor 节点服务端的 SSLContext，用于接受 TLS 客户端连接。
-    该 Context 使用已有的证书和私钥，支持 TLS 1.2/1.3，禁用旧协议。
-    """
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+def create_server_context(certfile, keyfile):
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(certfile, keyfile)
+    ctx.minimum_version = ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    ctx.set_ciphers("ALL:@SECLEVEL=0")          # 允许自签 RSA-PKCS1
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
-    context.load_cert_chain(certfile=certfile, keyfile=keyfile)
-    context.options |= (
-        ssl.OP_NO_SSLv2 |
-        ssl.OP_NO_SSLv3 |
-        ssl.OP_NO_TLSv1 |
-        ssl.OP_NO_TLSv1_1
+
+
+
+def generate_cert_and_key_from_rsa(key: rsa.RSAPrivateKey):
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")]))
+        .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")]))
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.utcnow() - datetime.timedelta(days=1))
+        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=365))
+        .sign(key, hashes.SHA256())
     )
-
-    context.options |= ssl.OP_CIPHER_SERVER_PREFERENCE
-    context.options |= ssl.OP_SINGLE_ECDH_USE
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.verify_mode = ssl.CERT_NONE
-
-    return context
-
+    crt = tempfile.NamedTemporaryFile(delete=False, suffix=".crt", mode="wb")
+    keyf = tempfile.NamedTemporaryFile(delete=False, suffix=".key", mode="wb")
+    crt.write(cert.public_bytes(serialization.Encoding.PEM)); crt.close()
+    keyf.write(key.private_bytes(serialization.Encoding.PEM,
+                                 serialization.PrivateFormat.PKCS8,
+                                 serialization.NoEncryption())); keyf.close()
+    return crt.name, keyf.name

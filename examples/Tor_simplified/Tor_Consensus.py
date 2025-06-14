@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import random
+import aiohttp
 from typing import Dict, List, Optional
 from datetime import datetime
 import base64
@@ -9,22 +10,85 @@ import binascii
 from stem.descriptor.remote import DescriptorDownloader
 from stem.descriptor.server_descriptor import RelayDescriptor
 
+
+
 class Tor_Consensus:
     """Download a consensus and extract relay information."""
+    def __init__(self, model, dire_ip='127.0.0.1', dire_port=9030) -> None:
+        self.dire_ip = dire_ip
+        self.dire_port = dire_port
+        self.fetch_consensus, self.fetch_descriptor = self.setup_model(model)
+        self.relays = None
 
-    def __init__(self) -> None:
-        self.relays = self.fetch_consensus()
+    async def consus_init(self):
+        self.relays = await self.fetch_consensus()
 
-    def fetch_consensus(self, *, endpoints: Optional[List] = None):
+
+    def setup_model(self, model):
+        if model == 'real':
+            return self._fetch_consensus_real, self._fetch_descriptor_real
+        elif model == 'sim':
+            return self._fetch_consensus_sim, self._fetch_descriptor_sim
+
+    async def _fetch_consensus_real(self, *, endpoints: Optional[List] = None):
         """
         Download the latest consensus and cache it in `self._consensus`.
         """
-        # Stem returns a generator; the first (and only) element is the doc
         from stem.descriptor.remote import get_consensus
 
         result = get_consensus(endpoints=endpoints, timeout=300).run()  # -> list
         consensus = result
         return self._relays_parse(consensus)
+
+    @staticmethod
+    async def _fetch_descriptor_real(fingerprint: str, timeout: int = 30) -> RelayDescriptor:
+        fp = fingerprint
+
+        processed = []
+        if len(fp) == 27:  # base64格式
+            fp = base64_to_hex_fingerprint(fp)
+        elif len(fp) == 40:  # 十六进制格式
+            fp = fp.upper()
+        processed.append(fp)
+
+        downloader = DescriptorDownloader(timeout=timeout)
+
+        # ── Stem allows up to 96 fingerprints per request ───────────────────────────
+        query = downloader.get_server_descriptors(fingerprints=fp)
+        descriptor = query.run()  # blocks until the batch finishes
+
+        if not descriptor:
+            raise RuntimeError("No descriptors retrieved – check network connectivity.")
+        return descriptor[0].__str__()
+
+    async def _fetch_consensus_sim(self):
+        url = f"http://{self.dire_ip}:{self.dire_port}/tor/status-vote/current/consensus"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        text = await resp.text()
+                        consensus = split_tor_descriptors(text)
+                        return self._relays_parse(consensus)
+
+                    else:
+                        print(f"[!] Failed to query consensus: HTTP {resp.status}")
+        except Exception as e:
+            print(f"[!] Exception during consensus query: {e}")
+
+    async def _fetch_descriptor_sim(self, fingerprint):
+        print(fingerprint)
+        safe_fingerprint = make_urlsafe_fingerprint(fingerprint)
+
+        url = f"http://{self.dire_ip}:{self.dire_port}/tor/server/desc/{safe_fingerprint}"
+        print("_fetch_descriptor_sim: ", url)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=5) as resp:
+                    text = await resp.text()
+                    return text
+        except Exception as e:
+            print(f"[!] Query failed: {e}")
 
     def _relays_parse(self, consensus) -> List[Dict]:
         """
@@ -34,7 +98,6 @@ class Tor_Consensus:
         relays = []
         for node in consensus:
             node_str = node.__str__()
-            print(node_str)
             relay_info = parse_single_consensus_entry(node_str)
             relays.append(relay_info)
         return relays
@@ -80,39 +143,32 @@ class Tor_Consensus:
         return self.get_random_router(flags)
 
     def get_random_middle_node(self):
-        flags = ['Fast', 'Running', 'Valid']
+        # 为了方便处理，暂时先添加一个middle标签，实际并不存在
+        flags = ['Fast', 'Running', 'Valid', 'Middle']
+        # flags = ['Fast', 'Running', 'Valid']
         return self.get_random_router(flags)
 
-    @staticmethod
-    def get_descriptor_by_fingerprint(fingerprint: str, timeout: int = 30) -> RelayDescriptor:
-        fp = fingerprint
+def split_tor_descriptors(text: str) -> list[str]:
+    """
+    将以 'r ' 开头的多段 Tor 共识描述文本按段拆分为列表。
+    每一段从 'r ' 开始，直到遇到下一个 'r ' 或文件结尾。
+    """
+    blocks = []
+    current_block = []
 
-        processed = []
-        if len(fp) == 27:  # base64格式
-            fp = base64_to_hex_fingerprint(fp)
-        elif len(fp) == 40:  # 十六进制格式
-            fp = fp.upper()
-        processed.append(fp)
+    for line in text.strip().splitlines():
+        if line.startswith("r "):
+            if current_block:
+                blocks.append("\n".join(current_block))
+                current_block = []
+        current_block.append(line)
 
-        downloader = DescriptorDownloader(timeout=timeout)
+    if current_block:
+        blocks.append("\n".join(current_block))
 
-        # ── Stem allows up to 96 fingerprints per request ───────────────────────────
-        query = downloader.get_server_descriptors(fingerprints=fp)
-        descriptor = query.run()  # blocks until the batch finishes
+    return blocks
 
-        if not descriptor:
-            raise RuntimeError("No descriptors retrieved – check network connectivity.")
-        return descriptor[0].__str__()
 
-    # async def query_descriptor(fingerprint, host="127.0.0.1", port=9030):
-    #     url = f"http://{host}:{port}/tor/server/desc/{fingerprint}"
-    #     try:
-    #         async with aiohttp.ClientSession() as session:
-    #             async with session.get(url, timeout=5) as resp:
-    #                 text = await resp.text()
-    #                 print(f"\n[+] Descriptor for {fingerprint}:\n{text}...\n")
-    #     except Exception as e:
-    #         print(f"[!] Query failed: {e}")
 
 def parse_single_consensus_entry(entry_str: str) -> dict:
     """
@@ -171,6 +227,12 @@ def base64_to_hex_fingerprint(base64_fp):
         print(f"指纹格式转换失败: {e}")
         return None
 
+def make_urlsafe_fingerprint(fp: str) -> str:
+    # 补齐 padding，解码成原始 bytes，然后再用 url-safe 编码
+    padding = '=' * (-len(fp) % 4)
+    raw = base64.b64decode(fp + padding)
+    urlsafe = base64.urlsafe_b64encode(raw).decode('ascii')
+    return urlsafe.rstrip('=')
 
 def hex_to_base64_fingerprint(hex_fp):
     """

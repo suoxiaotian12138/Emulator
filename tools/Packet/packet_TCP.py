@@ -1,15 +1,11 @@
 from typing import Set
 import time
 import ssl
-import socket
-
 from typing import Dict, Tuple, Callable
-
-
-import asyncio
 from typing import Optional
 from tools.Crypt.serialization import decode
-
+import asyncio
+import socket
 
 class ByteBuffer:
     """
@@ -68,7 +64,7 @@ def recv_tcp(sock: socket.socket, buffer_size: int = 65535):
     """Non-blocking receive from TCP socket, returns data or None"""
     try:
         data = sock.recv(buffer_size)
-        print("data:", data)
+        # print("data:", data)
         if not data:
             return None  # Connection closed
         return data
@@ -260,41 +256,26 @@ async def listen_to_tcp(
 
 
 
-async def accept_tls_connections(
-        listener_socket,
-        ssl_context,
-):
-    """
-    异步生成器：仅接受 TLS 连接，每建立成功就 yield (tls_socket, addr)
-    """
+
+
+async def accept_tls_connections(listener_sock, ssl_ctx):
     loop = asyncio.get_running_loop()
-    listener_socket.setblocking(False)
-
+    listener_sock.setblocking(False)
     while True:
+        raw_sock, addr = await loop.sock_accept(listener_sock)
+        print(f"[+] Accepted raw {addr}")
+
+        def _wrap():
+            raw_sock.setblocking(True)   # 握手期间必须阻塞
+            tls_sock = ssl_ctx.wrap_socket(raw_sock, server_side=True)
+            tls_sock.setblocking(True)   # 后续所有阻塞I/O（如果你在线程池里用 recv）
+            return tls_sock
+
         try:
-            raw_conn, addr = await loop.sock_accept(listener_socket)
-            raw_conn.setblocking(True)  # 必须阻塞才能进行 TLS 握手
-
-            try:
-                tls_conn = await loop.run_in_executor(
-                    None,
-                    lambda: ssl_context.wrap_socket(raw_conn, server_side=True)
-                )
-
-                tls_conn.setblocking(False)
-                print(f"[TLS Accepted] {addr[0]}:{addr[1]}")
-
-                yield tls_conn, addr  # ✅ 连接建立后 yield 出去
-
-            except ssl.SSLError as e:
-                print(f"[TLS Handshake Failed] {addr}: {e}")
-                raw_conn.close()
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print(f"[Accept Error] {e}")
-            await asyncio.sleep(0.1)
+            tls_sock = await loop.run_in_executor(None, _wrap)
+            yield tls_sock, addr
+        except ssl.SSLError as e:
+            print("[!] TLS fail:", e)
 
 
 

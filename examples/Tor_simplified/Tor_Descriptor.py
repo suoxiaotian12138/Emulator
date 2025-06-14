@@ -28,8 +28,8 @@ class TorDescriptor_build:
                  socks_port: int = 0,
                  reject_rules: Iterable[str] | None = None,  # ← 新增
                  accept_rules: Iterable[str] | None = None,  # ← 新增
-                 ipv6_policy: str | None = None  # ← 新增
-
+                 ipv6_policy: str | None = None,  # ← 新增
+                 sim_flag: str = "sim-flags"
                  ):
         self.nickname = nickname
         self.ip = ip
@@ -44,6 +44,7 @@ class TorDescriptor_build:
         self.reject_rules = list(reject_rules or [])
         self.accept_rules = list(accept_rules or [])
         self.ipv6_policy = ipv6_policy
+        self.sim_flag = sim_flag
 
     # ----------------- public API -----------------
     def build(self) -> str:
@@ -91,8 +92,7 @@ class TorDescriptor_build:
         # ---------- signatures ----------
         lines.append(f"router-sig-ed25519 {self._fake_router_sig()}")
         lines.extend(self._make_rsa_signature_block())
-        lines.append("sim-flags Guard Exit")
-
+        lines.append(self.sim_flag)
         return "\n".join(lines) + "\n"
 
     # ----------------- helpers -----------------
@@ -168,12 +168,5 @@ from torpy.consesus import Descriptor
 
 # ---------------- example usage ----------------
 if __name__ == "__main__":
-    builder = TorDescriptor_build("mynode", "192.0.2.10")
-    descriptor_txt = builder.build()
-    print(descriptor_txt)
-    descriptor_info = RouterDescriptorParser.parse(descriptor_txt)
-    aas = Descriptor(**descriptor_info)
-    print(aas)
-    print(aas.onion_key)
-    print(aas.ntor_key)
-    print(aas.signing_key)
+    a = "TyxD/AhTyfjRVDsvC3kg8h2Bbkg"
+    print(len(a))

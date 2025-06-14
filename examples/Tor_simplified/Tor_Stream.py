@@ -33,6 +33,11 @@ class StreamsList:
         self._stream_map[stream.id] = stream
         return stream
 
+    def set_stream(self, stream_id, target_addr):
+        stream = TorStream(stream_id, self._circuit, target_addr)
+        self._stream_map[stream_id] = stream
+        return stream
+
     def values(self):
         return self._stream_map.values()
 
@@ -48,10 +53,11 @@ class StreamsList:
 class TorStream:
     """This tor stream object implements socket-like interface."""
 
-    def __init__(self, id, circuit):
+    def __init__(self, id, circuit, target_addr=None):
         logger.info('Stream #%i: creating attached to #%x circuit...', id, circuit.id)
         self._id = id
         self._circuit = circuit
+        self.target_addr = target_addr
 
         self._buffer = bytearray()
         self._data_lock = asyncio.Lock()
