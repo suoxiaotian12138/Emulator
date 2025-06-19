@@ -7,7 +7,6 @@ from struct import pack, unpack
 from torpy.utils import to_hex, fp_to_str
 logger = logging.getLogger(__name__)
 
-
 from torpy.cells import (
     CellVersions,
     CellNetInfo,
@@ -21,6 +20,8 @@ from torpy.cells import (
     CellRelayConnected,
     CellRelayExtended2,
     CellRelayTruncated,
+    StreamReason
+
 )
 
 class TorCell:

@@ -65,6 +65,7 @@ class Loopix_Mixnode(Loopix_Base):
                         host, port = next_addr
                         packet = (new_header, new_body)
                         asyncio.create_task(self.delayed_send(packet, host, port, delay))
+                        self.print("relay a packet: ", self.group)
                     elif flag == "LOOP":
                         pass
                     else:

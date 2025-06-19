@@ -8,7 +8,7 @@ import time
 import asyncio
 import logging
 from torpy.stream import TorWindow
-from examples.Tor_simplified.TorCell import *
+from examples.Tor_simplified.Tor_Cell import *
 from examples.Tor_simplified.Tor_Crypt import RelayCryptoState
 
 
@@ -69,6 +69,7 @@ class Tor_Router_simple:
     def __init__(self, sock, sharekey=None):
         self.sock = sock
         self._crypto_state = None
+        self.window = TorWindow()
         if sharekey is not None:
             print("------------------------------------------------------")
             self._crypto_state = RelayCryptoState(sharekey)

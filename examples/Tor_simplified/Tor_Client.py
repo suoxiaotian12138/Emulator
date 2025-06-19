@@ -9,7 +9,7 @@ from examples.Tor_simplified.Tor_base import Tor_base
 from examples.Tor_simplified.Tor_Circuit import Tor_CircuitsList
 from examples.Tor_simplified.Tor_Consensus import Tor_Consensus
 from examples.Tor_simplified.Tor_Router import Tor_Router, Tor_Socket
-from examples.Tor_simplified.TorCell import *
+from examples.Tor_simplified.Tor_Cell import *
 
 
 
@@ -67,7 +67,7 @@ class Tor_Client(Tor_base):
 
     async def create_circuit(self, socket, hops_count=3, extend_routers=None):
         """Quickly select several random nodes and freely add nodes, such as exit nodes"""
-        circuit = await self.circuit_list.create_new()
+        circuit = await self.circuit_list.create_new_client()
         create_cell = circuit.initialize(self.guard)
         await socket.send_cell(create_cell)
         await circuit.guard_handsake(wait_time=60)
@@ -121,6 +121,7 @@ class Tor_Client(Tor_base):
             circuit.extended_cell = cell
             circuit.connect_event.set()
         elif isinstance(cell, CellRelayConnected):
+            self.print(origin_cell.stream_id)
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.connect_event.set()
         elif isinstance(cell, CellRelayEnd):
@@ -136,6 +137,7 @@ class Tor_Client(Tor_base):
                 sendme_cell = stream.make_relay(CellRelaySendMe(circuit_id=cell.circuit_id))
                 socket = self.socket_map.get(self.guard.addr, None)
                 socket.send_cell(sendme_cell)
+            self.print("have received")
         elif isinstance(cell, CellRelaySendMe):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.window.package_inc()

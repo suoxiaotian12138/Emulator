@@ -1,7 +1,7 @@
 import asyncio
 import requests
 
-from examples.Tor_simplified.TorCell import *
+from examples.Tor_simplified.Tor_Cell import *
 from examples.Tor_simplified.Tor_base import Tor_base
 from examples.Tor_simplified.Tor_Circuit import Tor_CircuitsList
 from examples.Tor_simplified.Tor_Descriptor import TorDescriptor_build
@@ -82,7 +82,7 @@ class Tor_Guard(Tor_base):
 
     async def create_circuit(self, create_cell, sock, circuit_id):
         """Quickly select several random nodes and freely add nodes, such as exit nodes"""
-        circuit = self.circuit_list.set_circuit(circuit_id)
+        circuit = self.circuit_list.create_circuit_server(circuit_id)
         created_cell = circuit.circuit_build_server(self.protocol, create_cell, sock)
         await sock.send_cell(created_cell)
         return circuit
@@ -149,7 +149,7 @@ class Tor_Guard(Tor_base):
             else:
                 next_node = circuit.circuit_nodes[0]
                 next_node.encrypt_forward(cell)
-                print('relay cell:', cell)
+                print('forward relay cell:', cell)
                 await next_node.sock.send_cell(cell)
 
         elif isinstance(cell, Cell_RelayEarly):
@@ -174,14 +174,17 @@ class Tor_Guard(Tor_base):
                 next_hop_sock = circuit.circuit_nodes[0].sock
             await next_hop_sock.send_cell(cell)
         elif isinstance(cell, CellRelayBegin):
-            host = cell.port
+            host = cell.address
             port = cell.port
             addr = (host, port)
             circuit.streams.set_stream(stream_id=origin_cell.stream_id, target_addr=addr)
-            connected_cell = CellRelayConnected(addr, 0, origin_cell.circuit_id)
+            self.print("stream id", origin_cell.stream_id)
+            ip_address = await self.resolve_ipv4_async(host)
+            self.print("ip_address:", ip_address)
+            connected_cell = CellRelayConnected(ip_address, 0, origin_cell.circuit_id)
             self.print(connected_cell)
-            relay_cell = circuit.make_relay_server(connected_cell, relay_type = CellRelay)
-            self.print(relay_cell)
+            self.print(connected_cell.address)
+            relay_cell = circuit.make_relay_server(inner_cell=connected_cell, relay_type=CellRelay, stream_id=origin_cell.stream_id)
 
             await sock.send_cell(relay_cell)
         elif isinstance(cell, CellRelayConnected):
@@ -195,11 +198,27 @@ class Tor_Guard(Tor_base):
         elif isinstance(cell, CellRelayData):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.append(cell.data)
-            stream.window.deliver_dec()
-            if stream.window.need_sendme():
-                sendme_cell = stream.make_relay(CellRelaySendMe(circuit_id=cell.circuit_id))
-                socket = self.socket_map.get(self.guard.addr, None)
-                socket.send_cell(sendme_cell)
+            message = stream.extract_guessed_message_from_buffer()
+            if message is None:
+                pass
+            self.print(message)
+            text = await stream.handle_http_request(message)
+            self.print(text)
+            cell_list = stream.make_relays_server(text)
+            for cell in cell_list:
+                await sock.send_cell(cell)
+            self.print("pd:01")
+            end_cell = CellRelayEnd(StreamReason(6), circuit.id)
+            self.print("pd:02")
+            relay_cell = circuit.make_relay_server(inner_cell=end_cell, relay_type=CellRelay, stream_id=origin_cell.stream_id)
+            self.print("pd:03")
+            await sock.send_cell(relay_cell)
+            self.print("pd:04")
+            # stream.window.deliver_dec()
+            # if stream.window.need_sendme():
+            #     sendme_cell = stream.make_relay(CellRelaySendMe(circuit_id=cell.circuit_id))
+            #     socket = self.socket_map.get(self.guard.addr, None)
+            #     socket.send_cell(sendme_cell)
         elif isinstance(cell, CellRelaySendMe):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.window.package_inc()
@@ -210,7 +229,7 @@ class Tor_Guard(Tor_base):
         for family, _, _, _, sockaddr in infos:
             if family == socket.AF_INET:
                 return sockaddr[0]
-        raise ValueError(f"No IPv4 address found for {domain}")
+        raise ValueError("No IPv4 address found")
 
     async def close_stream(self, stream):
         items = self.socket_map.items()

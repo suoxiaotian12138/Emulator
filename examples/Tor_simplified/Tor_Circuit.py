@@ -3,14 +3,11 @@ import asyncio
 from queue import Queue
 
 from examples.Tor_simplified.Tor_Stream import StreamsList
-from examples.Tor_simplified.Tor_Router import Tor_Router, Tor_Router_simple
+from examples.Tor_simplified.Tor_Router import Tor_Router_simple
 
 from torpy.keyagreement import NtorKeyAgreement
-from functools import partial
-from torpy.crypto_state import CryptoState
-from torpy.http.client import HttpStreamClient
-from torpy.circuit import TorCircuitState, check_connected, CircuitNode, CircuitExtendError
-from examples.Tor_simplified.TorCell import *
+from torpy.circuit import TorCircuitState, CircuitExtendError
+from examples.Tor_simplified.Tor_Cell import *
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +31,14 @@ class Tor_CircuitsList:
             circuit_id |= 0x80000000
         return circuit_id
 
-    async def create_new(self):
+    async def create_new_client(self):
         circuit_id = await self._get_next_circuit_id()
-        circuit = TorCircuit(circuit_id)
+        circuit = TorCircuit(circuit_id, role="client")
         self._circuits_map[circuit.id] = circuit
         return circuit
 
-    def set_circuit(self, circuit_id):
-        circuit = TorCircuit(circuit_id)
+    def create_circuit_server(self, circuit_id):
+        circuit = TorCircuit(circuit_id, role="server")
         self._circuits_map[circuit.id] = circuit
         return circuit
 
@@ -53,7 +50,7 @@ class Tor_CircuitsList:
 
 
 class TorCircuit:
-    def __init__(self, id):
+    def __init__(self, id, role: str = "client"):
         self._id = id
         self.streams = StreamsList(self)
         self.buffer = Queue()
