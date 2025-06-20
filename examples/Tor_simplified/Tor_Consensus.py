@@ -1,4 +1,3 @@
-# directory.py
 from __future__ import annotations
 
 import random
@@ -13,7 +12,6 @@ from stem.descriptor.server_descriptor import RelayDescriptor
 
 
 class Tor_Consensus:
-    """Download a consensus and extract relay information."""
     def __init__(self, model, dire_ip='127.0.0.1', dire_port=9030) -> None:
         self.dire_ip = dire_ip
         self.dire_port = dire_port
@@ -23,7 +21,6 @@ class Tor_Consensus:
     async def consus_init(self):
         self.relays = await self.fetch_consensus()
 
-
     def setup_model(self, model):
         if model == 'real':
             return self._fetch_consensus_real, self._fetch_descriptor_real
@@ -32,7 +29,7 @@ class Tor_Consensus:
 
     async def _fetch_consensus_real(self, *, endpoints: Optional[List] = None):
         """
-        Download the latest consensus and cache it in `self._consensus`.
+        Download the latest consensus.
         """
         from stem.descriptor.remote import get_consensus
 
@@ -45,17 +42,16 @@ class Tor_Consensus:
         fp = fingerprint
 
         processed = []
-        if len(fp) == 27:  # base64格式
+        if len(fp) == 27:
             fp = base64_to_hex_fingerprint(fp)
-        elif len(fp) == 40:  # 十六进制格式
+        elif len(fp) == 40:
             fp = fp.upper()
         processed.append(fp)
 
         downloader = DescriptorDownloader(timeout=timeout)
 
-        # ── Stem allows up to 96 fingerprints per request ───────────────────────────
         query = downloader.get_server_descriptors(fingerprints=fp)
-        descriptor = query.run()  # blocks until the batch finishes
+        descriptor = query.run()
 
         if not descriptor:
             raise RuntimeError("No descriptors retrieved – check network connectivity.")
@@ -77,11 +73,8 @@ class Tor_Consensus:
             print(f"[!] Exception during consensus query: {e}")
 
     async def _fetch_descriptor_sim(self, fingerprint):
-        print(fingerprint)
         safe_fingerprint = make_urlsafe_fingerprint(fingerprint)
-
         url = f"http://{self.dire_ip}:{self.dire_port}/tor/server/desc/{safe_fingerprint}"
-        print("_fetch_descriptor_sim: ", url)
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=5) as resp:
@@ -129,24 +122,29 @@ class Tor_Consensus:
 
         return results
 
-    def get_random_router(self, flags=None, has_dir_port=None, with_renew=True):
+    def get_random_router(self, flags=None, has_dir_port=None, exclude=None):
+        exclude = set(exclude or [])
+        routers = self.get_routers(flags, has_dir_port)
+        candidates = [r for r in routers if r["fingerprint"] not in exclude]
+        print("exclude:", exclude)
+        print("candidates:", candidates)
+        print("routers:", routers)
+        if not candidates:
+            raise RuntimeError("No available routers after exclusion")
+        return random.choice(candidates)
 
-        routers = self.get_routers(flags, has_dir_port, with_renew)
-        return random.choice(routers)
+    def get_random_guard_node(self, exclude=None):
+        flags = ['Guard']
+        return self.get_random_router(flags=flags, exclude=exclude)
 
-    def get_random_guard_node(self, different_flags=None):
-        flags = different_flags or ['Guard']
-        return self.get_random_router(flags)
+    def get_random_middle_node(self, exclude=None):
+        flags = ['Fast', 'Running', 'Valid']
+        return self.get_random_router(flags=flags, exclude=exclude)
 
-    def get_random_exit_node(self):
-        flags = ['Fast', 'Running', 'Valid', 'Exit']
-        return self.get_random_router(flags)
+    def get_random_exit_node(self, exclude=None):
+        flags = ['Exit', 'Fast', 'Running', 'Valid']
+        return self.get_random_router(flags=flags, exclude=exclude)
 
-    def get_random_middle_node(self):
-        # 为了方便处理，暂时先添加一个middle标签，实际并不存在
-        flags = ['Fast', 'Running', 'Valid', 'Middle']
-        # flags = ['Fast', 'Running', 'Valid']
-        return self.get_random_router(flags)
 
 def split_tor_descriptors(text: str) -> list[str]:
     """
@@ -167,7 +165,6 @@ def split_tor_descriptors(text: str) -> list[str]:
         blocks.append("\n".join(current_block))
 
     return blocks
-
 
 
 def parse_single_consensus_entry(entry_str: str) -> dict:
@@ -227,12 +224,14 @@ def base64_to_hex_fingerprint(base64_fp):
         print(f"指纹格式转换失败: {e}")
         return None
 
+
 def make_urlsafe_fingerprint(fp: str) -> str:
     # 补齐 padding，解码成原始 bytes，然后再用 url-safe 编码
     padding = '=' * (-len(fp) % 4)
     raw = base64.b64decode(fp + padding)
     urlsafe = base64.urlsafe_b64encode(raw).decode('ascii')
     return urlsafe.rstrip('=')
+
 
 def hex_to_base64_fingerprint(hex_fp):
     """
@@ -250,16 +249,4 @@ def hex_to_base64_fingerprint(hex_fp):
         print(f"指纹格式转换失败: {e}")
         return None
 
-if __name__ == "__main__":
-    # with open("consesus.txt", "r", encoding="utf-8") as f:
-    #     consensus = f.read()
-    #
-    # logging.basicConfig(level=logging.INFO)
 
-    # --- Stem backend -------------------------------------------------- #
-    d_stem = Tor_Consensus()
-    guards = [r for r in d_stem.relays if "Guard" in r["flags"]]
-
-    print(f"[Stem] total relays={len(d_stem.relays)}  guards={len(guards)}")
-    print(d_stem.relays[0])
-    print(type(d_stem.get_random_middle_node()))

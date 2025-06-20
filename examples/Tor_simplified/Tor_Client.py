@@ -66,35 +66,42 @@ class Tor_Client(Tor_base):
         await socket.send_cells(cells)
 
     async def create_circuit(self, socket, hops_count=3, extend_routers=None):
-        """Quickly select several random nodes and freely add nodes, such as exit nodes"""
         circuit = await self.circuit_list.create_new_client()
-        create_cell = circuit.initialize(self.guard)
+
+        used_fp = set()
+        used_fp.add(self.guard.fingerprint_str)
+
+        create_cell = circuit.connect_to_guard(self.guard)
         await socket.send_cell(create_cell)
         await circuit.guard_handsake(wait_time=60)
 
         while circuit.nodes_count < hops_count:
             if circuit.nodes_count == hops_count - 1:
-                router = self.consensus.get_random_exit_node()
+                router = self.consensus.get_random_exit_node(exclude=used_fp)
             else:
-                router = self.consensus.get_random_middle_node()
-            descriptor_str = await self.consensus.fetch_descriptor(router['fingerprint'])
+                router = self.consensus.get_random_middle_node(exclude=used_fp)
+            used_fp.add(router["fingerprint"])
+
+            descriptor_str = await self.consensus.fetch_descriptor(router["fingerprint"])
             extend_node = Tor_Router(router)
             extend_node.set_descriptor(descriptor_str)
 
-            extend_cell = circuit.extend(extend_node)
+            extend_cell = circuit.connect_to_extend(extend_node)
             await socket.send_cell(extend_cell)
-
             await circuit.extend_handshake(descriptor_str, wait_time=60)
 
         if extend_routers:
             for router in extend_routers:
+                if router["fingerprint"] in used_fp:
+                    continue
+                used_fp.add(router["fingerprint"])
+
                 extend_cell = circuit.extend(router)
                 await socket.send_cell(extend_cell)
-                descriptor_str = await self.consensus.fetch_descriptor(router['fingerprint'])
+                descriptor_str = await self.consensus.fetch_descriptor(router["fingerprint"])
                 await circuit.extend_handshake(descriptor_str, wait_time=60)
 
         return circuit
-
 
     async def handle_cell(self, cell, sock):
         self.print("receive client cell_type:", type(cell))

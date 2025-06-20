@@ -143,7 +143,7 @@ class TorStream:
         return cell_list
 
     def make_cell_server(self, inner_cell):
-        return self._circuit.make_relay_server(inner_cell, stream_id=self.id)
+        return self._circuit.make_relay(inner_cell, stream_id=self.id)
 
 
     def set_end(self, cell_end):

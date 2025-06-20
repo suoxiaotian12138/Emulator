@@ -82,8 +82,8 @@ class Tor_Guard(Tor_base):
 
     async def create_circuit(self, create_cell, sock, circuit_id):
         """Quickly select several random nodes and freely add nodes, such as exit nodes"""
-        circuit = self.circuit_list.create_circuit_server(circuit_id)
-        created_cell = circuit.circuit_build_server(self.protocol, create_cell, sock)
+        circuit = await self.circuit_list.create_circuit_server(circuit_id)
+        created_cell = circuit.server_connected(self.protocol, create_cell, sock)
         await sock.send_cell(created_cell)
         return circuit
 
@@ -117,7 +117,7 @@ class Tor_Guard(Tor_base):
         self.print(cell.circuit_id)
         self.print(self.circuit_list.values())
         circuit = self.circuit_list.get_by_id(circuit_id)
-        cell = circuit.make_relay_server(inner_cell=extend_cell, relay_type=CellRelay)
+        cell = circuit.make_relay(inner_cell=extend_cell, relay_type=CellRelay)
         sock = circuit.circuit_nodes[0].sock
         await sock.send_cell(cell)
 
@@ -144,7 +144,7 @@ class Tor_Guard(Tor_base):
         elif isinstance(cell, CellRelay):
             circuit = self.circuit_list.get_by_id(cell.circuit_id)
             if sock == circuit.circuit_nodes[0].sock:
-                inner_cell = circuit.handle_relay_server(cell)
+                inner_cell = circuit.handle_relay(cell)
                 await self.handle_cell_relay(inner_cell, circuit, cell, sock)
             else:
                 next_node = circuit.circuit_nodes[0]
@@ -154,7 +154,7 @@ class Tor_Guard(Tor_base):
 
         elif isinstance(cell, Cell_RelayEarly):
             circuit = self.circuit_list.get_by_id(cell.circuit_id)
-            inner_cell = circuit.handle_relay_server(cell)
+            inner_cell = circuit.handle_relay(cell)
             await self.handle_cell_relay(inner_cell, circuit, cell, sock)
 
     async def handle_cell_relay(self, cell, circuit, origin_cell, sock):
@@ -184,7 +184,7 @@ class Tor_Guard(Tor_base):
             connected_cell = CellRelayConnected(ip_address, 0, origin_cell.circuit_id)
             self.print(connected_cell)
             self.print(connected_cell.address)
-            relay_cell = circuit.make_relay_server(inner_cell=connected_cell, relay_type=CellRelay, stream_id=origin_cell.stream_id)
+            relay_cell = circuit.make_relay(inner_cell=connected_cell, relay_type=CellRelay, stream_id=origin_cell.stream_id)
 
             await sock.send_cell(relay_cell)
         elif isinstance(cell, CellRelayConnected):
@@ -210,7 +210,7 @@ class Tor_Guard(Tor_base):
             self.print("pd:01")
             end_cell = CellRelayEnd(StreamReason(6), circuit.id)
             self.print("pd:02")
-            relay_cell = circuit.make_relay_server(inner_cell=end_cell, relay_type=CellRelay, stream_id=origin_cell.stream_id)
+            relay_cell = circuit.make_relay(inner_cell=end_cell, relay_type=CellRelay, stream_id=origin_cell.stream_id)
             self.print("pd:03")
             await sock.send_cell(relay_cell)
             self.print("pd:04")

@@ -1,29 +1,32 @@
-import struct, hmac, hashlib
 from typing import Tuple
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
 from torpy.cells import RelayedTorCell
+import struct
+import hashlib, logging
+
+from tools.Crypt.crypt_common import (
+    hmac_sha256,
+    hkdf_sha256,
+    sha1_stream,
+    sha1_stream_clone,
+    sha1_stream_update,
+    sha1_stream_finalize,
+    aes_ctr_encryptor,
+    aes_ctr_decryptor,
+    aes_update,
+    to_hex,
+)
+
+logger = logging.getLogger(__name__)
 
 
-# ---------- helpers ----------
-def hmac_sha256(k: bytes, m: bytes) -> bytes:
-    return hmac.new(k, m, hashlib.sha256).digest()
-from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
-from cryptography.hazmat.backends.openssl.backend import backend
+KEY_MAT_LEN = 72
+HASH_LEN = 20
+KEY_LEN = 16
+DIGEST_LEN = 4
 
 
-def hkdf_sha256(prk: bytes, length: int, info: bytes = b'') -> bytes:
-    return HKDFExpand(
-        algorithm=hashes.SHA256(),
-        length=length,
-        info=info,
-        backend=backend            # 与 Torpy 完全一致
-    ).derive(prk)
-
-KEY_MAT_LEN = 72                              # Tor spec 5.4
-
-# ---------- server side ----------
 class NtorServerKeyAgreement:
     PROTOID  = b"ntor-curve25519-sha256-1"
     T_MAC    = PROTOID + b":mac"
@@ -103,59 +106,6 @@ class NtorServerKeyAgreement:
         return created2_hdata, key_material
 
 
-import struct, hashlib, logging
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
-
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# ==== 占位 / 兼容性辅助 ====
-HASH_LEN   = 20
-KEY_LEN    = 16
-DIGEST_LEN = 4
-
-# -- SHA-1 stream helpers ----------------------------------------------------
-def sha1_stream(seed: bytes):
-    h = hashlib.sha1()
-    h.update(seed)
-    return h                       # same object used as "stream"
-
-def sha1_stream_clone(h):
-    return h.copy()
-
-def sha1_stream_update(h, data: bytes):
-    h.update(data)
-
-def sha1_stream_finalize(h):
-    return h.digest()
-
-# -- AES-CTR helpers ---------------------------------------------------------
-def _aes_ctr_cipher(key: bytes, decrypt: bool):
-    iv = b"\x00" * 16                       # Tor CTR IV starts with zeros
-    cipher = Cipher(
-        algorithms.AES(key),
-        modes.CTR(iv),
-        backend=default_backend(),
-    )
-    return cipher.decryptor() if decrypt else cipher.encryptor()
-
-def aes_ctr_encryptor(key: bytes):
-    return _aes_ctr_cipher(key, decrypt=False)
-
-def aes_ctr_decryptor(key: bytes):
-    return _aes_ctr_cipher(key, decrypt=True)
-
-def aes_update(ctx, data: bytes) -> bytes:
-    return ctx.update(data)
-
-# -- Debug helper ------------------------------------------------------------
-def to_hex(b: bytes, max_len: int = 32):
-    head = b.hex()
-    return head if len(head) <= max_len else head[:max_len] + "..."
-
-# ---------------------------------------------------------------------------
-# ==== RelayCryptoState ====
 class RelayCryptoState:
     """
     Server-side circuit crypto after NTor.
