@@ -3,8 +3,9 @@ from queue import Queue
 
 from examples.Tor_simplified.Tor_Stream import StreamsList
 from examples.Tor_simplified.Tor_Router import Tor_Router_simple
+from examples.Tor_simplified.Tor_Crypt import NtorKeyAgreement
 
-from torpy.keyagreement import NtorKeyAgreement
+# from torpy.keyagreement import NtorKeyAgreement
 from examples.Tor_simplified.Tor_Cell import *
 import logging
 

@@ -162,7 +162,8 @@ class TorStream:
         self.data_event = self._make_new_event()
 
         return result
-    def extract_guessed_message_from_buffer(self):
+
+    async def extract_guessed_message_from_buffer(self):
         """
         Try to detect the protocol from buffer content and extract a full message.
 
@@ -179,9 +180,34 @@ class TorStream:
         if msg_len is not None:
             message = data[:msg_len]
             del self._buffer[:msg_len]
-            return message
+            text = await self.handle_guessed_protocol(proto, message)
+            return text
 
         return None
+
+    async def handle_guessed_protocol(self, proto, request_bytes: bytes) -> bytes:
+        """
+        Detect protocol type from buffer and call corresponding handler.
+
+        Supported:
+            - HTTP
+            - HTTPS (TLS)
+            - Custom
+            - JSON (echo)
+
+        Returns:
+            raw response bytes
+        """
+        if proto == "http":
+            return await self.handle_http_request(request_bytes)
+        elif proto == "https":
+            return await self.handle_https_request(request_bytes)
+        elif proto == "json":
+            return b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n" + request_bytes
+        elif proto == "custom":
+            return b"Custom protocol received.\n" + request_bytes
+        else:
+            return b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\n\r\nUnknown or incomplete request."
 
     async def handle_http_request(self, request_bytes: bytes) -> bytes:
         """
@@ -230,6 +256,95 @@ class TorStream:
 
         except Exception as e:
             return f"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\n\r\nError: {e}".encode()
+
+    async def handle_https_request(self, request_bytes: bytes) -> bytes:
+        """
+        Forward an HTTPS/TLS request by creating a raw TCP tunnel.
+
+        Args:
+            request_bytes: TLS ClientHello and later handshake content
+
+        Returns:
+            response_bytes: The raw response from the target HTTPS server
+        """
+        try:
+            # Step 1: extract SNI host from ClientHello (basic heuristic)
+            host = self._extract_sni_hostname(request_bytes)
+            if not host:
+                raise ValueError("Unable to extract SNI from TLS ClientHello")
+
+            # Step 2: open TLS destination port
+            reader, writer = await asyncio.open_connection(host, 443)
+
+            # Step 3: send initial ClientHello
+            writer.write(request_bytes)
+            await writer.drain()
+
+            # Step 4: relay response (at least handshake)
+            response = bytearray()
+            while True:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    break
+                response.extend(chunk)
+
+            writer.close()
+            await writer.wait_closed()
+
+            return bytes(response)
+
+        except Exception as e:
+            return f"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\n\r\nHTTPS Error: {e}".encode()
+
+    @staticmethod
+    def _extract_sni_hostname(data: bytes) -> Optional[str]:
+        """
+        Extract the SNI hostname from a TLS ClientHello message.
+
+        Reference: https://tools.ietf.org/html/rfc6066#section-3
+
+        Returns:
+            - host (str) if found
+            - None otherwise
+        """
+        try:
+            # Skip TLS record header (5 bytes)
+            # + handshake header (1 + 3 bytes)
+            # + version (2 bytes)
+            # + random (32 bytes)
+            # + session ID len + session ID
+            pos = 43
+            session_id_len = data[pos]
+            pos += 1 + session_id_len
+
+            # Cipher Suites
+            cipher_suites_len = struct.unpack(">H", data[pos:pos + 2])[0]
+            pos += 2 + cipher_suites_len
+
+            # Compression methods
+            compression_len = data[pos]
+            pos += 1 + compression_len
+
+            # Extensions
+            ext_total_len = struct.unpack(">H", data[pos:pos + 2])[0]
+            pos += 2
+            end = pos + ext_total_len
+
+            while pos + 4 <= end:
+                ext_type = struct.unpack(">H", data[pos:pos + 2])[0]
+                ext_len = struct.unpack(">H", data[pos + 2:pos + 4])[0]
+                pos += 4
+                if ext_type == 0:  # SNI
+                    sni_data = data[pos + 2:pos + ext_len]  # skip list length (2 bytes)
+                    if sni_data[0] == 0:  # host_name type
+                        name_len = struct.unpack(">H", sni_data[1:3])[0]
+                        hostname = sni_data[3:3 + name_len].decode()
+                        return hostname
+                pos += ext_len
+
+        except Exception:
+            pass
+        return None
 
 
 def guess_protocol_and_check_complete(data: bytes) -> tuple[Optional[str], Optional[int]]:

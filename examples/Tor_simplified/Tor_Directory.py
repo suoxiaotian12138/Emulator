@@ -425,48 +425,6 @@ def compute_descriptor_digest(descriptor: str, *, encoding: str = "hex") -> str:
     raise ValueError("encoding must be 'hex' or 'base64'")
 
 
-def parse_single_consensus_entry(entry_str: str) -> dict:
-    """
-    Parse a single router consensus block into a dictionary.
-
-    :param entry_str: Multiline string representing a single consensus entry.
-    :return: Dictionary with parsed fields.
-    """
-    relay = {}
-    lines = entry_str.strip().splitlines()
-
-    for line in lines:
-        if line.startswith('r '):
-            parts = line.strip().split()
-            relay["nickname"] = parts[1]
-            relay["fingerprint"] = parts[2]
-            relay["digest"] = parts[3]
-            relay["service_key"] = parts[3]
-            relay["ip"] = parts[6]
-            relay["or_port"] = int(parts[7])
-            relay["dir_port"] = int(parts[8])
-
-        elif line.startswith('s '):
-            relay["flags"] = line[2:].split()
-
-        elif line.startswith('p '):
-            relay["exit_policy"] = line[2:].strip()
-
-        elif line.startswith('v '):
-            relay["version"] = line[2:].strip()
-
-        elif line.startswith('pr '):
-            relay["protocols"] = line[3:].strip()
-
-        elif line.startswith('w '):
-            parts = line[2:].split()
-            for part in parts:
-                if part.startswith('Bandwidth='):
-                    relay["bandwidth"] = int(part.split('=')[1])
-
-    return relay
-
-
 def parse_full_consensus(consensus_text: str):
     """
     Parses a full Tor consensus file into header, router blocks, footer, and directory signatures.
@@ -548,12 +506,13 @@ def _parse_signature_block(sig_lines):
         "signature": sig_block
     }
 
+
 def parse_urlsafe_fingerprint(encoded: str) -> str:
     padding = '=' * (-len(encoded) % 4)
     raw = base64.urlsafe_b64decode(encoded + padding)
     return base64.b64encode(raw).decode('ascii').rstrip('=')
 
-# 方案1: 使用哈希值作为文件名（推荐）
+
 def fingerprint_to_filename_hash(fingerprint: str) -> str:
     """
     将fingerprint转换为SHA256哈希值作为文件名

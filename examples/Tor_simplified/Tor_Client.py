@@ -8,7 +8,8 @@ from tools.Crypt.key_generator import curve25519_setup
 from examples.Tor_simplified.Tor_base import Tor_base
 from examples.Tor_simplified.Tor_Circuit import Tor_CircuitsList
 from examples.Tor_simplified.Tor_Consensus import Tor_Consensus
-from examples.Tor_simplified.Tor_Router import Tor_Router, Tor_Socket
+from examples.Tor_simplified.Tor_Router import Tor_Router
+from examples.Tor_simplified.Tor_Socket import Tor_Socket
 from examples.Tor_simplified.Tor_Cell import *
 
 
@@ -25,7 +26,7 @@ class Tor_Client(Tor_base):
         self.circuit_list = Tor_CircuitsList()
 
     async def start_protocol(self):
-        self.tasks['listener_task'] = asyncio.create_task(self.serve_tor_socket())
+        self.tasks['listener_task'] = asyncio.create_task(self.monitor_tor_socket())
         self.tasks['routing_task'] = asyncio.create_task(self.consensus_init())
 
         await asyncio.gather(*self.tasks.values())
@@ -41,7 +42,9 @@ class Tor_Client(Tor_base):
             self.print(f"[Monitor] Connection {addr} closed and removed from map.")
 
     async def consensus_init(self):
+        self.print("pb:01")
         await self.consensus.consus_init()
+        self.print("pb:02")
         self.guard = Tor_Router(self.consensus.get_random_guard_node())
         desc = await self.consensus.fetch_descriptor(self.guard.fingerprint_str)
         self.guard.set_descriptor(desc)

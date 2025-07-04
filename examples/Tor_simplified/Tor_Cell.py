@@ -182,6 +182,7 @@ class RelayedTorCell(TorCell):
                 )
             assert len(relay_payload) + len(self._padding) <= RelayedTorCell.MAX_PAYLOD_SIZE, 'wrong relay payload size'
             payload_bytes += struct.pack('!H', len(relay_payload))
+            print(f"[DEBUG] relay_payload type: {type(relay_payload)}, value: {relay_payload}")
             payload_bytes += struct.pack('!{}s'.format(RelayedTorCell.MAX_PAYLOD_SIZE), relay_payload + self._padding)
             return payload_bytes
 

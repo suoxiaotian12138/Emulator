@@ -5,7 +5,7 @@ import datetime
 import hashlib
 from textwrap import wrap
 from typing import Iterable
-from tools.Crypt.key_generator import ed25519_setup, generate_cert_from_ed25519, curve25519_setup
+from tools.Crypt.key_generator import generate_cert_from_ed25519
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -26,10 +26,11 @@ class TorDescriptor_build:
                  or_port: int = 9001,
                  dir_port: int = 0,
                  socks_port: int = 0,
-                 reject_rules: Iterable[str] | None = None,  # ← 新增
-                 accept_rules: Iterable[str] | None = None,  # ← 新增
+                 exit_policy: str = "reject *:*",
                  ipv6_policy: str | None = None,  # ← 新增
-                 sim_flag: str = "sim-flags"
+                 sim_flag: str = "sim-flags",
+                 sim_ip: str = "8.8.8.8",
+                 protocols: str = "Cons=2 Desc=2 DirCache=2 FlowCtrl=2 Link=4-5 LinkAuth=3 Microdesc=2 Padding=2 Relay=4"
                  ):
         self.nickname = nickname
         self.ip = ip
@@ -41,10 +42,11 @@ class TorDescriptor_build:
         self.curve_sk, self.curve_pk = curve_sk, curve_pk
         self.rsa_sk = rsa_sk
 
-        self.reject_rules = list(reject_rules or [])
-        self.accept_rules = list(accept_rules or [])
+        self.reject_rules, self.accept_rules = parse_exit_policy(exit_policy)
         self.ipv6_policy = ipv6_policy
+        self.protocols = protocols
         self.sim_flag = sim_flag
+        self.sim_ip = 'sim-ip' + sim_ip
 
     # ----------------- public API -----------------
     def build(self) -> str:
@@ -62,7 +64,7 @@ class TorDescriptor_build:
             identity_crt,
             f"master-key-ed25519 {master_key}",
             "platform Tor 0.4.8.x on Python",
-            "proto Cons=2 Desc=2 DirCache=2 FlowCtrl=2 Link=4-5 LinkAuth=3 Microdesc=2 Padding=2 Relay=4",
+            f"proto {self.protocols}",
             f"published {ts}",
             f"fingerprint {fingerprint}",
             "uptime 0",
@@ -80,7 +82,7 @@ class TorDescriptor_build:
         for r in self.reject_rules:
             lines.append(f"reject {r}")
         for a in self.accept_rules:
-            lines.append(f"accept {a}")
+            lines.append(f"accept *:{a}")
         # 若最后一条不是 *:*，补一个兜底
         if not self.reject_rules or self.reject_rules[-1] != "*:*":
             lines.append("reject *:*")
@@ -93,6 +95,7 @@ class TorDescriptor_build:
         lines.append(f"router-sig-ed25519 {self._fake_router_sig()}")
         lines.extend(self._make_rsa_signature_block())
         lines.append(self.sim_flag)
+
         return "\n".join(lines) + "\n"
 
     # ----------------- helpers -----------------
@@ -162,11 +165,21 @@ class TorDescriptor_build:
             "-----END SIGNATURE-----",
         ]
 
-from torpy.parsers import RouterDescriptorParser
-from torpy.consesus import Descriptor
+def parse_exit_policy(policy_line: str) -> tuple[list[str], list[str]]:
+    """
+    Parse a single Tor 'p' line (e.g., 'accept 80,443') into accept/reject rule lists.
+    """
+    policy_line = policy_line.strip()
+    if not policy_line:
+        return [], []
 
+    if policy_line.startswith("accept"):
+        rules = policy_line[len("accept"):].strip().split(",")
+        return [], [r.strip() for r in rules]
 
-# ---------------- example usage ----------------
-if __name__ == "__main__":
-    a = "TyxD/AhTyfjRVDsvC3kg8h2Bbkg"
-    print(len(a))
+    elif policy_line.startswith("reject"):
+        rules = policy_line[len("reject"):].strip().split(",")
+        return [r.strip() for r in rules], []
+
+    else:
+        raise ValueError(f"Unsupported exit policy line: {policy_line}")

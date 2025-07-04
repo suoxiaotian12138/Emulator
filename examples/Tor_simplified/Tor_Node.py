@@ -1,35 +1,36 @@
 import asyncio
 import requests
 
+from tools.Crypt.key_generator import curve25519_setup, ed25519_setup
+from tools.Crypt.crypt_common import rsa_identity_digest
+
 from examples.Tor_simplified.Tor_Cell import *
 from examples.Tor_simplified.Tor_base import Tor_base
 from examples.Tor_simplified.Tor_Circuit import Tor_CircuitsList
 from examples.Tor_simplified.Tor_Descriptor import TorDescriptor_build
-from examples.Tor_simplified.Tor_Router import Tor_Socket, Tor_Router_simple
+from examples.Tor_simplified.Tor_Router import Tor_Router_simple
+from examples.Tor_simplified.Tor_Socket import Tor_Socket
+from examples.Tor_simplified.Tor_Crypt import NtorServerKeyAgreement
 
-from tools.Crypt.key_generator import curve25519_setup, ed25519_setup, rsa_setup
-from examples.Tor_simplified.Tor_Crypt import NtorServerKeyAgreement, RelayCryptoState
 
-import hashlib
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives.asymmetric import padding
-from textwrap import wrap
-
-class Tor_Guard(Tor_base):
-    def __init__(self, name: str, host: str, port: int, role: str = 'Guard'):
+class Tor_Node(Tor_base):
+    def __init__(self, name: str, host: str, port: int, flags: str = 'Guard', protocols: str = "",
+                 exit_policy: str = 'accept 1-65535', sim_ip='8.8.8.8'):
         super().__init__(name, host, port)
 
         self.ntor_pvk, self.ntor_puk = curve25519_setup()
         self.ed_pvk, self.ed_puk = ed25519_setup()
         self.circuit_list = Tor_CircuitsList()
-        fingerprint = self.rsa_identity_digest(self.rsa_pvk)
-        self.protocol = NtorServerKeyAgreement(fingerprint, self.ntor_pvk)
-        self.role = role
+        self.protocol_version = NtorServerKeyAgreement(rsa_identity_digest(self.rsa_pvk), self.ntor_pvk)
+        self.flags = flags
+        self.protocols = protocols
+        self.exit_policy = exit_policy
+        self.sim_ip = sim_ip
+        self.print(self.sim_ip)
 
     async def start_protocol(self):
         self.tasks['routing_task'] = asyncio.create_task(self.register_to_dire())
-        self.tasks['listener_task'] = asyncio.create_task(self.serve_tor_socket())
+        self.tasks['listener_task'] = asyncio.create_task(self.monitor_tor_socket())
 
         await asyncio.gather(*self.tasks.values())
 
@@ -71,19 +72,24 @@ class Tor_Guard(Tor_base):
             curve_pk=self.ntor_puk,
             rsa_sk=self.rsa_pvk,
             or_port=self.port,
-            sim_flag=self.get_sim_flag()
+            protocols=self.protocols,
+            exit_policy=self.exit_policy,
+            sim_flag=self.get_sim_flag(),
+            sim_ip=self.sim_ip
         )
         descriptor = desc_build.build()
         return descriptor
 
     def get_sim_flag(self) -> str:
-        sim_flag = "sim-flags" + ' ' + self.role
+        sim_flag = "sim-flags"
+        for flag in self.flags:
+            sim_flag += ' ' + flag
         return sim_flag
 
     async def create_circuit(self, create_cell, sock, circuit_id):
         """Quickly select several random nodes and freely add nodes, such as exit nodes"""
         circuit = await self.circuit_list.create_circuit_server(circuit_id)
-        created_cell = circuit.server_connected(self.protocol, create_cell, sock)
+        created_cell = circuit.server_connected(self.protocol_version, create_cell, sock)
         await sock.send_cell(created_cell)
         return circuit
 
@@ -102,14 +108,12 @@ class Tor_Guard(Tor_base):
         await sock.tor_handshake_client()
 
         circuit = self.circuit_list.get_by_id(circuit_id)
-        self.print("circuit:", circuit)
         simple_node = Tor_Router_simple(sock)
         circuit.circuit_nodes.append(simple_node)
 
         await sock.send_cell(create2)
 
     async def reply_extend(self, cell: CellCreated2):
-
         circuit_id = cell.circuit_id
         handshake_data = cell.handshake_data
         extend_cell = CellRelayExtended2(handshake_data, circuit_id)
@@ -120,8 +124,6 @@ class Tor_Guard(Tor_base):
         cell = circuit.make_relay(inner_cell=extend_cell, relay_type=CellRelay)
         sock = circuit.circuit_nodes[0].sock
         await sock.send_cell(cell)
-
-
 
     async def handle_cell(self, cell, sock):
         self.print("receive client cell_type:", type(cell))
@@ -149,7 +151,6 @@ class Tor_Guard(Tor_base):
             else:
                 next_node = circuit.circuit_nodes[0]
                 next_node.encrypt_forward(cell)
-                print('forward relay cell:', cell)
                 await next_node.sock.send_cell(cell)
 
         elif isinstance(cell, Cell_RelayEarly):
@@ -198,12 +199,12 @@ class Tor_Guard(Tor_base):
         elif isinstance(cell, CellRelayData):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.append(cell.data)
-            message = stream.extract_guessed_message_from_buffer()
-            if message is None:
-                pass
-            self.print(message)
-            text = await stream.handle_http_request(message)
-            self.print(text)
+            text = await stream.extract_guessed_message_from_buffer()
+            # if message is None:
+            #     pass
+            # self.print(message)
+            # text = await stream.handle_http_request(message)
+            self.print("text", text)
             cell_list = stream.make_relays_server(text)
             for cell in cell_list:
                 await sock.send_cell(cell)
@@ -241,16 +242,3 @@ class Tor_Guard(Tor_base):
                 raise "socket has closed before stream"
         stream.close()
 
-    @staticmethod
-    def rsa_identity_digest(rsa_priv: rsa.RSAPrivateKey) -> bytes:
-        """
-        Return the raw 20-byte SHA-1 digest of the RSA identity public key.
-        Pass this value to NtorServerKeyAgreement(...).
-
-        :param rsa_priv: server's long-term RSA *private* key object
-        """
-        der = rsa_priv.public_key().public_bytes(
-            serialization.Encoding.DER,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        return hashlib.sha1(der).digest()

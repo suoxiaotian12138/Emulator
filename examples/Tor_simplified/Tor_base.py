@@ -10,7 +10,8 @@ from tools.Log.LogPrinter import LogPrinter
 from tools.Packet.packet_TCP import accept_tls_connections
 from tools.Crypt.key_generator import generate_cert_and_key_from_rsa, create_server_context, ed25519_setup, rsa_setup, generate_cert_and_key_from_ed25519
 
-from examples.Tor_simplified.Tor_Router import Tor_Socket
+from examples.Tor_simplified.Tor_Socket import Tor_Socket
+
 
 class Tor_base:
 
@@ -24,7 +25,6 @@ class Tor_base:
         self.lock = asyncio.Lock()
         self.routing_table = {}
 
-        # self.config = self.config_set()
         self.socket = self.socket_recv_set(self.host, self.port)   # Used to accept socket connections,not to send or receive data directly.
         self.socket_map = {}   # dict[Tuple[str, int], socket.socket]
         self.directory_address = self.get_directory_address()
@@ -76,7 +76,7 @@ class Tor_base:
 
         return (host, port)
 
-    async def serve_tor_socket(self):
+    async def monitor_tor_socket(self):
         """
         持续监听新 TLS 连接，为每个连接创建独立的 Tor_Socket 管理任务
         """
@@ -93,7 +93,7 @@ class Tor_base:
             await handle  # 等连接断开
         finally:
             self.socket_map.pop(addr, None)
-            print(f"[Monitor] Connection {addr} closed and removed from map.")
+            self.print(f"[Monitor] Connection {addr} closed and removed from map.")
 
     def handle_cell(self, cell, sock):
         pass
