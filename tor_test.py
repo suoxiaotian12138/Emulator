@@ -146,38 +146,48 @@ recommended-client-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSInt
 recommended-relay-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=2 Link=4-5 LinkAuth=3 Microdesc=2 Relay=2-4
 required-client-protocols Cons=2 Desc=2 FlowCtrl=1 Link=4 Microdesc=2 Relay=2
 required-relay-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=2 Link=4-5 LinkAuth=3 Microdesc=2 Relay=2-4
-params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000 NumDirectoryGuards=3 NumEntryGuards=1 NumNTorsPerTAP=100 Support022HiddenServices=0 UseNTorHandshake=1
+params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000
 {self._build_authority_block("0" * 40)}
 """
 
-        parts = [header]
 
-        # ---------- authority itself ----------
+        parts = [header]
+        entries = []
+        # authority 自己
         ident_self = self._get_base64_digest_of_pubkey(self._authority_key)
         desc_self = base64.b64encode(secrets.token_bytes(20)).decode()
         published_self = (now - timedelta(minutes=18)).strftime('%Y-%m-%d %H:%M:%S')
-
-        parts.append(
-            f"r {self._server_config['nickname']} {ident_self} {desc_self} {published_self} "
-            f"{self._server_config['address']} {self._server_config['or_port']} {self._server_config['dir_port']}\n"
-            "s Authority Fast Guard HSDir Running Stable V2Dir Valid\n"
-            f"v Tor {self._server_config['tor_version']}\n"
-            "pr Cons=1\n"
-            "w Bandwidth=1000 Measured=1000\n"
-            "p reject 1-65535\n"
+        auth_block = (
+                f"r {self._server_config['nickname']} {ident_self} {desc_self} {published_self} "
+                f"{self._server_config['address']} {self._server_config['or_port']} {self._server_config['dir_port']}\n"
+                "s Authority Fast Guard HSDir Running Stable V2Dir Valid\n"
+                f"v Tor {self._server_config['tor_version']}\n"
+                "pr Conflux=1 Cons=1-2 Desc=1-2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=1-2 Link=1-5 LinkAuth=1,3 Microdesc=1-2 Padding=2 Relay=1-4\n"
+                "w Bandwidth=1000 Measured=1000\n"
+                "p reject 1-65535\n"
         )
+        entries.append((self._authority_fingerprint, auth_block))
 
-        # ---------- cached relays ----------
+        # cached relays
+
         for fp, info in self._descriptor_cache.items():
-            parts.append(
+            block = (
                 f"r {info['nick']} {info['ident_b64']} {info['desc_b64']} {info['published']} "
                 f"{info['or_addr']} {info['or_port']} {info['dir_port']}\n"
                 "s Running Valid\n"
                 "v Tor 0.4.8.x\n"
-                "pr Cons=1\n"
+                "pr Conflux=1 Cons=1-2 Desc=1-2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=1-2 Link=1-5 LinkAuth=1,3 Microdesc=1-2 Padding=2 Relay=1-4\n"
                 "w Bandwidth=1000 Measured=1000\n"
                 "p reject 1-65535\n"
             )
+            entries.append((fp, block))
+
+        # 2) 按 fp_hex 升序排序
+        entries.sort(key=lambda tpl: tpl[0])
+
+        # 3) 把排好序的块依次加回 parts
+        for _, block in entries:
+            parts.append(block)
 
         # ---------- footer ----------
         parts.append("""directory-footer
@@ -198,7 +208,7 @@ bandwidth-weights Wbd=3333 Wbe=0 Wbg=0 Wbm=10000 Wdb=10000 Web=10000 Wed=3333 We
         fresh_until = valid_after + timedelta(minutes=1)
         valid_until = valid_after + timedelta(minutes=3)
 
-        header = f"""network-status-version 3
+        header = f"""network-status-version 3 microdesc
 vote-status consensus
 consensus-method 33
 valid-after {valid_after:%Y-%m-%d %H:%M:%S}
@@ -208,42 +218,64 @@ voting-delay 20 20
 client-versions 
 server-versions 
 known-flags Authority Exit Fast Guard HSDir NoEdConsensus Running Stable StaleDesc Sybil V2Dir Valid
-recommended-client-protocols Cons=2 Desc=2 DirCache=2
-recommended-relay-protocols Cons=2 Desc=2 DirCache=2
-required-client-protocols Cons=2 Desc=2
-required-relay-protocols Cons=2 Desc=2
-params AuthDirMaxServersPerAddr=2
+recommended-client-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4 HSRend=2 Link=4-5 Microdesc=2 Relay=2-4
+recommended-relay-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=2 Link=4-5 LinkAuth=3 Microdesc=2 Relay=2-4
+required-client-protocols Cons=2 Desc=2 FlowCtrl=1 Link=4 Microdesc=2 Relay=2
+required-relay-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=2 Link=4-5 LinkAuth=3 Microdesc=2 Relay=2-4
+params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000
 {self._build_authority_block("0" * 40)}
 """
 
         parts = [header]
+        entries = []
 
-        # authority itself
         ident_self = self._get_base64_digest_of_pubkey(self._authority_key)
         published_self = (now - timedelta(minutes=18)).strftime('%Y-%m-%d %H:%M:%S')
-
-        parts.append(
+        auth_block = (
             f"r {self._server_config['nickname']} {ident_self} {published_self} "
             f"{self._server_config['address']} {self._server_config['or_port']} {self._server_config['dir_port']}\n"
-            f"m {base64.b64encode(secrets.token_bytes(32)).decode()}\n"
+            f"m {self._fake_microdesc_digest()}\n"
             "s Authority Fast Guard HSDir Running Stable V2Dir Valid\n"
+            "v Tor 0.4.8.x\n"
+            "pr Conflux=1 Cons=1-2 Desc=1-2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=1-2 Link=1-5 LinkAuth=1,3 Microdesc=1-2 Padding=2 Relay=1-4\n"
+            "w Bandwidth=1000 Measured=1000\n"
         )
+        entries.append((self._authority_fingerprint, auth_block))
 
-        # other relays
+        # cached relays
+
         for fp, info in self._descriptor_cache.items():
-            parts.append(
+            block = (
                 f"r {info['nick']} {info['ident_b64']} {info['published']} "
                 f"{info['or_addr']} {info['or_port']} {info['dir_port']}\n"
                 f"m {info['desc_b64']}\n"
                 "s Running Valid\n"
+                "v Tor 0.4.8.x\n"
+                "pr Conflux=1 Cons=1-2 Desc=1-2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=1-2 Link=1-5 LinkAuth=1,3 Microdesc=1-2 Padding=2 Relay=1-4\n"
+                "w Bandwidth=1000 Measured=1000\n"
             )
+            entries.append((fp, block))
 
-        parts.append("directory-footer\n")
+        # 2) 按 fp_hex 升序排序
+        entries.sort(key=lambda tpl: tpl[0])
 
+        # 3) 把排好序的块依次加回 parts
+        for _, block in entries:
+            parts.append(block)
+
+        # ---------- footer ----------
+        parts.append("""directory-footer
+bandwidth-weights Wbd=3333 Wbe=0 Wbg=0 Wbm=10000 Wdb=10000 Web=10000 Wed=3333 Wee=10000 Weg=3333 Wem=10000""")
         micro = "".join(parts)
-        digest_hex = hashlib.sha1(micro.encode()).hexdigest().upper()
+        digest_hex = hashlib.sha1(micro.encode('utf-8')).hexdigest().upper()
+        # 3) 替换 header 里的 “0"*40” 占位 vote-digest
         micro = micro.replace("0" * 40, digest_hex, 1)
         return micro
+
+    def _fake_microdesc_digest(self, text: str | None = None) -> str:
+        if text is None:
+            return base64.b64encode(secrets.token_bytes(32)).decode()
+        return base64.b64encode(hashlib.sha256(text.encode()).digest()).decode()
 
     def _add_signature(self, content: str) -> str:
         """
@@ -270,6 +302,31 @@ params AuthDirMaxServersPerAddr=2
             "-----END SIGNATURE-----\n"
             )
 
+    def _add_signature_micro(self, content: str) -> str:
+        """
+            为 v3 共识/投票添加 Tor 规范的 directory-signature 块
+              • 签名算法：裸 PKCS#1 v1.5 + 20 字节 SHA-1（无 DigestInfo）
+              • directory-signature 行 **单独一行**，后跟 BEGIN/END 包裹的 base64，
+                每行最多 64 个字符
+        """
+
+        if not content.endswith('\n'):
+            content += '\n'
+        signed_prefix = content + "directory-signature "
+        doc_digest = hashlib.sha256(signed_prefix.encode('utf-8')).digest()
+
+        sig_raw = self._raw_pkcs1_sign(self._signing_key, doc_digest)
+        sig_b64 = base64.b64encode(sig_raw).decode()
+        sig_lines = "\n".join(sig_b64[i:i + 64] for i in range(0, len(sig_b64), 64))
+
+        return (
+            f"{content}"
+            f"directory-signature sha256 {self._authority_fingerprint} {self._signing_fingerprint}\n"
+            "-----BEGIN SIGNATURE-----\n"
+            f"{sig_lines}\n"
+            "-----END SIGNATURE-----\n"
+            )
+
     def do_GET(self):
         """处理GET请求"""
         # 确保密钥已生成
@@ -280,19 +337,7 @@ params AuthDirMaxServersPerAddr=2
         path = parsed_path.path
         query_params = urlparse.parse_qs(parsed_path.query)
 
-        # 处理Tor目录服务请求
-        if path.startswith('/tor/status-vote/current/consensus'):
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-
-            # 生成带签名的共识文档
-            signed_consensus = self._get_signed_consensus()
-            self.wfile.write(signed_consensus.encode('utf-8'))
-            return
-
-        elif path.startswith('/tor/status-vote/current/consensus-microdesc'):
+        if path.startswith('/tor/status-vote/current/consensus-microdesc'):
             self.send_response(200)
             self.send_header('Content-type', 'text/plain; charset=utf-8')
             self.send_header('Access-Control-Allow-Origin', '*')
@@ -301,6 +346,17 @@ params AuthDirMaxServersPerAddr=2
             # 生成带签名的微描述符共识文档
             signed_microdesc = self._get_signed_microdesc()
             self.wfile.write(signed_microdesc.encode('utf-8'))
+            return
+        # 处理Tor目录服务请求
+        elif path.startswith('/tor/status-vote/current/consensus'):
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+
+            # 生成带签名的共识文档
+            signed_consensus = self._get_signed_consensus()
+            self.wfile.write(signed_consensus.encode('utf-8'))
             return
 
         elif path == '/tor/keys/authority':
@@ -470,6 +526,7 @@ params AuthDirMaxServersPerAddr=2
         # --- 计算描述符 SHA-1(文本) → base64 ---
         desc_digest_b64 = base64.b64encode(hashlib.sha1(raw.encode()).digest()).decode()
         ident_b64 = base64.b64encode(bytes.fromhex(fp_hex)).decode()
+        micro_b64 = base64.b64encode(hashlib.sha256(raw.encode()).digest()).decode()
 
         # --- 落盘 ---
         desc_path = pathlib.Path(self._descriptor_dir, f"{fp_hex}.desc")
@@ -480,6 +537,7 @@ params AuthDirMaxServersPerAddr=2
             "text": raw, "desc_b64": desc_digest_b64, "ident_b64": ident_b64,
             "published": published, "or_addr": or_addr or self.client_address[0],
             "or_port": or_port or "9001", "dir_port": dir_port or "0", "nick": nick or "Unnamed",
+            "micro_b64": micro_b64,
         }
 
         # 回复 200
@@ -506,7 +564,7 @@ params AuthDirMaxServersPerAddr=2
         rounded = self._get_rounded_time()
         if rounded not in self._cached_microdesc_map:
             content = self._generate_microdesc_content()
-            signed = self._add_signature(content)
+            signed = self._add_signature_micro(content)
             self._cached_microdesc_map[rounded] = signed
         return self._cached_microdesc_map[rounded]
 
@@ -610,7 +668,6 @@ def run_server(host='192.168.66.241', port=9030):
     print(f"  GET  /tor/status-vote/current/consensus.z - Tor共识文档 (带真实签名)")
     print(f"  GET  /tor/status-vote/current/consensus-microdesc.z - Tor微描述符共识文档 (带真实签名)")
     print(f"  GET  /tor/keys/authority - 权威密钥信息")
-    print(f"  GET  /tor/debug/consensus - 调试共识文档生成")
     print(f"  POST /        - 接收POST数据")
     print(f"按 Ctrl+C 停止服务器")
     print("-" * 50)
@@ -625,14 +682,7 @@ def run_server(host='192.168.66.241', port=9030):
 
 if __name__ == '__main__':
     # 检查是否安装了必要的库
-    try:
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
-    except ImportError:
-        print("错误: 需要安装cryptography库")
-        print("请运行: pip install cryptography")
-        exit(1)
+
 
     # 启动服务器，默认监听 192.168.66.241:9030
     run_server()
