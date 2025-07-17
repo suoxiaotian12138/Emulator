@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Async Tor directory server (aiohttp version)
-"""
+import itertools
+
+from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
+import re
 import asyncio, argparse, base64, hashlib, json, os, secrets, shutil, tempfile, zlib
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
+from base64 import urlsafe_b64encode
 
 from aiohttp import web
 from cryptography.hazmat.primitives import hashes, serialization
@@ -14,8 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa, padding as asym_paddi
 
 KEY_DIR = Path("./tor_keys")
 KEY_DIR.mkdir(exist_ok=True)
-
-
+_PORT_RE = re.compile(r"(\d+)(?:-(\d+))?$")
 class TorDirectoryServer:
     # --------------------------------------------------------------------- #
     # lifecycle
@@ -26,11 +25,15 @@ class TorDirectoryServer:
         # dynamic state
         self._descriptor_dir_obj = tempfile.TemporaryDirectory(prefix="tor_desc_")
         self._descriptor_dir = Path(self._descriptor_dir_obj.name)
+        self._micro_dir = self._descriptor_dir / "micro"
+        self._micro_dir.mkdir()
         self._descriptor_cache = {}
+        self._load_seed_descriptors(Path("./seed_descs"))
+
         self._cached_consensus_map = {}
         self._cached_microdesc_map = {}
-        self._cached_key_cert: str | None = None
-
+        self._cached_key_cert = None
+        self._micro_map = {}
         # static config
         self._server_cfg = {
             "nickname": "tordir",
@@ -50,8 +53,102 @@ class TorDirectoryServer:
         ) = self._init_keys()
 
         # aiohttp app
-        self.app = web.Application()
+        self.app = web.Application(middlewares=[self._log_all_requests])
         self._setup_routes()
+        self._consensus_dirty = True
+        self._micro_dirty = True
+
+        self._self_desc, self._self_desc_hex, self._self_micro_text, self._self_micro_b64, self._self_p_line, self._self_is_exit = self._make_self_bundle()
+
+        (self._descriptor_dir / f"{self._self_desc_hex}.desc").write_text(
+            self._self_desc, 'utf-8')
+        self._descriptor_cache[self._authority_fp] = {
+            "text": self._self_desc,
+            "desc_hex": self._self_desc_hex,
+            "desc_b64": base64.b64encode(bytes.fromhex(self._self_desc_hex)).decode(),
+            "ident_b64": base64.b64encode(bytes.fromhex(self._authority_fp)).decode(),
+            "published": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+            "or_addr": self._server_cfg['address'],
+            "or_port": str(self._server_cfg['or_port']),
+            "dir_port": str(self._server_cfg['dir_port']),
+            "nick": self._server_cfg['nickname'],
+            "micro_b64": self._self_micro_b64,
+            "p_line": self._self_p_line,
+            "is_exit": self._self_is_exit,
+            # self relay 不需要 micro_b64 —— 下一步生成
+        }
+
+
+
+    @web.middleware
+    async def _log_all_requests(self, request, handler):
+        ts = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[{ts}] \"{request.method} {request.path} HTTP/{request.version.major}.{request.version.minor}\"")
+        return await handler(request)
+
+    def _derive_status_line(self, desc_text: str, is_exit) -> str:
+        """
+        根据服务器描述符内容生成 consensus 里的“s …”行。
+        规则：
+          1) 如果出现“sim-flags …”行，则直接拿其中的 Guard / Exit / Stable
+             等标签（大小写忽略），其余逻辑跳过。
+          2) 否则：
+             • Exit  : exit-policy 中存在 accept
+             • Guard : w Bandwidth=NNNN 且 NNNN ≥ 5000
+             • Stable: published 时间早于当前 UTC ≥ 1 小时
+        始终含 Running Valid，顺序固定 Running Valid Stable Guard Exit
+        """
+        base = ["Running", "Valid"]
+
+        # ---- 1) 自定义 sim-flags 行 ----
+        for ln in desc_text.splitlines():
+            if ln.lower().startswith("sim-flags "):
+                tokens = [t.capitalize() for t in ln.split()[1:]]
+                flags = base + [t for t in tokens
+                                if t in {"Exit", "Guard", "Stable"}]
+                # 保序输出
+                order = ["Running", "Valid", "Stable", "Guard", "Exit"]
+                return "s " + " ".join([f for f in order if f in flags]) + "\n"
+
+        # ---- 2) Heuristics ----
+        lines = desc_text.splitlines()
+
+        # 2-a Exit?
+        if is_exit:
+            base.append("Exit")
+        else:
+            # 2-b Guard?
+            m_bw = next((re.search(r"bandwidth (\d+) (\d+) (\d+)", ln)
+                         for ln in lines if ln.startswith("bandwidth ")), None)
+            if m_bw:
+                avg_bandwidth = int(m_bw.group(1))  # 这是平均带宽，单位字节/秒
+                if avg_bandwidth >= 250_000:  # 250 KB/s ≈ 2000 Kbps（官方最低要求）
+                    base.append("Guard")
+                    base.append("V2Dir")
+                    base.append("Stable")
+                if avg_bandwidth >= 100_000:  # 100 kB/s ≈ Tor 默认 Fast 阈值
+                    base.append("Fast")
+
+        # 2-c Stable?
+        m_pub = next((re.search(
+            r"published (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})", ln)
+                      for ln in lines if ln.startswith("published ")), None)
+
+
+        if m_pub:
+            try:
+                pub_ts = datetime.strptime(
+                    f"{m_pub.group(1)} {m_pub.group(2)}",
+                    "%Y-%m-%d %H:%M:%S")
+                if datetime.utcnow() - pub_ts >= timedelta(hours=1):
+                    base.append("Stable")
+            except ValueError:
+                pass
+
+        # ---- 按固定序输出 ----
+        order = ["Running", "Valid", "Stable", "Guard", "Exit", "Fast", "V2Dir", "Stable"]
+        return "s " + " ".join([f for f in order if f in base]) + "\n"
+
 
     # --------------------------------------------------------------------- #
     # key handling
@@ -92,6 +189,7 @@ class TorDirectoryServer:
 
         return authority_key, signing_key, fp(authority_key), fp(signing_key)
 
+
     # --------------------------------------------------------------------- #
     # helpers
     # --------------------------------------------------------------------- #
@@ -106,7 +204,7 @@ class TorDirectoryServer:
         return pow(int.from_bytes(padded, "big"), d, n).to_bytes(k, "big")
 
     @staticmethod
-    def _rounded(t: datetime | None = None, minutes: int = 1) -> datetime:
+    def _rounded(t: datetime = None, minutes: int = 1) -> datetime:
         t = t or datetime.utcnow()
         return t.replace(minute=(t.minute // minutes) * minutes, second=0, microsecond=0)
 
@@ -115,11 +213,57 @@ class TorDirectoryServer:
             encoding=serialization.Encoding.DER,
             format=serialization.PublicFormat.PKCS1
         )
-        return base64.b64encode(hashlib.sha1(pub_der).digest()).decode()
+        return base64.b64encode(hashlib.sha1(pub_der).digest()).decode().rstrip('=')
+
+    def _sign_data(self, data: str) -> str:
+        """用 _signing_key 对文本做 RSA-PKCS1-SHA1 签名，返回 base64"""
+        sig = self._signing_key.sign(
+            data.encode('utf-8'),
+            PKCS1v15(),
+            hashes.SHA1()
+        )
+        return base64.b64encode(sig).decode('ascii')
 
     # --------------------------------------------------------------------- #
     # consensus / microdesc / certificate builders  —— 与原实现一致，略去注释
     # --------------------------------------------------------------------- #
+    def _load_seed_descriptors(self, seed_dir: Path):
+        for f in seed_dir.glob("*.desc"):
+            raw = f.read_text(encoding="utf-8")
+            p_line, is_exit = _policy_summary(raw)
+            # 从 raw 里提取 fingerprint（hex）
+            fp = None
+            for ln in raw.splitlines():
+                if ln.startswith("fingerprint "):
+                    fp = ln.split(None,1)[1].replace(" ", "")
+                    break
+            if not fp:
+                continue
+
+            # 计算 URL-safe SHA256-digest（去掉 "="）
+            digest32 = hashlib.sha256(raw.encode()).digest()
+            micro_b64 = base64.b64encode(digest32).decode("ascii").rstrip("=")
+
+            # 写到临时目录
+            (self._descriptor_dir / f"{fp}.desc").write_text(raw, encoding="utf-8")
+            ident_b64 = base64.b64encode(bytes.fromhex(fp)).decode().rstrip('=')
+            desc_b64 = base64.b64encode(hashlib.sha1(raw.encode()).digest()).decode().rstrip('=')
+            # 缓存到内存
+            self._descriptor_cache[fp] = {
+                "text": raw,
+                "desc_b64": desc_b64,
+                "micro_b64": micro_b64,
+                "ident_b64": ident_b64,
+                "p_line": p_line,
+                "is_exit": is_exit,
+                # … 你还可以继续填 published/or_addr/or_port/nick 等字段
+            }
+
+            micro_text = self._extract_microdescriptor(raw, p_line)
+            if not micro_text:
+                continue
+            self._micro_map[micro_b64] = micro_text
+
     def _build_authority_block(self, vote_digest_hex: str) -> str:
         cfg = self._server_cfg
         return (
@@ -129,11 +273,42 @@ class TorDirectoryServer:
             f"vote-digest {vote_digest_hex}"
         )
 
+    def _get_signed_consensus(self) -> str:
+        rounded = self._rounded()
+        if rounded not in self._cached_consensus_map or self._consensus_dirty:
+            # 生成＋签名＋清掉旧轮次
+            content = self._generate_consensus_content()
+            self._cached_consensus_map.clear()
+            self._cached_consensus_map[rounded] = self._add_signature(content)
+            self._consensus_dirty = False
+        return self._cached_consensus_map[rounded]
+
+    def _get_signed_microdesc(self) -> str:
+        rounded = self._rounded()
+        if rounded not in self._cached_microdesc_map or self._micro_dirty:
+            content = self._generate_microdesc_content()
+            self._cached_microdesc_map.clear()
+            self._cached_microdesc_map[rounded] = self._add_signature_micro(content)
+            self._micro_dirty = False
+        return self._cached_microdesc_map[rounded]
+
     def _b64_pubkey_digest(self, priv) -> str:
         der = priv.public_key().public_bytes(
             serialization.Encoding.DER, serialization.PublicFormat.PKCS1
         )
         return base64.b64encode(hashlib.sha1(der).digest()).decode()
+
+    def _fake_microdesc_digest(self, text: str = None) -> str:
+        if text is None:
+            digest = secrets.token_bytes(32)
+        else:
+            digest = hashlib.sha256(text.encode()).digest()
+        return base64.b64encode(digest).decode("ascii").rstrip("=")
+
+    def exit_policy_extract(self, info):
+        pol = "reject 1-65535"
+        if any(ln.lower().startswith("accept ") for ln in info["text"].splitlines()):
+            pol = "accept 1-65535"
 
     def _generate_consensus_content(self):
         now = datetime.utcnow()
@@ -156,38 +331,37 @@ recommended-client-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSInt
 recommended-relay-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=2 Link=4-5 LinkAuth=3 Microdesc=2 Relay=2-4
 required-client-protocols Cons=2 Desc=2 FlowCtrl=1 Link=4 Microdesc=2 Relay=2
 required-relay-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=2 Link=4-5 LinkAuth=3 Microdesc=2 Relay=2-4
-params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000 NumDirectoryGuards=3 NumEntryGuards=1 NumNTorsPerTAP=100 Support022HiddenServices=0 UseNTorHandshake=1
+params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000 UseGuardFraction=0
 {self._build_authority_block("0" * 40)}
 """
 
         parts = [header]
+        entries = []
+        # authority 自己在构造的时候已经填入
 
-        # ---------- authority itself ----------
-        ident_self = self._get_base64_digest_of_pubkey(self._authority_key)
-        desc_self = base64.b64encode(secrets.token_bytes(20)).decode()
-        published_self = (now - timedelta(minutes=18)).strftime('%Y-%m-%d %H:%M:%S')
 
-        parts.append(
-            f"r {self._server_cfg['nickname']} {ident_self} {desc_self} {published_self} "
-            f"{self._server_cfg['address']} {self._server_cfg['or_port']} {self._server_cfg['dir_port']}\n"
-            "s Authority Fast Guard HSDir Running Stable V2Dir Valid\n"
-            f"v Tor {self._server_cfg['tor_version']}\n"
-            "pr Conflux=1 Cons=1-2 Desc=1-2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=1-2 Link=1-5 LinkAuth=1,3 Microdesc=1-2 Padding=2 Relay=1-4\n"
-            "w Bandwidth=1000 Measured=1000\n"
-            "p reject 1-65535\n"
-        )
+        # cached relays
 
-        # ---------- cached relays ----------
         for fp, info in self._descriptor_cache.items():
-            parts.append(
+            block = (
                 f"r {info['nick']} {info['ident_b64']} {info['desc_b64']} {info['published']} "
                 f"{info['or_addr']} {info['or_port']} {info['dir_port']}\n"
-                "s Running Valid\n"
-                "v Tor 0.4.8.x\n"
+                f"{self._derive_status_line(info['text'], info['is_exit'])}"
+                "v Tor 0.4.8.17\n"
                 "pr Conflux=1 Cons=1-2 Desc=1-2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=1-2 Link=1-5 LinkAuth=1,3 Microdesc=1-2 Padding=2 Relay=1-4\n"
                 "w Bandwidth=1000 Measured=1000\n"
-                "p reject 1-65535\n"
+                f"{info['p_line']}\n"
             )
+            entries.append((info['ident_b64'], block))
+
+        # 2) 按 fp_hex 升序排序
+        from base64 import b64decode
+        entries.sort(key=lambda tpl: b64decode(tpl[0] + '=='))
+
+        # 3) 把排好序的块依次加回 parts
+        for _, block in entries:
+            parts.append(block)
+
         # ---------- footer ----------
         parts.append("""directory-footer
 bandwidth-weights Wbd=3333 Wbe=0 Wbg=0 Wbm=10000 Wdb=10000 Web=10000 Wed=3333 Wee=10000 Weg=3333 Wem=10000
@@ -221,42 +395,49 @@ recommended-client-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSInt
 recommended-relay-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=2 Link=4-5 LinkAuth=3 Microdesc=2 Relay=2-4
 required-client-protocols Cons=2 Desc=2 FlowCtrl=1 Link=4 Microdesc=2 Relay=2
 required-relay-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=2 Link=4-5 LinkAuth=3 Microdesc=2 Relay=2-4
-params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000
+params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000 UseGuardFraction=0
 {self._build_authority_block("0" * 40)}
 """
 
         parts = [header]
+        entries = []
 
-        # authority itself
         ident_self = self._get_base64_digest_of_pubkey(self._authority_key)
         published_self = (now - timedelta(minutes=18)).strftime('%Y-%m-%d %H:%M:%S')
 
-        parts.append(
-            f"r {self._server_cfg['nickname']} {ident_self} {published_self} "
-            f"{self._server_cfg['address']} {self._server_cfg['or_port']} {self._server_cfg['dir_port']}\n"
-            f"m {base64.b64encode(secrets.token_bytes(32)).decode()}\n"
-            "s Authority Fast Guard HSDir Running Stable V2Dir Valid\n"
-            "v Tor 0.4.8.x\n"
-            "pr Conflux=1 Cons=1-2 Desc=1-2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=1-2 Link=1-5 LinkAuth=1,3 Microdesc=1-2 Padding=2 Relay=1-4\n"
-            "w Bandwidth=1000 Measured=1000\n"
-        )
+        self_micro_text = self._self_micro_text
+        self_micro_b64 = self._self_micro_b64
 
-        # other relays
+        # 保存到映射，供 /tor/micro/d/… 命中
+        self._micro_map[self_micro_b64] = self_micro_text
+
+
+
         for fp, info in self._descriptor_cache.items():
-            parts.append(
+            block = (
                 f"r {info['nick']} {info['ident_b64']} {info['published']} "
                 f"{info['or_addr']} {info['or_port']} {info['dir_port']}\n"
-                f"m {info['desc_b64']}\n"
-                "s Running Valid\n"
-                "v Tor 0.4.8.x\n"
+                f"m {info['micro_b64']}\n"
+                f"{self._derive_status_line(info['text'], info['is_exit'])}"
+                "v Tor 0.4.8.17\n"
                 "pr Conflux=1 Cons=1-2 Desc=1-2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=1-2 Link=1-5 LinkAuth=1,3 Microdesc=1-2 Padding=2 Relay=1-4\n"
                 "w Bandwidth=1000 Measured=1000\n"
             )
+            entries.append((info['ident_b64'], block))
 
-        parts.append("directory-footer\n")
+        # 2) 按 fp_hex 升序排序
+        from base64 import b64decode
+        entries.sort(key=lambda tpl: b64decode(tpl[0] + '=='))
+        # 3) 把排好序的块依次加回 parts
+        for _, block in entries:
+            parts.append(block)
 
+        # ---------- footer ----------
+        parts.append("""directory-footer
+bandwidth-weights Wbd=3333 Wbe=0 Wbg=0 Wbm=10000 Wdb=10000 Web=10000 Wed=3333 Wee=10000 Weg=3333 Wem=10000""")
         micro = "".join(parts)
-        digest_hex = hashlib.sha1(micro.encode()).hexdigest().upper()
+        digest_hex = hashlib.sha1(micro.encode('utf-8')).hexdigest().upper()
+        # 3) 替换 header 里的 “0"*40” 占位 vote-digest
         micro = micro.replace("0" * 40, digest_hex, 1)
         return micro
 
@@ -270,8 +451,9 @@ params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000
 
         if not content.endswith('\n'):
             content += '\n'
+
         signed_prefix = content + "directory-signature "
-        doc_digest = hashlib.sha1(signed_prefix.encode('utf-8')).digest()
+        doc_digest = hashlib.sha1(signed_prefix.encode()).digest()
 
         sig_raw = self._raw_pkcs1_sign(self._signing_key, doc_digest)
         sig_b64 = base64.b64encode(sig_raw).decode()
@@ -292,10 +474,11 @@ params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000
               • directory-signature 行 **单独一行**，后跟 BEGIN/END 包裹的 base64，
                 每行最多 64 个字符
         """
+
         if not content.endswith('\n'):
             content += '\n'
         signed_prefix = content + "directory-signature "
-        doc_digest = hashlib.sha1(signed_prefix.encode('utf-8')).digest()
+        doc_digest = hashlib.sha256(signed_prefix.encode()).digest()
 
         sig_raw = self._raw_pkcs1_sign(self._signing_key, doc_digest)
         sig_b64 = base64.b64encode(sig_raw).decode()
@@ -307,7 +490,7 @@ params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000
             "-----BEGIN SIGNATURE-----\n"
             f"{sig_lines}\n"
             "-----END SIGNATURE-----\n"
-        )
+            )
 
     def _build_key_certificate(self) -> str:
         utc_now = datetime.utcnow()
@@ -373,32 +556,67 @@ params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000
 
         return "\n".join(lines) + "\n"
 
+    def _make_self_bundle(self):
+        """
+        构造 (descriptor_text, desc_hex, micro_text, micro_b64)
+        — 都严格可复现，供客户端下载校验
+        """
+        fp_hex = self._authority_fp
+        onion_priv = rsa.generate_private_key(
+            public_exponent = 65537,
+            key_size = 1024)
+        pub_pem = onion_priv.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.PKCS1).decode().strip()
+
+        published = (datetime.utcnow() - timedelta(minutes=20)).strftime('%Y-%m-%d %H:%M:%S')
+
+        ntor_b64 = base64.b64encode(secrets.token_bytes(32)).decode().rstrip('=')
+
+        desc = (f"router {self._server_cfg['nickname']} {self._server_cfg['address']} "
+                f"{self._server_cfg['or_port']} 0 0\n"
+                f"platform Tor 0.4.8.17\n"
+                f"fingerprint {' '.join(fp_hex[i:i + 4] for i in range(0, 40, 4))}\n"
+                f"published {published}\n"
+                "onion-key\n"
+                + "\n".join(pub_pem.splitlines()) + "\n"
+                f"ntor-onion-key {ntor_b64}\n"
+                "router-signature\n-----BEGIN SIGNATURE-----\n" + "A" * 256 + "\n-----END SIGNATURE-----\n")
+
+        desc_hex = hashlib.sha1(desc.encode()).hexdigest().upper()
+
+        p_line, is_exit = _policy_summary(desc)
+        micro_text = self._extract_microdescriptor(desc, p_line)
+        micro_b64 = base64.b64encode(
+            hashlib.sha256(micro_text.encode()).digest()
+        ).decode().rstrip('=')
+
+        return desc, desc_hex, micro_text, micro_b64, p_line, is_exit
+
     # --------------------------------------------------------------------- #
     # GET handlers
     # --------------------------------------------------------------------- #
     async def _handle_consensus(self, request: web.Request) -> web.Response:
         z = request.path.endswith(".z")
-        rounded = self._rounded()
-        if rounded not in self._cached_consensus_map:
-            raw = self._generate_consensus_content()
-            self._cached_consensus_map[rounded] = self._add_signature(raw)
-        data = self._cached_consensus_map[rounded].encode()
+        # 直接获取已缓存或新生成的签名共识文本
+        signed = self._get_signed_consensus()
+        data = signed.encode('utf-8')
         if z:
             data = zlib.compress(data)
             return web.Response(body=data, headers={"Content-Encoding": "deflate"})
-        return web.Response(text=self._cached_consensus_map[rounded])
+        # 直接返回签名好的共识
+        return web.Response(text=signed)
 
     async def _handle_micro(self, request: web.Request) -> web.Response:
         z = request.path.endswith(".z")
-        rounded = self._rounded()
-        if rounded not in self._cached_microdesc_map:
-            raw = self._generate_microdesc_content()
-            self._cached_microdesc_map[rounded] = self._add_signature_micro(raw)
-        data = self._cached_microdesc_map[rounded].encode()
+        # 直接获取已缓存或新生成的签名微描述符文本
+        signed = self._get_signed_microdesc()
+        data = signed.encode('utf-8')
         if z:
             data = zlib.compress(data)
             return web.Response(body=data, headers={"Content-Encoding": "deflate"})
-        return web.Response(text=self._cached_microdesc_map[rounded])
+        # 直接返回签名好的微描述符共识
+        return web.Response(text=signed)
 
     async def _handle_key_cert(self, request: web.Request) -> web.Response:
         if not self._cached_key_cert:
@@ -439,12 +657,106 @@ params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000
             }
         )
 
+    def _extract_microdescriptor(self, router_desc: str, p_summary: str) -> str:
+        """生成符合 Tor 规范的 microdescriptor（确保 onion-key 与 ntor-key 合法）"""
+        md_lines, in_okey, have_ntor = [], False, False
+        for ln in router_desc.splitlines():
+        # ① onion-key PEM 块
+            if ln == "onion-key":
+                in_okey = True
+                md_lines.append(ln)
+                continue
+            if in_okey:
+                md_lines.append(ln)
+                if ln.startswith("-----END"):
+                    in_okey = False
+                    continue
+        # ② ntor-onion-key （去掉 '=' padding，43 字符）
+            if ln.startswith("ntor-onion-key "):
+                key = ln.split()[1].rstrip("=")
+                if len(key) != 43:
+                    return None
+                md_lines.append(f"ntor-onion-key {key}")
+                have_ntor = True
+        if in_okey or not md_lines or not have_ntor:
+            return None
+        md_lines.append(p_summary)
+        md_lines.append("")
+        md = "\n".join(md_lines)
+
+        if len(md.encode("utf-8")) > 400:
+            md = md.encode("utf-8")[:399].decode("ascii", "ignore") + "\n"
+
+        md_lines.append("")  # 结尾空行
+
+        return "\n".join(md_lines)
+
+    async def _handle_server_descriptor(self, request):
+        """
+        兼容 2 种 URL 形式：
+          • /tor/server/d/<DIG+.>.z   → deflate 压缩
+          • /tor/server/d/<DIG+.>     → 原文
+        多个 digest 仍用 “+” 连接
+        """
+        want_deflate = request.path.endswith(".z")
+        digests = request.match_info["fps"].split("+")
+        buf = bytearray()
+
+        for d in digests:
+            # disk → 缓存 → 404
+            path = self._descriptor_dir / f"{d}.desc"
+            found = None
+            if path.exists():
+                found = path.read_bytes()
+            else:
+                for info in self._descriptor_cache.values():
+                    if info.get("desc_hex", "").lower() == d.lower():
+                        found = info["text"].encode()
+                        break
+            if not found:
+                raise web.HTTPNotFound(text=f"Server descriptor {d} not found")
+            buf.extend(found)
+
+        body = zlib.compress(bytes(buf)) if want_deflate else bytes(buf)
+        hdr = {"Content-Encoding": "deflate"} if want_deflate else {}
+        return web.Response(body=body, headers=hdr)
+
+
+    async def _handle_micro_descriptor(self, request):
+        # e.g. GET /tor/micro/d/DIG1+DIG2.z
+        digs = request.match_info['digests'].split('-')
+        print(f"[REQ  /micro/d] {digs}")
+
+        buf = bytearray()
+
+        for d in digs:
+            # 1) maybe you stored the raw text by digest?
+            md = self._micro_map.get(d)
+            if md:
+                buf.extend(md.encode('utf-8'))
+                continue
+
+            # 2) else scan your descriptor cache for matching micro_b64
+            found = False
+            for info in self._descriptor_cache.values():
+                if info.get('micro_b64') == d:
+                    buf.extend(info['micro_text'].encode('utf-8'))
+                    found = True
+                    break
+            if found:
+                continue
+
+            raise web.HTTPNotFound(text=f"Microdesc {d} not found")
+
+        compressed = zlib.compress(bytes(buf))
+        return web.Response(body=compressed, headers={"Content-Encoding": "deflate"})
+
     # --------------------------------------------------------------------- #
     # POST handler  —— 上传节点描述符
     # --------------------------------------------------------------------- #
     async def _handle_descriptor_upload(self, request: web.Request) -> web.Response:
         raw = (await request.read()).decode()
-        print(">>> descriptor received\n", raw.splitlines()[:6], "...\n")
+        print(">>> descriptor received\n", raw.splitlines(), "...\n")
 
         fp_hex = nick = or_addr = or_port = dir_port = published = None
         for ln in raw.splitlines():
@@ -461,11 +773,30 @@ params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000
         if not fp_hex:
             raise web.HTTPBadRequest(text="missing fingerprint")
 
-        desc_b64 = base64.b64encode(hashlib.sha1(raw.encode()).digest()).decode()
-        ident_b64 = base64.b64encode(bytes.fromhex(fp_hex)).decode()
+
+        desc_digest = hashlib.sha1(raw.encode()).digest()
+        desc_b64 = base64.b64encode(desc_digest).decode().rstrip('=')
+        desc_hex = desc_digest.hex().upper()
+        (self._descriptor_dir / f"{desc_hex}.desc").write_text(raw, "utf-8")
+
+        ident_b64 = base64.b64encode(bytes.fromhex(fp_hex)).decode().rstrip('=')
+        p_line, is_exit = _policy_summary(raw)
+        micro_text = self._extract_microdescriptor(raw, p_line)
+
+        if micro_text is None:
+            print("[WARN] reject descriptor: missing or bad onion/ntor key")
+            raise web.HTTPBadRequest(text="descriptor lacks valid onion/ntor key")
+
+        micro_b64 = base64.b64encode(hashlib.sha256(micro_text.encode('utf-8')).digest()) \
+            .decode('ascii').rstrip('=')
+        self._micro_map[micro_b64] = micro_text
         self._descriptor_cache[fp_hex] = {
             "text": raw,
             "desc_b64": desc_b64,
+            "micro_b64": micro_b64,
+            "micro_text": micro_text,
+            "p_line": p_line,
+            "is_exit": is_exit,
             "ident_b64": ident_b64,
             "published": published,
             "or_addr": or_addr or request.remote,
@@ -475,6 +806,11 @@ params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000
         }
         # persist to tmp file
         (self._descriptor_dir / f"{fp_hex}.desc").write_text(raw, "utf-8")
+        self._consensus_dirty = True
+        self._micro_dirty = True
+
+        print(f"[UPLOAD] fp={fp_hex}  desc_hex={desc_hex}  "
+              f"desc_b64={desc_b64[:8]}…  micro_b64={micro_b64[:8]}…")
         return web.Response(text="OK")
 
     # --------------------------------------------------------------------- #
@@ -486,11 +822,14 @@ params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000
         r.add_get("/", self._handle_root)
         r.add_get("/hello", self._handle_root)
         r.add_get("/time", self._handle_root)
-        r.add_get("/tor/status-vote/current/consensus/{rest:.*}", self._handle_consensus)
-        r.add_get("/tor/status-vote/current/consensus-microdesc/{rest:.*}", self._handle_micro)
+        r.add_get("/tor/status-vote/current/consensus-microdesc{rest:.*}", self._handle_micro)
+        r.add_get("/tor/status-vote/current/consensus{rest:.*}", self._handle_consensus)
         r.add_get("/tor/keys/authority", self._handle_authority_meta)
         r.add_get(r"/tor/keys/{_:(fp/.*|fp-sk/.*)}", self._handle_key_cert)
         r.add_get(r"/tor/keys/{_:(fp/.*|fp-sk/.*)}.z", self._handle_key_cert)
+        r.add_get("/tor/server/d/{fps:.*}.z", self._handle_server_descriptor)
+        r.add_get("/tor/server/d/{fps:.*}", self._handle_server_descriptor)
+        r.add_get("/tor/micro/d/{digests:.*}.z", self._handle_micro_descriptor)
         # POST
         r.add_post("/tor/", self._handle_descriptor_upload)
 
@@ -505,6 +844,92 @@ params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000
             print=lambda *a: None,  # mute aiohttp banner
         )
 
+
+
+def _parse_policy_line(line: str):
+    """
+    解析 'accept|reject addr:ports'，仅关心 “对所有地址”的策略。
+    返回 (is_accept, set_of_ports)；遇到 '*' 端口或缺省端口 => 全部 1-65535。
+    """
+    try:
+        typ, spec = line.split(None, 1)
+    except ValueError:
+        return None                                    # 行格式错误
+
+    # 拆 addr 与 ports（addr:* / addr / *:80,443）
+    if ":" in spec:
+        addr, ports = spec.split(":", 1)
+    else:
+        addr, ports = spec, "*"                       # 兼容 “accept *”
+    addr = addr.strip()
+
+    # 只统计 “全网地址” 的出站策略（Tor 计算 Exit-Flag 也是如此）
+    if addr not in ("*", "0.0.0.0/0", "[::]/0", "[::]"):
+        return None
+
+    # '*' 或空 => 全端口
+    if ports.strip() in ("", "*"):
+        ports_set = set(range(1, 65536))
+    else:
+        ports_set = set()
+        for part in ports.split(","):
+            m = _PORT_RE.fullmatch(part.strip())
+            if not m:
+                continue                             # 忽略非法片段
+            a, b = int(m.group(1)), int(m.group(2) or m.group(1))
+            ports_set.update(range(a, b + 1))
+
+    return (typ.lower() == "accept", ports_set)
+
+def _summarise_ports(port_set):
+    """
+    把 {80,81,443,6660..6669} 压缩成 '80,81,443,6660-6669'
+    """
+    rngs = []
+    for k, g in itertools.groupby(enumerate(sorted(port_set)),
+                                  lambda kv: kv[1] - kv[0]):
+        group = list(g)
+        start, end = group[0][1], group[-1][1]
+        rngs.append(f"{start}-{end}" if start != end else f"{start}")
+    return ",".join(rngs)
+
+
+def _policy_summary(desc_text: str):
+    """
+    读取原始 server-descriptor，返回两项：
+      * summary_line : 'p accept …' / 'p reject …'
+      * is_exit      : bool, 是否应给予 Exit 标志
+    """
+    accept_ports, reject_ports = set(), set()
+
+    for ln in desc_text.splitlines():
+        if ln.startswith(("accept ", "reject ")):
+            parsed = _parse_policy_line(ln.lower())
+            if not parsed:
+                continue
+            is_acc, ports = parsed
+            (accept_ports if is_acc else reject_ports).update(ports)
+
+    # 未显式声明 => 全拒
+    if not accept_ports and not reject_ports:
+        return "p reject 1-65535", False
+
+    # allow-all / deny-all 快捷
+    if accept_ports == set(range(1, 65536)):
+        return "p accept 1-65535", True
+    if not accept_ports:
+        return "p reject 1-65535", False
+
+    # 计算互补集
+    all_ports = set(range(1, 65536))
+    reject_ports = all_ports - accept_ports
+
+    acc_txt = _summarise_ports(accept_ports)
+    rej_txt = _summarise_ports(reject_ports)
+    if len(acc_txt) <= len(rej_txt):
+        return f"p accept {acc_txt}", True
+    else:
+        return f"p reject {rej_txt}", True
 
 # ------------------------------------------------------------------------- #
 # entry
