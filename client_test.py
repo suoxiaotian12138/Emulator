@@ -11,6 +11,7 @@ from base64 import urlsafe_b64encode
 from aiohttp import web
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding as asym_padding
+from cryptography.hazmat.primitives.asymmetric import x25519
 
 KEY_DIR = Path("./tor_keys")
 KEY_DIR.mkdir(exist_ok=True)
@@ -57,6 +58,7 @@ class TorDirectoryServer:
         self._setup_routes()
         self._consensus_dirty = True
         self._micro_dirty = True
+        self._ntor_priv, self._ntor_pub_b64 = get_ntor_keypair()
 
         self._self_desc, self._self_desc_hex, self._self_micro_text, self._self_micro_b64, self._self_p_line, self._self_is_exit = self._make_self_bundle()
 
@@ -122,18 +124,22 @@ class TorDirectoryServer:
                          for ln in lines if ln.startswith("bandwidth ")), None)
             if m_bw:
                 avg_bandwidth = int(m_bw.group(1))  # 这是平均带宽，单位字节/秒
-                if avg_bandwidth >= 250_000:  # 250 KB/s ≈ 2000 Kbps（官方最低要求）
+                if avg_bandwidth >= 250_0000:  # 250 KB/s ≈ 2000 Kbps（官方最低要求）
                     base.append("Guard")
-                    base.append("V2Dir")
                     base.append("Stable")
                 if avg_bandwidth >= 100_000:  # 100 kB/s ≈ Tor 默认 Fast 阈值
                     base.append("Fast")
+
+            has_tundir = any(ln.startswith("tunnelled-dir-server") for ln in lines)
+            if has_tundir:
+                base.append("V2Dir")
+                if "Exit" not in base:
+                    base.append("HSDir")
 
         # 2-c Stable?
         m_pub = next((re.search(
             r"published (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})", ln)
                       for ln in lines if ln.startswith("published ")), None)
-
 
         if m_pub:
             try:
@@ -146,7 +152,7 @@ class TorDirectoryServer:
                 pass
 
         # ---- 按固定序输出 ----
-        order = ["Running", "Valid", "Stable", "Guard", "Exit", "Fast", "V2Dir", "Stable"]
+        order = ["Running", "Valid", "Stable", "Guard", "Exit", "Fast", "V2Dir", "HSDir"]
         return "s " + " ".join([f for f in order if f in base]) + "\n"
 
 
@@ -571,7 +577,7 @@ bandwidth-weights Wbd=3333 Wbe=0 Wbg=0 Wbm=10000 Wdb=10000 Web=10000 Wed=3333 We
 
         published = (datetime.utcnow() - timedelta(minutes=20)).strftime('%Y-%m-%d %H:%M:%S')
 
-        ntor_b64 = base64.b64encode(secrets.token_bytes(32)).decode().rstrip('=')
+        ntor_b64 = self._ntor_pub_b64
 
         desc = (f"router {self._server_cfg['nickname']} {self._server_cfg['address']} "
                 f"{self._server_cfg['or_port']} 0 0\n"
@@ -658,38 +664,45 @@ bandwidth-weights Wbd=3333 Wbe=0 Wbg=0 Wbm=10000 Wdb=10000 Web=10000 Wed=3333 We
         )
 
     def _extract_microdescriptor(self, router_desc: str, p_summary: str) -> str:
-        """生成符合 Tor 规范的 microdescriptor（确保 onion-key 与 ntor-key 合法）"""
-        md_lines, in_okey, have_ntor = [], False, False
+        md_lines = []
+        in_okey = False
+        have_ntor = False
+        ed_b64 = extract_ed25519_key(router_desc)
+
         for ln in router_desc.splitlines():
-        # ① onion-key PEM 块
-            if ln == "onion-key":
+            l = ln.strip()
+
+            # onion-key 行（忽略大小写 & 前后空白）
+            if l.lower() == "onion-key":
                 in_okey = True
-                md_lines.append(ln)
+                md_lines.append("onion-key")
                 continue
+
             if in_okey:
                 md_lines.append(ln)
-                if ln.startswith("-----END"):
+                if l.startswith("-----END "):  # END RSA PUBLIC KEY line
                     in_okey = False
-                    continue
-        # ② ntor-onion-key （去掉 '=' padding，43 字符）
+                continue
+
+            # ntor-onion-key
             if ln.startswith("ntor-onion-key "):
                 key = ln.split()[1].rstrip("=")
-                if len(key) != 43:
-                    return None
-                md_lines.append(f"ntor-onion-key {key}")
+                if len(key) != 43: return None
+                md_lines.append(f"ntor-onion-key {key}");
                 have_ntor = True
+                continue
+
         if in_okey or not md_lines or not have_ntor:
             return None
+
         md_lines.append(p_summary)
-        md_lines.append("")
-        md = "\n".join(md_lines)
+        md_lines.append(f"id ed25519 {ed_b64}")
+        md_lines.append("")  # terminator
+        md = "\n".join(md_lines) + "\n"  # newline‑terminated
 
-        if len(md.encode("utf-8")) > 400:
-            md = md.encode("utf-8")[:399].decode("ascii", "ignore") + "\n"
-
-        md_lines.append("")  # 结尾空行
-
-        return "\n".join(md_lines)
+        if len(md.encode()) > 2048:
+            return None
+        return md
 
     async def _handle_server_descriptor(self, request):
         """
@@ -749,6 +762,8 @@ bandwidth-weights Wbd=3333 Wbe=0 Wbg=0 Wbm=10000 Wdb=10000 Web=10000 Wed=3333 We
             raise web.HTTPNotFound(text=f"Microdesc {d} not found")
 
         compressed = zlib.compress(bytes(buf))
+        print("micro-desc:")
+        print(buf)
         return web.Response(body=compressed, headers={"Content-Encoding": "deflate"})
 
     # --------------------------------------------------------------------- #
@@ -931,6 +946,55 @@ def _policy_summary(desc_text: str):
     else:
         return f"p reject {rej_txt}", True
 
+
+def get_ntor_keypair():
+    """
+    生成（或加载已有的）Curve25519 ntor 密钥对
+    返回 (priv_obj, pub_b64_str_without_padding)
+    """
+    ntor_file = KEY_DIR / "ntor_key.raw"      # 32‑byte private key, 原始格式
+
+    # --- ① 生成或加载私钥 ---
+    if ntor_file.exists():
+        priv_raw = ntor_file.read_bytes()     # 32 bytes
+        priv = x25519.X25519PrivateKey.from_private_bytes(priv_raw)
+    else:
+        priv = x25519.X25519PrivateKey.generate()
+        ntor_file.write_bytes(
+            priv.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+
+    # --- ② 导出公钥并转成 43 字符的 Base64 ---
+    pub_raw = priv.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,      # 32 bytes
+        format=serialization.PublicFormat.Raw
+    )
+    pub_b64 = base64.b64encode(pub_raw).decode("ascii").rstrip("=")  # 去掉 '='
+
+    assert len(pub_b64) == 43          # Tor 规范要求 43 字符
+    return priv, pub_b64
+def extract_ed25519_key(desc_text: str) -> str | None:
+    # 若有 master-key-ed25519 行，优先用它
+    m = re.search(r'^master-key-ed25519 ([A-Za-z0-9+/]{43,44}=?)',
+                  desc_text, re.M)
+    if m:
+        key_b64 = m.group(1).rstrip('=')
+        return key_b64 if len(key_b64) == 43 else None
+
+    # 否则解析 identity-ed25519 证书（略复杂）
+    m = re.search(r'^identity-ed25519\\s*\\n-----BEGIN ED25519 CERT-----(.*?)-----END',
+                  desc_text, re.S|re.M)
+    if not m:
+        return None
+    cert_bin = base64.b64decode(re.sub(r'\\s+', '', m.group(1)))
+    if len(cert_bin) < 64:
+        return None
+    pub_raw = cert_bin[ 32 : 64 ]          # 证书格式: 32B 版本/expiry/flags + 32B pubkey
+    return base64.b64encode(pub_raw).decode('ascii').rstrip('=')
 # ------------------------------------------------------------------------- #
 # entry
 # ------------------------------------------------------------------------- #
