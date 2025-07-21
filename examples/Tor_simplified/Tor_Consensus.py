@@ -12,7 +12,7 @@ from stem.descriptor.server_descriptor import RelayDescriptor
 
 
 class Tor_Consensus:
-    def __init__(self, model, dire_ip='127.0.0.1', dire_port=9030) -> None:
+    def __init__(self, model, dire_ip='192.168.66.241', dire_port=9030) -> None:
         self.dire_ip = dire_ip
         self.dire_port = dire_port
         self.fetch_consensus, self.fetch_descriptor = self.setup_model(model)
@@ -74,8 +74,8 @@ class Tor_Consensus:
             print(f"[!] Exception during consensus query: {e}")
 
     async def _fetch_descriptor_sim(self, fingerprint):
-        safe_fingerprint = make_urlsafe_fingerprint(fingerprint)
-        url = f"http://{self.dire_ip}:{self.dire_port}/tor/server/desc/{safe_fingerprint}"
+        # safe_fingerprint = make_urlsafe_fingerprint(fingerprint)
+        url = f"http://{self.dire_ip}:{self.dire_port}/tor/server/fp/{fingerprint}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=5) as resp:
@@ -113,7 +113,6 @@ class Tor_Consensus:
         :return: return list of routers
         """
         results = []
-
         for onion_router in self.relays:
             if flags and not all(f in onion_router["flags"] for f in flags):
                 continue
@@ -126,7 +125,12 @@ class Tor_Consensus:
     def get_random_router(self, flags=None, has_dir_port=None, exclude=None):
         exclude = set(exclude or [])
         routers = self.get_routers(flags, has_dir_port)
+        print("relays:", self.relays)
+        print("flags",flags)
+        print("routers:",routers)
         candidates = [r for r in routers if r["fingerprint"] not in exclude]
+        print("candidates:",candidates)
+
         if not candidates:
             raise RuntimeError("No available routers after exclusion")
         return random.choice(candidates)
@@ -146,23 +150,31 @@ class Tor_Consensus:
 
 def split_tor_descriptors(text: str) -> list[str]:
     """
-    将以 'r ' 开头的多段 Tor 共识描述文本按段拆分为列表。
-    每一段从 'r ' 开始，直到遇到下一个 'r ' 或文件结尾。
+    将共识文本拆分为合法的 relay descriptor 块，过滤掉 header 和非节点段。
+    每个块以 'r ' 开头，至少包含一个 's ' 行（节点 flags）。
     """
     blocks = []
     current_block = []
+    has_s_line = False  # 标记是否包含 s 行
 
     for line in text.strip().splitlines():
         if line.startswith("r "):
-            if current_block:
+            if current_block and has_s_line:
                 blocks.append("\n".join(current_block))
-                current_block = []
-        current_block.append(line)
+            current_block = [line]
+            has_s_line = False
+        elif line.startswith(("s ", "v ", "pr ", "w ", "p ")):
+            current_block.append(line)
+            if line.startswith("s "):
+                has_s_line = True
+        elif current_block:
+            current_block.append(line)
 
-    if current_block:
+    if current_block and has_s_line:
         blocks.append("\n".join(current_block))
 
     return blocks
+
 
 
 def parse_single_consensus_entry(entry_str: str) -> dict:

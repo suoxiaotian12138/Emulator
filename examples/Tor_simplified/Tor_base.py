@@ -8,7 +8,7 @@ import asyncio
 
 from tools.Log.LogPrinter import LogPrinter
 from tools.Packet.packet_TCP import accept_tls_connections
-from tools.Crypt.key_generator import generate_cert_and_key_from_rsa, create_server_context, ed25519_setup, rsa_setup, generate_cert_and_key_from_ed25519
+from tools.Crypt.key_generator import create_server_context, ed25519_setup, rsa_setup, generate_cert_and_key_from_ed25519, generate_tls_rsa_cert
 
 from examples.Tor_simplified.Tor_Socket import Tor_Socket
 
@@ -34,7 +34,7 @@ class Tor_base:
         self.tls_privt, self.tls_pubk = ed25519_setup()
         self.rsa_pvk, _ = rsa_setup()
 
-        self.cert_file, self.key_file = generate_cert_and_key_from_ed25519(self.tls_privt)
+        self.cert_file, self.key_file = generate_tls_rsa_cert()
         self.context = create_server_context(self.cert_file, self.key_file)
 
 

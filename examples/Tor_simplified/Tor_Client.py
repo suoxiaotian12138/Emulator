@@ -18,7 +18,6 @@ class Tor_Client(Tor_base):
     def __init__(self, name: str, host: str, port: int, model: Literal["sim", "real"] = "sim"):
         super().__init__(name, host, port, model)
         self.output_buffer = Queue()
-        self.privk_ntor, self.pubk_ntor = curve25519_setup()
 
         self.consensus = Tor_Consensus(model)
         self.guard = None
@@ -42,10 +41,9 @@ class Tor_Client(Tor_base):
             self.print(f"[Monitor] Connection {addr} closed and removed from map.")
 
     async def consensus_init(self):
-        self.print("pb:01")
         await self.consensus.consus_init()
-        self.print("pb:02")
-        self.guard = Tor_Router(self.consensus.get_random_guard_node())
+        guard = self.consensus.get_random_guard_node()
+        self.guard = Tor_Router(guard)
         desc = await self.consensus.fetch_descriptor(self.guard.fingerprint_str)
         self.guard.set_descriptor(desc)
         socket = Tor_Socket(on_cell=self.handle_cell)
@@ -58,8 +56,8 @@ class Tor_Client(Tor_base):
             socket = Tor_Socket(on_cell=self.handle_cell)
             await socket.setup_socket(remote_addr=self.guard.addr)
             asyncio.create_task(self.handle_connection(self.guard.addr, socket))
-
         circuit = await self.create_circuit(socket, hops_count, extend_routers)
+
         stream = circuit.create_stream()
         connect_cell = stream.make_connect(addr)
         await socket.send_cell(connect_cell)
@@ -77,6 +75,7 @@ class Tor_Client(Tor_base):
         create_cell = circuit.connect_to_guard(self.guard)
         await socket.send_cell(create_cell)
         await circuit.guard_handsake(wait_time=60)
+        self.print("node_name:", self.guard.nickname)
 
         while circuit.nodes_count < hops_count:
             if circuit.nodes_count == hops_count - 1:
@@ -88,7 +87,7 @@ class Tor_Client(Tor_base):
             descriptor_str = await self.consensus.fetch_descriptor(router["fingerprint"])
             extend_node = Tor_Router(router)
             extend_node.set_descriptor(descriptor_str)
-
+            self.print("node_name:", extend_node.nickname)
             extend_cell = circuit.connect_to_extend(extend_node)
             await socket.send_cell(extend_cell)
             await circuit.extend_handshake(descriptor_str, wait_time=60)

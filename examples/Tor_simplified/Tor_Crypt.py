@@ -97,6 +97,8 @@ class NtorKeyAgreement:
         ai += b'Server'
 
         if auth != hmac_msg(self.t_mac, ai):
+            print("DEBUG  verify mismatch:",
+                  auth.hex()[:16], hmac_msg(self.t_mac, ai).hex()[:16])
             raise ValueError("Auth input does not match")
 
         return hkdf_sha256(key_seed, length=KEY_MAT_LEN, info=self.m_expand)

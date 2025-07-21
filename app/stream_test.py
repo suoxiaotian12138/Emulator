@@ -47,8 +47,8 @@ async def generator_topology(guard_num, middle_num, exit_num, file_path):
 
 async def main():
     # 启动目录服务器
-    dir_server = TorDirectoryServer()
-    server_task = asyncio.create_task(dir_server.run())
+    # dir_server = TorDirectoryServer()
+    # server_task = asyncio.create_task(dir_server.run())
 
     await asyncio.sleep(1)  # 可替换为 wait_for_port_open
 

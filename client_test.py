@@ -1,7 +1,7 @@
 import itertools
 
 from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
-import re
+import re, binascii
 import asyncio, argparse, base64, hashlib, json, os, secrets, shutil, tempfile, zlib
 from datetime import datetime, timedelta
 from functools import partial
@@ -16,6 +16,16 @@ from cryptography.hazmat.primitives.asymmetric import x25519
 KEY_DIR = Path("./tor_keys")
 KEY_DIR.mkdir(exist_ok=True)
 _PORT_RE = re.compile(r"(\d+)(?:-(\d+))?$")
+
+_ED_LINE_RE = re.compile(
+    r'^\s*master-key-ed25519\s+([A-Za-z0-9+/=]{43,44})\s*$', re.M)
+
+_CERT_RE = re.compile(
+    r'^\s*identity-ed25519\s*\n'
+    r'-----BEGIN ED25519 CERT-----(.*?)-----END ED25519 CERT-----',
+    re.S | re.M)
+
+
 class TorDirectoryServer:
     # --------------------------------------------------------------------- #
     # lifecycle
@@ -101,15 +111,16 @@ class TorDirectoryServer:
         始终含 Running Valid，顺序固定 Running Valid Stable Guard Exit
         """
         base = ["Running", "Valid"]
+        order = ['Authority', 'BadExit', 'Exit', 'Fast', 'Guard', 'HSDir', 'MiddleOnly', 'NoEdConsensus', 'Running',
+                 'Stable', 'StaleDesc', 'Sybil', 'V2Dir', 'Valid']
 
         # ---- 1) 自定义 sim-flags 行 ----
         for ln in desc_text.splitlines():
-            if ln.lower().startswith("sim-flags "):
+            if ln.lower().startswith("opt sim-flags "):
                 tokens = [t.capitalize() for t in ln.split()[1:]]
-                flags = base + [t for t in tokens
-                                if t in {"Exit", "Guard", "Stable"}]
+                flags = [t for t in tokens
+                                if t in order]
                 # 保序输出
-                order = ["Running", "Valid", "Stable", "Guard", "Exit"]
                 return "s " + " ".join([f for f in order if f in flags]) + "\n"
 
         # ---- 2) Heuristics ----
@@ -118,23 +129,23 @@ class TorDirectoryServer:
         # 2-a Exit?
         if is_exit:
             base.append("Exit")
-        else:
-            # 2-b Guard?
-            m_bw = next((re.search(r"bandwidth (\d+) (\d+) (\d+)", ln)
-                         for ln in lines if ln.startswith("bandwidth ")), None)
-            if m_bw:
-                avg_bandwidth = int(m_bw.group(1))  # 这是平均带宽，单位字节/秒
-                if avg_bandwidth >= 250_0000:  # 250 KB/s ≈ 2000 Kbps（官方最低要求）
-                    base.append("Guard")
-                    base.append("Stable")
-                if avg_bandwidth >= 100_000:  # 100 kB/s ≈ Tor 默认 Fast 阈值
-                    base.append("Fast")
 
-            has_tundir = any(ln.startswith("tunnelled-dir-server") for ln in lines)
-            if has_tundir:
-                base.append("V2Dir")
-                if "Exit" not in base:
-                    base.append("HSDir")
+        # 2-b Guard?
+        m_bw = next((re.search(r"bandwidth (\d+) (\d+) (\d+)", ln)
+                     for ln in lines if ln.startswith("bandwidth ")), None)
+        if m_bw:
+            avg_bandwidth = int(m_bw.group(1))  # 这是平均带宽，单位字节/秒
+            if avg_bandwidth >= 250_0000:  # 250 KB/s ≈ 2000 Kbps（官方最低要求）
+                base.append("Guard")
+                base.append("Stable")
+            if avg_bandwidth >= 100_000:  # 100 kB/s ≈ Tor 默认 Fast 阈值
+                base.append("Fast")
+
+        has_tundir = any(ln.startswith("tunnelled-dir-server") for ln in lines)
+        if has_tundir:
+            base.append("V2Dir")
+            if "Exit" not in base:
+                base.append("HSDir")
 
         # 2-c Stable?
         m_pub = next((re.search(
@@ -667,7 +678,7 @@ bandwidth-weights Wbd=3333 Wbe=0 Wbg=0 Wbm=10000 Wdb=10000 Web=10000 Wed=3333 We
         md_lines = []
         in_okey = False
         have_ntor = False
-        ed_b64 = extract_ed25519_key(router_desc)
+        ed_b64 = ed25519_from_descriptor(router_desc)
 
         for ln in router_desc.splitlines():
             l = ln.strip()
@@ -697,7 +708,6 @@ bandwidth-weights Wbd=3333 Wbe=0 Wbg=0 Wbm=10000 Wdb=10000 Web=10000 Wed=3333 We
 
         md_lines.append(p_summary)
         md_lines.append(f"id ed25519 {ed_b64}")
-        md_lines.append("")  # terminator
         md = "\n".join(md_lines) + "\n"  # newline‑terminated
 
         if len(md.encode()) > 2048:
@@ -762,9 +772,35 @@ bandwidth-weights Wbd=3333 Wbe=0 Wbg=0 Wbm=10000 Wdb=10000 Web=10000 Wed=3333 We
             raise web.HTTPNotFound(text=f"Microdesc {d} not found")
 
         compressed = zlib.compress(bytes(buf))
-        print("micro-desc:")
-        print(buf)
+
         return web.Response(body=compressed, headers={"Content-Encoding": "deflate"})
+
+    async def _handle_server_by_fp(self, request):
+        want_deflate = request.path.endswith(".z")
+
+        fps_part = request.match_info["fps"]
+        if want_deflate:
+            fps_part = fps_part[:-2]  # 剪掉尾部 ".z"
+
+        fps_b64 = [s for s in fps_part.split("-") if s]  # 只按 ‘-’ 切
+
+        buf = bytearray()
+        for fp_b64 in fps_b64:
+            # 补 padding, 解码 → 40 位 hex
+            padded = fp_b64 + "=" * (-len(fp_b64) % 4)
+            try:
+                fp_hex = base64.b64decode(padded).hex().upper()
+            except Exception:
+                raise web.HTTPBadRequest(text=f"Bad fingerprint {fp_b64}")
+
+            desc = self._descriptor_cache.get(fp_hex, {}).get("text")
+            if not desc:
+                raise web.HTTPNotFound(text=f"Descriptor for FP {fp_b64} not found")
+            buf.extend(desc.encode())
+
+        body = zlib.compress(buf) if want_deflate else bytes(buf)
+        hdr = {"Content-Encoding": "deflate"} if want_deflate else {}
+        return web.Response(body=body, headers=hdr)
 
     # --------------------------------------------------------------------- #
     # POST handler  —— 上传节点描述符
@@ -845,6 +881,8 @@ bandwidth-weights Wbd=3333 Wbe=0 Wbg=0 Wbm=10000 Wdb=10000 Web=10000 Wed=3333 We
         r.add_get("/tor/server/d/{fps:.*}.z", self._handle_server_descriptor)
         r.add_get("/tor/server/d/{fps:.*}", self._handle_server_descriptor)
         r.add_get("/tor/micro/d/{digests:.*}.z", self._handle_micro_descriptor)
+        r.add_get("/tor/server/fp/{fps:.*}.z", self._handle_server_by_fp)
+        r.add_get("/tor/server/fp/{fps:.*}", self._handle_server_by_fp)
         # POST
         r.add_post("/tor/", self._handle_descriptor_upload)
 
@@ -977,24 +1015,34 @@ def get_ntor_keypair():
 
     assert len(pub_b64) == 43          # Tor 规范要求 43 字符
     return priv, pub_b64
-def extract_ed25519_key(desc_text: str) -> str | None:
-    # 若有 master-key-ed25519 行，优先用它
-    m = re.search(r'^master-key-ed25519 ([A-Za-z0-9+/]{43,44}=?)',
-                  desc_text, re.M)
-    if m:
-        key_b64 = m.group(1).rstrip('=')
-        return key_b64 if len(key_b64) == 43 else None
 
-    # 否则解析 identity-ed25519 证书（略复杂）
-    m = re.search(r'^identity-ed25519\\s*\\n-----BEGIN ED25519 CERT-----(.*?)-----END',
-                  desc_text, re.S|re.M)
-    if not m:
-        return None
-    cert_bin = base64.b64decode(re.sub(r'\\s+', '', m.group(1)))
-    if len(cert_bin) < 64:
-        return None
-    pub_raw = cert_bin[ 32 : 64 ]          # 证书格式: 32B 版本/expiry/flags + 32B pubkey
-    return base64.b64encode(pub_raw).decode('ascii').rstrip('=')
+def ed25519_from_descriptor(desc_text: str) -> str | None:
+    """
+    提取 Ed25519 主身份公钥（43‑char, 无 '='）。
+    优先级：master-key-ed25519 > identity-ed25519 证书
+    """
+    # ① master-key-ed25519
+    m = _ED_LINE_RE.search(desc_text)
+    if m:
+        key = m.group(1).strip()
+        key = key.rstrip('=')          # 去掉 1～2 个 '='
+        return key if len(key) == 43 else None
+
+    # ② identity-ed25519 证书（可能多段，逐段查找）
+    for m in _CERT_RE.finditer(desc_text):
+        b64_blob = re.sub(r'\s+', '', m.group(1))      # 去换行
+        try:
+            cert_bin = base64.b64decode(b64_blob, validate=True)
+            if len(cert_bin) < 64:          # header32 + pub32
+                continue
+            pub_raw = cert_bin[32:64]
+            key = base64.b64encode(pub_raw).decode().rstrip('=')
+            if len(key) == 43:
+                return key
+        except Exception:
+            continue
+
+    return None
 # ------------------------------------------------------------------------- #
 # entry
 # ------------------------------------------------------------------------- #

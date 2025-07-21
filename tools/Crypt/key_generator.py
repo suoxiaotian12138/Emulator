@@ -37,8 +37,8 @@ def curve25519_setup():
     public_key = private_key.public_key()
     return private_key, public_key
 
-def rsa_setup():
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+def rsa_setup(public_exponent=65537, key_size=1024):
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
     public_key = private_key.public_key()
     return private_key, public_key
 
@@ -121,15 +121,30 @@ def generate_cert_from_ed25519(private_key: ed25519.Ed25519PrivateKey) -> bytes:
     )
     return cert.public_bytes(serialization.Encoding.DER)
 
-def create_server_context(certfile, keyfile):
+# def create_server_context(certfile, keyfile):
+#     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+#     ctx.load_cert_chain(certfile, keyfile)
+#     ctx.minimum_version = ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+#     ctx.set_ciphers("ALL:@SECLEVEL=0")          # 允许自签 RSA-PKCS1
+#     ctx.verify_mode = ssl.CERT_NONE
+#     return ctx
+
+def create_server_context(certfile: str, keyfile: str) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(certfile, keyfile)
+
+    # TLSv1.2 固定是 OK 的（Tor 0.4.9 也只用 1.2）
     ctx.minimum_version = ctx.maximum_version = ssl.TLSVersion.TLSv1_2
-    ctx.set_ciphers("ALL:@SECLEVEL=0")          # 允许自签 RSA-PKCS1
+
+    # 允许自签、1024‑bit、弱签名等（SECLEVEL=0）
+    ctx.set_ciphers("ALL:@SECLEVEL=0")
+    ctx.options |= ssl.OP_NO_COMPRESSION
+    ctx.options |= ssl.OP_SINGLE_DH_USE | ssl.OP_SINGLE_ECDH_USE
+
+    ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
+
+    # Tor 不验证对端证书
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
-
-
 
 
 def generate_cert_and_key_from_rsa(key: rsa.RSAPrivateKey):
@@ -150,3 +165,35 @@ def generate_cert_and_key_from_rsa(key: rsa.RSAPrivateKey):
                                  serialization.PrivateFormat.PKCS8,
                                  serialization.NoEncryption())); keyf.close()
     return crt.name, keyf.name
+
+def generate_tls_rsa_cert(bits: int = 1024) -> tuple[str, str]:
+    """
+    生成 (rsa_sk, self‑signed X.509) 供 TLS 握手使用。
+    返回 (cert_path, key_path) 两个临时文件的路径。
+    """
+    # 1) 1024‑bit RSA 私钥
+    rsa_sk = rsa.generate_private_key(public_exponent=65537, key_size=bits)
+
+    # 2) 自签证书
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"TorRelay")])
+    cert = (x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(rsa_sk.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.datetime.utcnow() - datetime.timedelta(days=1))
+            .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=365))
+            .sign(rsa_sk, hashes.SHA256()))
+
+    # 3) 写 PEM 文件
+    cert_f = tempfile.NamedTemporaryFile(delete=False, suffix=".crt", mode="wb")
+    key_f  = tempfile.NamedTemporaryFile(delete=False, suffix=".key", mode="wb")
+
+    cert_f.write(cert.public_bytes(serialization.Encoding.PEM)); cert_f.close()
+
+    key_f.write(rsa_sk.private_bytes(
+        encoding = serialization.Encoding.PEM,
+        format   = serialization.PrivateFormat.TraditionalOpenSSL,  # 关键：PKCS#1
+        encryption_algorithm = serialization.NoEncryption())); key_f.close()
+
+    return cert_f.name, key_f.name

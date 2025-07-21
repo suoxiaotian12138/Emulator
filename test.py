@@ -1,40 +1,35 @@
-#!/usr/bin/env python3
-"""
-列出当前缓存的 sampled_entry_guards，看看哪些字段让它们
-不能通过 is_usable_filtered_guard。
-在任何 Tor 节点的 DataDirectory 下运行：
-    python inspect_guards.py /path/to/data
-"""
-import sys, pickle, pprint, os, json
+# 验证前请确保 `pip install stem`
 
-data_dir = sys.argv[1] if len(sys.argv) > 1 else "."
-state = os.path.join(data_dir, "state")
-if not os.path.exists(state):
-    print("找不到 Tor state 文件")
-    sys.exit(1)
+from typing import Union
+from stem.descriptor import DocumentHandler
+from stem.descriptor.server_descriptor import RelayDescriptor
 
-def read_kv(path):
-    kv = {}
-    key = None
-    for ln in open(path, encoding="utf-8"):
-        if ln.startswith(" "):
-            kv[key] += ln.strip()
-        else:
-            key, val = ln.split(None, 1)
-            kv[key] = val.strip()
-    return kv
 
-st = read_kv(state)
-guards = [json.loads(s) for s in st.get("EntryGuard", "").split("|") if s]
-print(f"{len(guards)} guards cached\n")
-for g in guards:
-    tags = []
-    if g.get("is_usable_filtered_guard"):
-        tags.append("USABLE")
-    if g.get("is_pending"):
-        tags.append("PENDING")
-    if g.get("reachable_since"):
-        tags.append("REACHABLE")
-    if g.get("unreachable_since"):
-        tags.append("UNREACHABLE")
-    print(f"{g['nickname']:<10}  {','.join(tags) or '---'}")
+def validate_server_descriptor(data: Union[str, bytes], *, is_path: bool = True) -> None:
+    """
+    使用 Stem 对单份 Tor server‑descriptor 做语法与字段一致性校验。
+
+    :param data: 描述符文件路径（默认）或描述符文本本身
+    :param is_path: False 时把 `data` 当成文本
+    :raises ValueError: 任意解析 / 校验失败
+    """
+    try:
+        # 1) 获取文本
+        text = open(data, 'r', encoding='utf‑8').read() if is_path else data
+        # 2) Stem 解析；validate=True 会做 fingerprint、digest、签名等规范检查
+        RelayDescriptor(text, validate=True)
+        print("✅  描述符通过 Stem 校验")
+    except ValueError as exc:
+        # exc.line may be None for some errors
+        line_no = getattr(exc, "line", None)
+        msg = f"❌  校验失败: {exc}"
+        if line_no is not None:
+            msg += f"  (错误行号: {line_no})"
+        raise ValueError(msg) from exc
+
+# ------------------------- 用 法 -------------------------
+# 1) 文件
+validate_server_descriptor("md.txt")
+
+# 2) 已在内存中的字符串
+# validate_server_descriptor(desc_string, is_path = False)

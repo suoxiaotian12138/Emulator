@@ -1,7 +1,7 @@
 import asyncio
 import requests
 
-from tools.Crypt.key_generator import curve25519_setup, ed25519_setup
+from tools.Crypt.key_generator import curve25519_setup, ed25519_setup, rsa_setup
 from tools.Crypt.crypt_common import rsa_identity_digest
 
 from examples.Tor_simplified.Tor_Cell import *
@@ -14,14 +14,18 @@ from examples.Tor_simplified.Tor_Crypt import NtorServerKeyAgreement
 
 
 class Tor_Node(Tor_base):
-    def __init__(self, name: str, host: str, port: int, flags: str = 'Guard', protocols: str = "",
+    def __init__(self, name: str, host: str, port: int, flags,
+                 protocols: str = "Cons=2 Desc=2 DirCache=2 FlowCtrl=2 Link=4-5 LinkAuth=3 Microdesc=2 Padding=2 Relay=4",
                  exit_policy: str = 'accept 1-65535', sim_ip='8.8.8.8'):
         super().__init__(name, host, port)
 
         self.ntor_pvk, self.ntor_puk = curve25519_setup()
         self.ed_pvk, self.ed_puk = ed25519_setup()
+        self.rsa_id_sk, _ = rsa_setup()
+        self.rsa_onion_sk, _ = rsa_setup()
+
         self.circuit_list = Tor_CircuitsList()
-        self.protocol_version = NtorServerKeyAgreement(rsa_identity_digest(self.rsa_pvk), self.ntor_pvk)
+        self.protocol_version = NtorServerKeyAgreement(rsa_identity_digest(self.rsa_id_sk), self.ntor_pvk)
         self.flags = flags
         self.protocols = protocols
         self.exit_policy = exit_policy
@@ -36,13 +40,13 @@ class Tor_Node(Tor_base):
 
     async def register_to_dire(self):
         descriptor = self.generate_descriptor()
-        await self.upload_descriptor_to_dirserver(descriptor, "127.0.0.1", 9030)
+        await self.upload_descriptor_to_dirserver(descriptor, '192.168.66.241', 9030)
 
     async def upload_descriptor_to_dirserver(self,
                                              descriptor_text: str,
                                              dirserver_ip: str,
                                              dirserver_port: int = 80,
-                                             path: str = "/tor/post/dir"
+                                             path: str = "/tor/"
                                              ) -> None:
         """
         异步上传 server descriptor 到目录服务器
@@ -75,13 +79,15 @@ class Tor_Node(Tor_base):
             protocols=self.protocols,
             exit_policy=self.exit_policy,
             sim_flag=self.get_sim_flag(),
-            sim_ip=self.sim_ip
+            sim_ip=self.sim_ip,
+            rsa_id_sk=self.rsa_id_sk,
+            rsa_onion_sk=self.rsa_onion_sk
         )
         descriptor = desc_build.build()
         return descriptor
 
     def get_sim_flag(self) -> str:
-        sim_flag = "sim-flags"
+        sim_flag = "opt sim-flags"
         for flag in self.flags:
             sim_flag += ' ' + flag
         return sim_flag

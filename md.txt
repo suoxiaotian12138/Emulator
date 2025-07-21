@@ -1,0 +1,52 @@
+router guard1 192.168.66.241 9001 0 0
+identity-ed25519
+-----BEGIN ED25519 CERT-----
+MIIBcjCCASSgAwIBAgIUYy50W/HhTpEWBF8mMPKWkYMnbdkwBQYDK2VwMFkxCzAJ
+BgNVBAYTAkNOMRAwDgYDVQQIDAdCZWlqaW5nMRAwDgYDVQQHDAdIYWlkaWFuMRIw
+EAYDVQQKDAlPbmlvbk5vZGUxEjAQBgNVBAMMCTEyNy4wLjAuMTAeFw0yNTA3MjAw
+ODE5MDhaFw0yNjA3MjEwODE5MDhaMFkxCzAJBgNVBAYTAkNOMRAwDgYDVQQIDAdC
+ZWlqaW5nMRAwDgYDVQQHDAdIYWlkaWFuMRIwEAYDVQQKDAlPbmlvbk5vZGUxEjAQ
+BgNVBAMMCTEyNy4wLjAuMTAqMAUGAytlcAMhAMDE8tNxzUG0XTj5v4lywDMoHAE1
+H7aqIvsk9EIXVG0IMAUGAytlcANBAGiikJWrwjeNIM7oAPMpyHngWxT/vlzHOgR0
+I2bzCTTz7ZHk7w8P1Rib9KnmrRUGeYGqsMiEeFZ8wxGMFU4s/w8=
+-----END ED25519 CERT-----
+master-key-ed25519 wMTy03HNQbRdOPm/iXLAMygcATUftqoi+yT0QhdUbQg=
+platform Tor 0.4.8.17 on Linux
+proto Cons=2 Desc=2 DirCache=2 FlowCtrl=2 Link=4-5 LinkAuth=3 Microdesc=2 Padding=2 Relay=4
+published 2025-07-21 08:19:08
+fingerprint 27B5 5ADE 4671 8DAE 9D9E F766 AA07 5AA2 EC46 1199
+uptime 0
+bandwidth 52428800 78643200 31457280
+extra-info-digest 084320AB2C43FA8C01E7F316CC2BC2763E4EA756 2wdfkR+0OhkU7/2K7D6Mx/06nzGD86rDa7ir//nxH5w
+onion-key
+-----BEGIN RSA PUBLIC KEY-----
+MIGJAoGBAKdGphrb70fq/3JWhPioXaryo3tqx0Avg+semzo+0tK2Gg7JftnvERFD
+72MS72iIXtVbP0iB7oIa+q1wpfPBKt2Wh/tXny3sSKaFEqC96HQzZpLGZtXVuBSy
+JNnmgfmyKKpnON/a8/oS/PFfom9gUGeZ/+guqtFk4+KLMsOyJEEzAgMBAAE=
+-----END RSA PUBLIC KEY-----
+signing-key
+-----BEGIN RSA PUBLIC KEY-----
+MIGJAoGBAMAivcPycg6nkvmFXhW5jqAkJVt7Oxi+tHPEWU+WEwH8ZUVDuVkymoc4
+SkWEnE0wRrPr+BQsWEqdEU2Cc1KOCvXInj7Z0RSRjSYiJzJbJdLsknQAyIOJWvNU
+2xKaStv8lPA341j7aBss/LMJ/+TgokFMunWOTbDrhh1u3tNTiZHxAgMBAAE=
+-----END RSA PUBLIC KEY-----
+onion-key-crosscert
+-----BEGIN CROSSCERT-----
+KgWQyjoNs52v8OvPADTDncjnTCeAH47Nh2QUDc1RyJFZmMQAaUuPcYgczRhB9yp7
+CN93sTz5U06SiwIjctG3/n55mgveKzNxTNWbPYmefcfdvNrOAToEiiHYdOL835LN
+d8UyTeSzPF/jfjuqoZrMfNe8l6O30STsaznUhPythTg=
+-----END CROSSCERT-----
+ntor-onion-key YO0S7WrtPHKeo1jfXoTnEV5wnuz7HepHA66op9osjw4
+ntor-onion-key-crosscert 0
+contact youremail@example.com
+accept *:1-65535
+reject *:*
+opt sim-flags Running Valid Guard Fast Stable V2dir
+opt sim-ip 8.8.8.8
+router-sig-ed25519 7THCE//eLJ30TAjtVk9KGcL8QHF8YPiwzXgk0r/SWpRa9IomUck0NcNkE8y+C41xneIYcBHluFjUhyimrIExCg
+router-signature
+-----BEGIN SIGNATURE-----
+g9zO9T9BHZJTvWT+hFY3s1V7MzI7giPW17dESmSWo/8VH/Ag/zrl1lFRxfCC81qT
+P9tlExhhYQnqzeM6Nl3p8a7thoHTPlP16ozJIxGkOVak8B3KJ3l/PPsIhooCtaCm
+BRjTDMqTPsSI3txa6oOXMvexjg61SG61kAztNAVo2Tk=
+-----END SIGNATURE-----
