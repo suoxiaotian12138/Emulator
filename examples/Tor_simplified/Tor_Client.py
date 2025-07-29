@@ -27,8 +27,7 @@ class Tor_Client(Tor_base):
 
     async def start_protocol(self):
         self.tasks['listener_task'] = asyncio.create_task(self.monitor_tor_socket())
-        self.tasks['routing_task'] = asyncio.create_task(self.consensus_init())
-
+        await self.consensus_init()
         await asyncio.gather(*self.tasks.values())
 
     async def handle_connection(self, addr, tor_sock):
@@ -43,7 +42,7 @@ class Tor_Client(Tor_base):
             self.print(f"[Monitor] Connection {addr} closed and removed from map.")
 
     async def consensus_init(self):
-        await self.consensus.consus_init()
+        await self.consensus.consus_init_async()
         guard = self.consensus.get_random_guard_node()
         self.guard = Tor_Router(guard)
         desc = await self.consensus.fetch_descriptor(self.guard.fingerprint_str)

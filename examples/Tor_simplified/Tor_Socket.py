@@ -2,6 +2,8 @@ import asyncio
 import socket
 import ssl
 import struct
+from contextlib import suppress
+
 import time
 import hashlib
 import os
@@ -17,6 +19,7 @@ from examples.Tor_simplified.Tor_Cell import TorCell, CellCerts, CellAuthChallen
     CellVersions, CellNetInfo, AUTH_METHOD_ED25519_SHA256, CellAuthenticate
 from examples.Tor_simplified.Tor_Router import logger
 
+from tools.Packet.packet_TCP import send_any
 from tools.Crypt.crypt_common import (
     rsa_identity_digest,
     debug_build_crosscert,
@@ -36,36 +39,62 @@ class Tor_Socket():
         self.handshake_initiator = False
         self.source_ip = source_ip
 
-        self.send = send_tcp
         self._loop = asyncio.get_running_loop()
-        self.send = lambda sock, buf: send_tcp(self._loop, sock, buf)  # 绑定 loop
+        if sock is not None:
+            # 被动接受：sock 已经是 ssl.SSLSocket
+            self.socket = sock
+            self.send = lambda _s, buf: send_any(self._loop, self.socket, buf)
+        else:
+            # 主动连接：稍后在 setup_socket() 里绑定 writer‑send
+            self.socket = None
+            self.send = None
 
-    async def setup_socket(self, remote_addr, sock=None):
-        if sock is None:
-            self.handshake_initiator = True
-            loop = asyncio.get_running_loop()
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # ① 先绑定到你要的别名
-            if self.source_ip:
-                sock.bind((self.source_ip, 0))
-            sock.setblocking(False)
-            # ② 再 connect
-            await loop.sock_connect(sock, remote_addr)
-            print("→ really bound local:", sock.getsockname())
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
 
-            def tls_wrap():
-                # 握手期间 socket 必须阻塞！
-                sock.setblocking(True)
-                ssl_sock = ctx.wrap_socket(sock, server_hostname=None, do_handshake_on_connect=True)
-                ssl_sock.setblocking(False)  # 握手后恢复非阻塞（可选）
-                return ssl_sock
+    # async def setup_socket(self, remote_addr):
+    #     self.handshake_initiator = True
+    #     loop = asyncio.get_running_loop()
+    #
+    #     # 1. 建裸 TCP
+    #     raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    #     if self.source_ip:
+    #         raw.bind((self.source_ip, 0))
+    #     raw.setblocking(False)
+    #     await loop.sock_connect(raw, remote_addr)
+    #
+    #     # 2. 做 TLS 握手（线程池，阻塞方式最稳妥）
+    #     ctx = ssl.create_default_context()
+    #     ctx.check_hostname = False
+    #     ctx.verify_mode = ssl.CERT_NONE
+    #
+    #     def _wrap():
+    #         raw.setblocking(True)
+    #         tls_sock = ctx.wrap_socket(
+    #             raw, server_hostname=None, do_handshake_on_connect=True
+    #         )
+    #         tls_sock.setblocking(False)
+    #         return tls_sock
+    #
+    #     self.socket = await loop.run_in_executor(None, _wrap)
+    #
+    #     # 3. 统一用 send_any / recv_any 操作 **同一个** tls_sock
+    #     self.send = lambda _unused, buf: send_any(loop, self.socket, buf)
+    async def setup_socket(self, remote_addr):
+        """
+        **替换版**：只做 TLS 握手，之后所有 I/O 走同一把 SSLSocket
+        """
+        self.handshake_initiator = True
+        loop = asyncio.get_running_loop()
 
-            sock = await loop.run_in_executor(None, tls_wrap)
-        print("create socket successfully")
-        self.socket = sock
+        # 1) 拿到已握手、非阻塞的 SSLSocket
+        self.socket = await dial_tls(
+            loop,
+            remote_addr,
+            local_ip=self.source_ip  # 沿用原来的本地地址绑定
+        )
+
+        # 2) 发送函数保持旧签名：send(sock, data)
+        self.send = lambda _unused, buf: send_any(loop, self.socket, buf)
+
 
     async def tor_handshake_client(self):
         version_cell = self.handshake.make_versions()
@@ -120,6 +149,15 @@ class Tor_Socket():
                 return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
+            peer = None
+            try:
+                peer = self.socket.getpeername()
+            except Exception:
+                pass
+            self.print(f"[CLOSE-{'CLI' if self.handshake_initiator else 'SRV'}] "
+                       f"{self.socket.getsockname()} <---> {peer}")
+
+            self.print(f"[CLOSE] {self.socket.getsockname()} <---> {peer}")
             # —— 2. 只在这里统一做清理
             self._recv_task.cancel()
             self._process_task.cancel()
@@ -412,3 +450,40 @@ def load_cert_for_cellcerts(path: str):
 
     return raw
 
+def make_ssl_context() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    # 可按需加载根证书 / 设置 cipher 等
+    return ctx
+
+async def dial_tls(loop: asyncio.AbstractEventLoop,
+                   remote: tuple[str, int],
+                   local_ip: str | None = None,
+                   ctx: ssl.SSLContext | None = None,
+                   sock_opts: list[tuple[int, int, int]] | None = None
+                   ) -> socket.socket:
+    """
+    • 先裸 TCP，再线程池握 TLS；握手完返回非阻塞 SSLSocket
+    • sock_opts 形如 [(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1), ...]
+    """
+    ctx = ctx or make_ssl_context()
+    raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if local_ip:
+        raw.bind((local_ip, 0))
+
+    raw.setblocking(False)
+    if sock_opts:  # 提前设置如 TCP_NODELAY
+        for lev, opt, val in sock_opts:
+            with suppress(OSError):
+                raw.setsockopt(lev, opt, val)
+
+    await loop.sock_connect(raw, remote)
+
+    def _wrap():
+        raw.setblocking(True)
+        tls_sock = ctx.wrap_socket(raw, do_handshake_on_connect=True)
+        tls_sock.setblocking(False)
+        return tls_sock
+
+    return await loop.run_in_executor(None, _wrap)

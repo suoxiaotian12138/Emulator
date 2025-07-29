@@ -57,6 +57,7 @@ class Tor_base:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((host, port))
         sock.listen(128)
+        sock.setblocking(False)  # ★ 关键：非阻塞，供 loop.sock_accept 使用
         return sock
 
     @staticmethod

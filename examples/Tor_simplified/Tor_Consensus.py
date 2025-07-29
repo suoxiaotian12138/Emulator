@@ -1,13 +1,143 @@
 from __future__ import annotations
 
-import random
-import aiohttp
-from typing import Dict, List, Optional
-from datetime import datetime
-import base64
-import binascii
+
 from stem.descriptor.remote import DescriptorDownloader
 from stem.descriptor.server_descriptor import RelayDescriptor
+
+import aiohttp, asyncio, random, base64, binascii
+from typing import Optional, List, Dict
+from datetime import datetime
+
+# class Tor_Consensus:
+#     def __init__(self, model, dire_ip='192.168.66.241', dire_port=9030) -> None:
+#         self.dire_ip = dire_ip
+#         self.dire_port = dire_port
+#         self.fetch_consensus, self.fetch_descriptor = self.setup_model(model)
+#         self.relays = None
+#
+#     async def consus_init(self):
+#         self.relays = await self.fetch_consensus()
+#
+#     def setup_model(self, model):
+#         if model == 'real':
+#             return self._fetch_consensus_real, self._fetch_descriptor_real
+#         elif model == 'sim':
+#             return self._fetch_consensus_sim, self._fetch_descriptor_sim
+#
+#     async def _fetch_consensus_real(self, *, endpoints: Optional[List] = None):
+#         """
+#         Download the latest consensus.
+#         """
+#         from stem.descriptor.remote import get_consensus
+#
+#         result = get_consensus(endpoints=endpoints, timeout=300).run()  # -> list
+#         consensus = result
+#         return self._relays_parse(consensus)
+#
+#     @staticmethod
+#     async def _fetch_descriptor_real(fingerprint: str, timeout: int = 30) -> RelayDescriptor:
+#         fp = fingerprint
+#
+#         processed = []
+#         if len(fp) == 27:
+#             fp = base64_to_hex_fingerprint(fp)
+#         elif len(fp) == 40:
+#             fp = fp.upper()
+#         processed.append(fp)
+#
+#         downloader = DescriptorDownloader(timeout=timeout)
+#
+#         query = downloader.get_server_descriptors(fingerprints=fp)
+#         descriptor = query.run()
+#
+#         if not descriptor:
+#             raise RuntimeError("No descriptors retrieved – check network connectivity.")
+#         return descriptor[0].__str__()
+#
+#     async def _fetch_consensus_sim(self):
+#         url = f"http://{self.dire_ip}:{self.dire_port}/tor/status-vote/current/consensus"
+#         try:
+#             async with aiohttp.ClientSession() as session:
+#                 async with session.get(url) as resp:
+#                     if resp.status == 200:
+#                         text = await resp.text()
+#                         consensus = split_tor_descriptors(text)
+#                         return self._relays_parse(consensus)
+#
+#                     else:
+#                         print(f"[!] Failed to query consensus: HTTP {resp.status}")
+#         except Exception as e:
+#             print(f"[!] Exception during consensus query: {e}")
+#
+#     async def _fetch_descriptor_sim(self, fingerprint):
+#         # safe_fingerprint = make_urlsafe_fingerprint(fingerprint)
+#         url = f"http://{self.dire_ip}:{self.dire_port}/tor/server/fp/{fingerprint}"
+#         try:
+#             async with aiohttp.ClientSession() as session:
+#                 async with session.get(url, timeout=5) as resp:
+#                     text = await resp.text()
+#                     return text
+#         except Exception as e:
+#             print(f"[!] Query failed: {e}")
+#
+#     def _relays_parse(self, consensus) -> List[Dict]:
+#         """
+#         Parse the cached consensus and return a list of relay dicts.
+#         Each dict contains: fingerprint, nickname, ip, or_port, dir_port, flags.
+#         """
+#         relays = []
+#         for node in consensus:
+#             node_str = node.__str__()
+#             relay_info = parse_single_consensus_entry(node_str)
+#             relays.append(relay_info)
+#         return relays
+#
+#     @property
+#     def valid_after(self) -> datetime | None:
+#         """Returns the consensus ‘valid‑after’ timestamp."""
+#         if not self.relays:
+#             return None
+#         return getattr(self.relays, "valid_after", None)
+#
+#     def get_routers(self, flags=None, has_dir_port=True, with_renew=True):
+#         """
+#         Select consensus routers that satisfy certain parameters.
+#
+#         :param flags: Router flags
+#         :param has_dir_port: Has dir port
+#         :param with_renew: do renew consensus if old
+#         :return: return list of routers
+#         """
+#         results = []
+#         for onion_router in self.relays:
+#             if flags and not all(f in onion_router["flags"] for f in flags):
+#                 continue
+#             if has_dir_port and not onion_router["dir_port"]:
+#                 continue
+#             results.append(onion_router)
+#
+#         return results
+#
+#     def get_random_router(self, flags=None, has_dir_port=None, exclude=None):
+#         exclude = set(exclude or [])
+#         routers = self.get_routers(flags, has_dir_port)
+#         candidates = [r for r in routers if r["fingerprint"] not in exclude]
+#
+#         if not candidates:
+#             raise RuntimeError("No available routers after exclusion")
+#         return random.choice(candidates)
+#
+#     def get_random_guard_node(self, exclude=None):
+#         flags = ['Guard']
+#         return self.get_random_router(flags=flags, exclude=exclude)
+#
+#     def get_random_middle_node(self, exclude=None):
+#         flags = ['Fast', 'Running', 'Valid']
+#         return self.get_random_router(flags=flags, exclude=exclude)
+#
+#     def get_random_exit_node(self, exclude=None):
+#         flags = ['Exit', 'Fast', 'Running', 'Valid']
+#         return self.get_random_router(flags=flags, exclude=exclude)
 
 
 
@@ -15,11 +145,9 @@ class Tor_Consensus:
     def __init__(self, model, dire_ip='192.168.66.241', dire_port=9030) -> None:
         self.dire_ip = dire_ip
         self.dire_port = dire_port
+        self._session: aiohttp.ClientSession | None = None      # ★ 持久化 session
         self.fetch_consensus, self.fetch_descriptor = self.setup_model(model)
-        self.relays = None
-
-    async def consus_init(self):
-        self.relays = await self.fetch_consensus()
+        self.relays: Optional[List[Dict]] = None
 
     def setup_model(self, model):
         if model == 'real':
@@ -27,18 +155,70 @@ class Tor_Consensus:
         elif model == 'sim':
             return self._fetch_consensus_sim, self._fetch_descriptor_sim
 
-    async def _fetch_consensus_real(self, *, endpoints: Optional[List] = None):
+    def _relays_parse(self, consensus) -> List[Dict]:
         """
-        Download the latest consensus.
+        Parse the cached consensus and return a list of relay dicts.
+        Each dict contains: fingerprint, nickname, ip, or_port, dir_port, flags.
         """
-        from stem.descriptor.remote import get_consensus
+        relays = []
+        for node in consensus:
+            node_str = node.__str__()
+            relay_info = parse_single_consensus_entry(node_str)
+            relays.append(relay_info)
+        return relays
 
-        result = get_consensus(endpoints=endpoints, timeout=300).run()  # -> list
-        consensus = result
+    # ---------- Session 生命周期 ----------
+    async def _ensure_session(self):
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=32, ssl=False)
+            )
+        return self._session
+
+    async def aclose(self):
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+    # ---------- 外部入口 ----------
+    async def consus_init_async(self):
+        """异步拉取共识并解析。"""
+        self.relays = await self.fetch_consensus()
+
+    # ---------- SIM model ----------
+    async def _fetch_consensus_sim(self):
+        sess = await self._ensure_session()                      # ★
+        url = f"http://{self.dire_ip}:{self.dire_port}/tor/status-vote/current/consensus"
+        async with sess.get(url, timeout=10) as resp:
+            resp.raise_for_status()
+            text = await resp.text()
+        consensus = split_tor_descriptors(text)
         return self._relays_parse(consensus)
 
+    async def _fetch_descriptor_sim(self, fingerprint: str):
+        sess = await self._ensure_session()                      # ★
+        url = f"http://{self.dire_ip}:{self.dire_port}/tor/server/fp/{fingerprint}"
+        async with sess.get(url, timeout=5) as resp:
+            resp.raise_for_status()
+            return await resp.text()
+
+    # ---------- REAL model ----------
+    # 保持原同步逻辑，用线程池包一层以防真运行 real 时阻塞
+    async def _fetch_consensus_real(self, *, endpoints: Optional[List] = None):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.__fetch_consensus_real_sync, endpoints)
+
+    def __fetch_consensus_real_sync(self, endpoints):
+        from stem.descriptor.remote import get_consensus
+        consensus = get_consensus(endpoints=endpoints, timeout=300).run()
+        return self._relays_parse(consensus)
+
+    async def _fetch_descriptor_real(self, fingerprint: str, timeout: int = 30):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._fetch_desc_real_sync, fingerprint, timeout)
+
+
     @staticmethod
-    async def _fetch_descriptor_real(fingerprint: str, timeout: int = 30) -> RelayDescriptor:
+    async def _fetch_desc_real_sync(fingerprint: str, timeout: int = 30) -> RelayDescriptor:
         fp = fingerprint
 
         processed = []
@@ -56,44 +236,6 @@ class Tor_Consensus:
         if not descriptor:
             raise RuntimeError("No descriptors retrieved – check network connectivity.")
         return descriptor[0].__str__()
-
-    async def _fetch_consensus_sim(self):
-        url = f"http://{self.dire_ip}:{self.dire_port}/tor/status-vote/current/consensus"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    if resp.status == 200:
-                        text = await resp.text()
-                        consensus = split_tor_descriptors(text)
-                        return self._relays_parse(consensus)
-
-                    else:
-                        print(f"[!] Failed to query consensus: HTTP {resp.status}")
-        except Exception as e:
-            print(f"[!] Exception during consensus query: {e}")
-
-    async def _fetch_descriptor_sim(self, fingerprint):
-        # safe_fingerprint = make_urlsafe_fingerprint(fingerprint)
-        url = f"http://{self.dire_ip}:{self.dire_port}/tor/server/fp/{fingerprint}"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=5) as resp:
-                    text = await resp.text()
-                    return text
-        except Exception as e:
-            print(f"[!] Query failed: {e}")
-
-    def _relays_parse(self, consensus) -> List[Dict]:
-        """
-        Parse the cached consensus and return a list of relay dicts.
-        Each dict contains: fingerprint, nickname, ip, or_port, dir_port, flags.
-        """
-        relays = []
-        for node in consensus:
-            node_str = node.__str__()
-            relay_info = parse_single_consensus_entry(node_str)
-            relays.append(relay_info)
-        return relays
 
     @property
     def valid_after(self) -> datetime | None:
