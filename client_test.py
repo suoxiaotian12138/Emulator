@@ -125,26 +125,29 @@ class TorDirectoryServer:
 
         # ---- 2) Heuristics ----
         lines = desc_text.splitlines()
-
+        m_bw = next((re.search(r"bandwidth (\d+) (\d+) (\d+)", ln)
+                     for ln in lines if ln.startswith("bandwidth ")), None)
         # 2-a Exit?
         if is_exit:
             base.append("Exit")
+            if m_bw:
+                avg_bandwidth = int(m_bw.group(1))  # 这是平均带宽，单位字节/秒
+                if avg_bandwidth >= 250_0000:  # 250 KB/s ≈ 2000 Kbps（官方最低要求）
+                    base.append("Stable")
+                if avg_bandwidth >= 100_000:  # 100 kB/s ≈ Tor 默认 Fast 阈值
+                    base.append("Fast")
+        else:
+            if m_bw:
+                avg_bandwidth = int(m_bw.group(1))  # 这是平均带宽，单位字节/秒
+                if avg_bandwidth >= 250_0000:  # 250 KB/s ≈ 2000 Kbps（官方最低要求）
+                    base.append("Guard")
+                    base.append("Stable")
+                if avg_bandwidth >= 100_000:  # 100 kB/s ≈ Tor 默认 Fast 阈值
+                    base.append("Fast")
 
-        # 2-b Guard?
-        m_bw = next((re.search(r"bandwidth (\d+) (\d+) (\d+)", ln)
-                     for ln in lines if ln.startswith("bandwidth ")), None)
-        if m_bw:
-            avg_bandwidth = int(m_bw.group(1))  # 这是平均带宽，单位字节/秒
-            if avg_bandwidth >= 250_0000:  # 250 KB/s ≈ 2000 Kbps（官方最低要求）
-                base.append("Guard")
-                base.append("Stable")
-            if avg_bandwidth >= 100_000:  # 100 kB/s ≈ Tor 默认 Fast 阈值
-                base.append("Fast")
-
-        has_tundir = any(ln.startswith("tunnelled-dir-server") for ln in lines)
-        if has_tundir:
-            base.append("V2Dir")
-            if "Exit" not in base:
+            has_tundir = any(ln.startswith("tunnelled-dir-server") for ln in lines)
+            if has_tundir:
+                base.append("V2Dir")
                 base.append("HSDir")
 
         # 2-c Stable?

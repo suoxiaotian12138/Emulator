@@ -33,8 +33,9 @@ class Tor_base:
 
         self.tls_privt, self.tls_pubk = ed25519_setup()
         self.rsa_pvk, _ = rsa_setup()
+        self.rsa_tls_pvk, self.rsa_tls_puk = rsa_setup()
 
-        self.cert_file, self.key_file = generate_tls_rsa_cert()
+        self.cert_file, self.key_file = generate_tls_rsa_cert(self.rsa_tls_pvk)
         self.context = create_server_context(self.cert_file, self.key_file)
 
 
@@ -55,7 +56,7 @@ class Tor_base:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((host, port))
-        sock.listen()
+        sock.listen(128)
         return sock
 
     @staticmethod
@@ -78,12 +79,12 @@ class Tor_base:
 
     async def monitor_tor_socket(self):
         """
-        持续监听新 TLS 连接，为每个连接创建独立的 Tor_Socket 管理任务
+        持续监听新 TLS 连接,为每个连接创建独立的 Tor_Socket 管理任务
         """
-        async for tls_socket, addr in accept_tls_connections(self.socket, self.context):
-            # ✅ 每个连接开一个任务，不阻塞主监听循环
-
-            tor_sock = Tor_Socket(sock=tls_socket, on_cell=self.handle_cell)
+        # 注意：self.socket 已经是 socket_recv_set 返回的非阻塞 socket
+        async for tls_sock, addr in accept_tls_connections(self.socket, self.context):
+            print("accept a new socket from: ", addr)
+            tor_sock = Tor_Socket(source_ip=self.host, sock=tls_sock, on_cell=self.handle_cell)
             asyncio.create_task(self.handle_connection(addr, tor_sock))
 
     async def handle_connection(self, addr, tor_sock):

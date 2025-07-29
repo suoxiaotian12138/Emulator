@@ -166,15 +166,11 @@ def generate_cert_and_key_from_rsa(key: rsa.RSAPrivateKey):
                                  serialization.NoEncryption())); keyf.close()
     return crt.name, keyf.name
 
-def generate_tls_rsa_cert(bits: int = 1024) -> tuple[str, str]:
+def generate_tls_rsa_cert(rsa_sk:rsa.RSAPrivateKey) -> tuple[str, str]:
     """
     生成 (rsa_sk, self‑signed X.509) 供 TLS 握手使用。
     返回 (cert_path, key_path) 两个临时文件的路径。
     """
-    # 1) 1024‑bit RSA 私钥
-    rsa_sk = rsa.generate_private_key(public_exponent=65537, key_size=bits)
-
-    # 2) 自签证书
     subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"TorRelay")])
     cert = (x509.CertificateBuilder()
             .subject_name(subject)

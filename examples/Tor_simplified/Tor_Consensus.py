@@ -20,7 +20,6 @@ class Tor_Consensus:
 
     async def consus_init(self):
         self.relays = await self.fetch_consensus()
-        print("consesus:", self.relays)
 
     def setup_model(self, model):
         if model == 'real':
@@ -125,11 +124,7 @@ class Tor_Consensus:
     def get_random_router(self, flags=None, has_dir_port=None, exclude=None):
         exclude = set(exclude or [])
         routers = self.get_routers(flags, has_dir_port)
-        print("relays:", self.relays)
-        print("flags",flags)
-        print("routers:",routers)
         candidates = [r for r in routers if r["fingerprint"] not in exclude]
-        print("candidates:",candidates)
 
         if not candidates:
             raise RuntimeError("No available routers after exclusion")

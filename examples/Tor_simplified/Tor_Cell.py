@@ -9,11 +9,9 @@ logger = logging.getLogger(__name__)
 
 from torpy.cells import (
     CellVersions,
-    CellNetInfo,
     CellCreateFast,
     CellDestroy,
     CellCreatedFast,
-    CellCreated2,
     CellRelayEnd,
     CellRelayData,
     CellRelaySendMe,
@@ -21,8 +19,12 @@ from torpy.cells import (
     CellRelayExtended2,
     CellRelayTruncated,
     StreamReason
-
 )
+
+AUTH_METHOD_RSA_SHA256_TLSSECRET = 1
+AUTH_METHOD_RSA_SHA256_RFC5705 = 2
+AUTH_METHOD_ED25519_SHA256 = 3
+AUTH_TYPE_STR = b'AUTH0003'  # 8 bytes
 
 class TorCell:
     NUM = -1
@@ -40,12 +42,7 @@ class TorCell:
         or greater than or equal to 128.
         See tor-spec.txt 3. "Cell Packet format"
         """
-        # 假设CellVersions.NUM = 7，如果没有定义则需要导入或定义
-        VERSIONS_COMMAND = 7
-        if cls.NUM == VERSIONS_COMMAND or cls.NUM >= 128:
-            return True
-        else:
-            return False
+        return cls.NUM in (7, 12, 13) or cls.NUM >= 128
 
     def _serialize_payload(self):
         raise NotImplementedError('Must be implemented in a subclass')
@@ -182,7 +179,7 @@ class RelayedTorCell(TorCell):
                 )
             assert len(relay_payload) + len(self._padding) <= RelayedTorCell.MAX_PAYLOD_SIZE, 'wrong relay payload size'
             payload_bytes += struct.pack('!H', len(relay_payload))
-            print(f"[DEBUG] relay_payload type: {type(relay_payload)}, value: {relay_payload}")
+            # print(f"[DEBUG] relay_payload type: {type(relay_payload)}, value: {relay_payload}")
             payload_bytes += struct.pack('!{}s'.format(RelayedTorCell.MAX_PAYLOD_SIZE), relay_payload + self._padding)
             return payload_bytes
 
@@ -238,67 +235,7 @@ class RelayedTorCell(TorCell):
         digest_str = ', digest = {!r}'.format(self._digest) if self._digest else ''
         return 'inner_cell = {!r}{}{}'.format(inner_str, stream_str, digest_str)
 
-class CellAuthChallenge(TorCell):
-    NUM = 130
 
-    def __init__(self, challenge: bytes = None, methods: list[int] = None, circuit_id=0):
-        super().__init__(circuit_id)
-        self.challenge = challenge or os.urandom(32)  # 生成 32 字节随机 challenge
-        self.methods = methods or [2]  # 默认支持 TLSCert 方法
-        self.reserved = b'\x00\x00\x00\x00'
-
-    def _serialize_payload(self) -> bytes:
-        n_methods = len(self.methods)
-        payload = (
-                self.challenge +
-                pack("B", n_methods) +
-                bytes(self.methods) +
-                self.reserved
-        )
-        return payload
-
-    @staticmethod
-    def _deserialize_payload(payload, proto_version):
-        challenge = payload[:32]
-        n_methods = payload[32]
-        methods = list(payload[33:33 + n_methods])
-        reserved = payload[33 + n_methods:33 + n_methods + 4]
-        return {
-            'challenge': challenge,
-            'methods': methods,
-            'reserved': reserved,
-        }
-
-class CellCerts(TorCell):
-    NUM = 129  # 注意是 129，不是 128（CERTS cell 是 129）
-    # type 1:RSA  2:LINK  3:ED25519 4:ED-RSA CROSS CERT
-    def __init__(self, certs: list[tuple[int, bytes]], circuit_id=0):
-        """
-        :param certs: list of (cert_type, cert_bytes)
-        """
-        super().__init__(circuit_id)
-        self.certs = certs
-
-    def _serialize_payload(self) -> bytes:
-        parts = [pack("B", len(self.certs))]  # number of certs
-        for cert_type, cert_body in self.certs:
-            parts.append(pack("!BH", cert_type, len(cert_body)))
-            parts.append(cert_body)
-        return b''.join(parts)
-
-    @staticmethod
-    def _deserialize_payload(payload: bytes, proto_version: int):
-        certs = []
-        idx = 0
-        n = payload[0]
-        idx += 1
-        for _ in range(n):
-            cert_type = payload[idx]
-            cert_len = unpack("!H", payload[idx+1:idx+3])[0]
-            cert_body = payload[idx+3:idx+3+cert_len]
-            certs.append((cert_type, cert_body))
-            idx += 3 + cert_len
-        return {'certs': certs}
 
 class Cell_Create2(TorCell):
     NUM = 10
@@ -332,6 +269,41 @@ class Cell_Create2(TorCell):
             "handshake_type": handshake_type,
             "onion_skin": onion_skin
         }
+
+
+class CellCreated2(TorCell):
+    """
+    CellCreated2 representation.
+
+    A CREATED2 cell contains:
+        DATA_LEN      (Server Handshake Data Len) [2 bytes]
+        DATA          (Server Handshake Data)     [DATA_LEN bytes]
+    """
+
+    NUM = 11  # Created2
+
+    def __init__(self, handshake_data: bytes, circuit_id: int):
+        super().__init__(circuit_id)
+        self.handshake_data = handshake_data
+
+    def _serialize_payload(self) -> bytes:
+        return struct.pack('!H', len(self.handshake_data)) + self.handshake_data
+
+    @staticmethod
+    def _deserialize_payload(payload: bytes, proto_version: int) -> dict:
+        if len(payload) < 2:
+            raise ValueError("CREATED2 payload too short")
+
+        length = struct.unpack('!H', payload[:2])[0]
+        if len(payload) < 2 + length:
+            raise ValueError(f"CREATED2 length mismatch: expected {length}, got {len(payload) - 2}")
+
+        handshake_data = payload[2:2 + length]
+        return {'handshake_data': handshake_data}
+
+    def _args_str(self):
+        return f'handshake_data = {self.handshake_data[:10]}... ({len(self.handshake_data)} bytes)'
+
 
 class Cell_RelayEarly(RelayedTorCell):
     NUM = 9
@@ -487,6 +459,199 @@ class CellRelayBegin(TorCell):
     def _args_str(self):
         return 'address = {!r}, port = {!r}, flags = {!r}'.format(self.address, self.port, self.flags)
 
+
+class CellCerts(TorCell):
+    NUM = 129  # 注意是 129，不是 128（CERTS cell 是 129）
+    # type 1:RSA  2:LINK  3:ED25519 4:ED-RSA CROSS CERT
+    def __init__(self, certs: list[tuple[int, bytes]], circuit_id=0):
+        """
+        :param certs: list of (cert_type, cert_bytes)
+        """
+        super().__init__(circuit_id)
+        self.certs = certs
+
+    def _serialize_payload(self) -> bytes:
+        parts = [pack("B", len(self.certs))]  # number of certs
+        for cert_type, cert_body in self.certs:
+            parts.append(pack("!BH", cert_type, len(cert_body)))
+            parts.append(cert_body)
+        return b''.join(parts)
+
+    @staticmethod
+    def _deserialize_payload(payload: bytes, proto_version: int):
+        certs = []
+        idx = 0
+        n = payload[0]
+        idx += 1
+        for _ in range(n):
+            cert_type = payload[idx]
+            cert_len = unpack("!H", payload[idx+1:idx+3])[0]
+            cert_body = payload[idx+3:idx+3+cert_len]
+            certs.append((cert_type, cert_body))
+            idx += 3 + cert_len
+        return {'certs': certs}
+
+class CellAuthChallenge(TorCell):
+    NUM = 130
+
+    def __init__(self, challenge: bytes = None, methods: list[int] = None, circuit_id: int = 0):
+        super().__init__(circuit_id)
+        # Challenge: 32 随机字节
+        self.challenge = challenge or os.urandom(32)
+        # Methods: 每个方法用 2 字节表示
+        self.methods = methods or [AUTH_METHOD_ED25519_SHA256]
+
+    def _serialize_payload(self) -> bytes:
+        n_methods = len(self.methods)
+        # 32B challenge | 2B n_methods | 2B * n_methods (methods)
+        return b"".join([
+            self.challenge,
+            struct.pack("!H", n_methods),
+            struct.pack("!" + "H"*n_methods, *self.methods),
+        ])
+
+    @staticmethod
+    def _deserialize_payload(payload: bytes, proto_version: int):
+        # 最少需要 32B challenge + 2B n_methods
+        if len(payload) < 32 + 2:
+            raise ValueError("AUTH_CHALLENGE too short")
+
+        off = 0
+        # ① Challenge
+        challenge = payload[off:off+32]
+        off += 32
+
+        # ② N_Methods（2 字节大端）
+        n_methods = struct.unpack("!H", payload[off:off+2])[0]
+        off += 2
+
+        # ③ Methods，每个方法 2 字节
+        expected_len = n_methods * 2
+        if len(payload) < off + expected_len:
+            raise ValueError("AUTH_CHALLENGE malformed (methods length mismatch)")
+
+        methods = []
+        for _ in range(n_methods):
+            method = struct.unpack("!H", payload[off:off+2])[0]
+            methods.append(method)
+            off += 2
+
+        # 按规范，多余的字节主动忽略
+        return {
+            "challenge": challenge,
+            "methods": methods
+        }
+
+class CellAuthenticate(TorCell):
+    NUM = 131  # AUTHENTICATE
+
+    def __init__(self, auth_type: int, auth_data: bytes, circuit_id=0):
+        super().__init__(circuit_id)
+        self.auth_type = auth_type
+        self.auth_data = auth_data
+
+    def _serialize_payload(self) -> bytes:
+        return struct.pack("!HH", self.auth_type, len(self.auth_data)) + self.auth_data
+
+    @staticmethod
+    def _deserialize_payload(payload: bytes, proto_version: int):
+        if len(payload) < 4:
+            raise ValueError("AUTHENTICATE too short")
+        auth_type, auth_len = struct.unpack_from("!HH", payload, 0)
+        auth = payload[4:4+auth_len]
+        return {"auth_type": auth_type, "auth_data": auth}
+
+class CellNetInfo(TorCell):
+    """
+    CellNetInfo representation.
+
+    The cell's payload is:
+
+    - Timestamp              [4 bytes]
+    - Other OR's address     [variable]
+    - Number of addresses    [1 byte]
+    - This OR's addresses    [variable]
+
+    Address format:
+
+    - Type   (1 octet)
+    - Length (1 octet)
+    - Value  (variable-width)
+    "Length" is the length of the Value field.
+    "Type" is one of:
+    - 0x00 -- Hostname
+    - 0x04 -- IPv4 address
+    - 0x06 -- IPv6 address
+    - 0xF0 -- Error, transient
+    - 0xF1 -- Error, nontransient
+    """
+
+    NUM = 8
+
+    def __init__(self, timestamp, other_or, this_or, circuit_id=0):
+        super().__init__(circuit_id)
+        self.timestamp = timestamp
+        self.other_or = other_or
+        self.this_or = this_or
+
+    def _serialize_payload(self):
+        # timestamp
+        payload = struct.pack('!I', self.timestamp)
+
+        # other_or address
+        other_ip = socket.inet_aton(self.other_or)
+        payload += struct.pack('!BB', 0x04, 4) + other_ip
+
+        # this OR's address list
+        this_ip = socket.inet_aton(self.this_or)
+        payload += struct.pack('!B', 1)  # number of addresses
+        payload += struct.pack('!BB', 0x04, 4) + this_ip  # IPv4
+
+        return payload
+
+    @staticmethod
+    def _deserialize_payload(payload, proto_version):
+        our_address_length = int(struct.unpack('!B', payload[5:][:1])[0])
+        our_address = socket.inet_ntoa(payload[6:][:our_address_length])
+        return {'timestamp': '', 'other_or': '', 'this_or': our_address}
+
+    def _args_str(self):
+        return 'timestamp = {!r}, other_or = {!r}, this_or = {!r}'.format(self.timestamp, self.other_or, self.this_or)
+# padding_cells.py  (或直接放在原文件任意位置)
+
+class CellPadding(TorCell):                # Cmd = 0，固定 509 B
+    NUM = 0
+
+    def _serialize_payload(self):
+        # Tor 规范：全部 0 亦可
+        return b'\x00' * self.MAX_PAYLOAD_SIZE
+
+    @staticmethod
+    def _deserialize_payload(payload: bytes, proto_version: int):
+        # 收到后无需处理，直接忽略
+        return {}
+
+class CellPaddingNegotiate(TorCell):       # Cmd = 12，可变长
+    NUM = 12
+
+    def _serialize_payload(self):
+        return b''                          # 暂不协商，自身留空
+
+    @staticmethod
+    def _deserialize_payload(payload: bytes, proto_version: int):
+        return {}
+
+class CellVPadding(TorCell):               # Cmd = 13，可变长
+    NUM = 13
+
+    def _serialize_payload(self):
+        # Tor 会随机长度; 这里用空串即可
+        return b''
+
+    @staticmethod
+    def _deserialize_payload(payload: bytes, proto_version: int):
+        return {}
+
 class TorCommands:
     """
     Enum class which contains all available command types.
@@ -498,6 +663,9 @@ class TorCommands:
         # fmt: off
         # Fixed-length command values.
         # CellCreated.NUM: CellCreated,               # 2
+        CellPadding.NUM:          CellPadding,
+        CellPaddingNegotiate.NUM: CellPaddingNegotiate,
+        CellVPadding.NUM:         CellVPadding,
         CellRelay.NUM: CellRelay,                   # 3
         CellDestroy.NUM: CellDestroy,               # 4
         CellCreateFast.NUM: CellCreateFast,         # 5
@@ -512,7 +680,7 @@ class TorCommands:
         # CellVPadding.NUM: CellVPadding,            # 128
         CellCerts.NUM: CellCerts,                   # 129
         CellAuthChallenge.NUM: CellAuthChallenge,   # 130
-        # CellAuthenticate.NUM: CellAuthenticate,    # 131
+        CellAuthenticate.NUM: CellAuthenticate,    # 131
         # fmt: on
     }
 

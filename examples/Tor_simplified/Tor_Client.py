@@ -23,6 +23,7 @@ class Tor_Client(Tor_base):
         self.guard = None
 
         self.circuit_list = Tor_CircuitsList()
+        self.ready_to_send = asyncio.Event()
 
     async def start_protocol(self):
         self.tasks['listener_task'] = asyncio.create_task(self.monitor_tor_socket())
@@ -35,6 +36,7 @@ class Tor_Client(Tor_base):
             self.socket_map[addr] = tor_sock
             handle = await tor_sock.start_listen()  # 返回 monitor_handle task
             await tor_sock.tor_handshake_client()   #
+            self.ready_to_send.set()
             await handle  # 等连接断开
         finally:
             self.socket_map.pop(addr, None)
@@ -46,16 +48,15 @@ class Tor_Client(Tor_base):
         self.guard = Tor_Router(guard)
         desc = await self.consensus.fetch_descriptor(self.guard.fingerprint_str)
         self.guard.set_descriptor(desc)
-        socket = Tor_Socket(on_cell=self.handle_cell)
+        self.print("guard_name:", self.guard.nickname)
+
+        socket = Tor_Socket(self.host, on_cell=self.handle_cell)
         await socket.setup_socket(remote_addr=self.guard.addr)
         asyncio.create_task(self.handle_connection(self.guard.addr, socket))
 
     async def make_stream(self, message, addr, hops_count=3, extend_routers=None):
+        await self.ready_to_send.wait()
         socket = self.socket_map.get(self.guard.addr, None)
-        if socket is None:
-            socket = Tor_Socket(on_cell=self.handle_cell)
-            await socket.setup_socket(remote_addr=self.guard.addr)
-            asyncio.create_task(self.handle_connection(self.guard.addr, socket))
         circuit = await self.create_circuit(socket, hops_count, extend_routers)
 
         stream = circuit.create_stream()
@@ -74,8 +75,7 @@ class Tor_Client(Tor_base):
 
         create_cell = circuit.connect_to_guard(self.guard)
         await socket.send_cell(create_cell)
-        await circuit.guard_handsake(wait_time=60)
-        self.print("node_name:", self.guard.nickname)
+        await circuit.guard_handsake(wait_time=600)
 
         while circuit.nodes_count < hops_count:
             if circuit.nodes_count == hops_count - 1:
@@ -107,12 +107,14 @@ class Tor_Client(Tor_base):
 
     async def handle_cell(self, cell, sock):
         self.print("receive client cell_type:", type(cell))
+        self.print("cell content",cell)
         if isinstance(cell, CellVersions):
             sock.protocal.version = sock.handshake.retrieve_versions(cell)
+            self.print("sock protocal:", sock.protocal.version)
         elif isinstance(cell, CellCerts):
             sock.handshake.retrieve_certs(cell)
         elif isinstance(cell, CellAuthChallenge):
-            sock.handshake.retrieve_certs(cell)
+            sock.handshake.recv_authenticate(cell)
         elif isinstance(cell, CellNetInfo):
             sock.handshake.retrieve_net_info(cell)
         elif isinstance(cell, CellCreated2):
@@ -137,16 +139,16 @@ class Tor_Client(Tor_base):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.set_end(cell)
             data = await stream.recv(2048)
-            print("final data: ", data)
+            self.print("final data: ", data)
         elif isinstance(cell, CellRelayData):
+            self.print("cell data: ", cell.data)
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.append(cell.data)
             stream.window.deliver_dec()
             if stream.window.need_sendme():
                 sendme_cell = stream.make_relay(CellRelaySendMe(circuit_id=cell.circuit_id))
                 socket = self.socket_map.get(self.guard.addr, None)
-                socket.send_cell(sendme_cell)
-            self.print("have received")
+                await socket.send_cell(sendme_cell)
         elif isinstance(cell, CellRelaySendMe):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.window.package_inc()

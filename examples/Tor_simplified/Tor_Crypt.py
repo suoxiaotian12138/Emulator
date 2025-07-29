@@ -77,6 +77,17 @@ class NtorKeyAgreement:
         if len(auth) != 32:
             raise ValueError("Invalid auth length")
 
+        # # ---------- DEBUG BEGIN ----------
+        # def H(label, data):
+        #     print(f"[NTOR-CLI] {label} ({len(data)}B) = {data.hex()}")
+        #
+        # H("ID", self._fingerprint_bytes)
+        # H("B", curve25519_to_bytes(self._B))
+        # H("X", curve25519_to_bytes(self._X))
+        # H("Y(from srv)", y)
+        # H("AUTH(from srv)", auth)
+        # # ---------- DEBUG END ------------
+
         si = curve25519_get_shared(self._x, curve25519_public_from_bytes(y))
         si += curve25519_get_shared(self._x, self._B)
         si += self._fingerprint_bytes
@@ -95,6 +106,20 @@ class NtorKeyAgreement:
         ai += curve25519_to_bytes(self._X)
         ai += self.protoid
         ai += b'Server'
+
+        # # ---------- DEBUG BEGIN ----------
+        # expect_auth = hmac_msg(self.t_mac, ai)
+        #
+        # H("g^xy", si[:32])
+        # H("g^xb", si[32:64])
+        # H("secret_input(HMAC key_extract)", si)
+        # H("key_seed", key_seed)
+        # H("verify", verify)
+        # H("auth_input(mac)", ai)
+        # H("AUTH(expect)", expect_auth)
+        # if auth != expect_auth:
+        #     print("[NTOR-CLI] MISMATCH!")
+        # # ---------- DEBUG END ------------
 
         if auth != hmac_msg(self.t_mac, ai):
             print("DEBUG  verify mismatch:",
@@ -124,49 +149,105 @@ class NtorServerKeyAgreement:
 
     def handle_create2(self, cell_payload: bytes) -> Tuple[bytes, bytes]:
         htype, hlen = struct.unpack_from("!HH", cell_payload, 0)
-        if htype != 2:
-            raise ValueError("Only NTor (htype 2) supported")
-        if hlen != 84 or len(cell_payload) != 4 + hlen:
-            raise ValueError("Invalid NTor handshake length")
+        if htype == 2:
+            if hlen < 84 or len(cell_payload) < 4 + hlen:
+                raise ValueError(f"Invalid NTor handshake length: hlen={hlen}, total={len(cell_payload)}")
 
-        hdata = memoryview(cell_payload)[4:]
-        nodeid = bytes(hdata[:20])
-        keyid_B = bytes(hdata[20:52])
-        X_bytes = bytes(hdata[52:])
+            hdata = memoryview(cell_payload)[4:]
+            nodeid = bytes(hdata[:20])
+            keyid_B = bytes(hdata[20:52])
+            X_bytes = bytes(hdata[52:84])
 
-        if keyid_B == self.B:
-            keyid_B = hashlib.sha256(keyid_B).digest()
-        elif keyid_B != self.KEYID_B:
-            raise ValueError("KEYID(B) mismatch; wrong onion key")
+            # # ---------- DEBUG BEGIN ----------
+            # def H(label, data):
+            #     print(f"[NTOR-SRV] {label} ({len(data)}B) = {data.hex()}")
+            #
+            # H("ID(from cli)", nodeid)
+            # H("KEYID_B(from cli)", keyid_B)
+            # H("B(self)", self.B)
+            # H("KEYID_B(self)", self.KEYID_B)
+            # H("X(from cli)", X_bytes)
+            # # ---------- DEBUG END ------------
 
-        X_pub = x25519.X25519PublicKey.from_public_bytes(X_bytes)
+            if keyid_B == self.B:
+                keyid_B = hashlib.sha256(keyid_B).digest()
+            elif keyid_B == hashlib.sha256(self.B).digest():
+                pass
+            elif keyid_B != self.KEYID_B:
+                raise ValueError("KEYID(B) mismatch; wrong onion key")
 
-        y_priv = x25519.X25519PrivateKey.generate()
-        Y_bytes = y_priv.public_key().public_bytes(
-            serialization.Encoding.Raw,
-            serialization.PublicFormat.Raw
-        )
+            X_pub = x25519.X25519PublicKey.from_public_bytes(X_bytes)
 
-        g_xy = y_priv.exchange(X_pub)
-        g_xb = self.b_priv.exchange(X_pub)
+            y_priv = x25519.X25519PrivateKey.generate()
+            Y_bytes = y_priv.public_key().public_bytes(
+                serialization.Encoding.Raw,
+                serialization.PublicFormat.Raw
+            )
 
-        secret_input = (
-            g_xy + g_xb +
-            self.ID + self.B + X_bytes + Y_bytes + self.PROTOID
-        )
-        key_seed = hmac_sha256(self.T_KEY, secret_input)
-        verify = hmac_sha256(self.T_VERIFY, secret_input)
-        key_material = hkdf_sha256(key_seed, length=KEY_MAT_LEN, info=self.M_EXPAND)
+            g_xy = y_priv.exchange(X_pub)
+            g_xb = self.b_priv.exchange(X_pub)
 
-        auth_input = (
-            verify + self.ID + self.B + Y_bytes + X_bytes +
-            self.PROTOID + b"Server"
-        )
-        auth = hmac_sha256(self.T_MAC, auth_input)
-        created2_hdata = Y_bytes + auth
+            secret_input = (
+                g_xy + g_xb +
+                self.ID + self.B + X_bytes + Y_bytes + self.PROTOID
+            )
+            key_seed = hmac_sha256(self.T_KEY, secret_input)
+            verify = hmac_sha256(self.T_VERIFY, secret_input)
+            key_material = hkdf_sha256(key_seed, length=KEY_MAT_LEN, info=self.M_EXPAND)
 
-        return created2_hdata, key_material
+            auth_input = (
+                verify + self.ID + self.B + Y_bytes + X_bytes +
+                self.PROTOID + b"Server"
+            )
+            auth = hmac_sha256(self.T_MAC, auth_input)
+            created2_hdata = Y_bytes + auth
 
+            return created2_hdata, key_material
+
+        elif htype == 3:
+
+            if hlen < 32 + 32 + 32 + 32:
+                raise ValueError("Invalid ntor-v3 handshake length")
+            hdata = memoryview(cell_payload)[4:4 + hlen]
+            if len(hdata) < 32 + 32 + 32 + 32:
+                raise ValueError("ntor-v3 payload too short")
+            node_id = bytes(hdata[:32])
+            key_id = bytes(hdata[32:64])
+            X_bytes = bytes(hdata[64:96])
+            # MSG and MAC
+            if len(hdata) < 96 + 32:
+                raise ValueError("ntor-v3 payload missing MAC")
+            msg = bytes(hdata[96:-32]) if len(hdata) > 128 else b""
+            mac = bytes(hdata[-32:])
+            # 验证 node_id 和 key_id（可选）
+            # if node_id != self.ID:
+            #     raise ValueError("NODEID mismatch")
+            if key_id not in [self.B, self.KEYID_B, hashlib.sha256(self.B).digest()]:
+                raise ValueError("KEYID mismatch")
+            # 生成服务端 Y 公钥
+            y_priv = x25519.X25519PrivateKey.generate()
+            Y_bytes = y_priv.public_key().public_bytes(
+                serialization.Encoding.Raw,
+                serialization.PublicFormat.Raw
+            )
+            X_pub = x25519.X25519PublicKey.from_public_bytes(X_bytes)
+            g_xy = y_priv.exchange(X_pub)
+            g_xb = self.b_priv.exchange(X_pub)
+            secret_input = (
+                g_xy + g_xb + self.ID + self.B + X_bytes + Y_bytes + self.PROTOID
+            )
+            key_seed = hmac_sha256(self.T_KEY, secret_input)
+            verify = hmac_sha256(self.T_VERIFY, secret_input)
+            key_material = hkdf_sha256(key_seed, length=KEY_MAT_LEN, info=self.M_EXPAND)
+            auth_input = (
+                verify + self.ID + self.B + Y_bytes + X_bytes + self.PROTOID + b"Server"
+            )
+            auth = hmac_sha256(self.T_MAC, auth_input)
+            server_msg = b""  # optional extra server message, can be blank
+            created2_payload = Y_bytes + auth + server_msg
+            return created2_payload, key_material
+        else:
+            raise ValueError(f"Unsupported CREATE2 handshake_type: {htype}")
 
 class _BaseCryptoState:
     def __init__(self):
