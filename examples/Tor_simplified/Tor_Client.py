@@ -19,7 +19,7 @@ class Tor_Client(Tor_base):
         super().__init__(name, host, port, model)
         self.output_buffer = Queue()
 
-        self.consensus = Tor_Consensus(model)
+        self.consensus = Tor_Consensus(model, self.dire_ip, self.dire_port)
         self.guard = None
 
         self.circuit_list = Tor_CircuitsList()

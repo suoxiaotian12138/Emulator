@@ -57,7 +57,7 @@ class Tor_Node(Tor_base):
 
     async def register_to_dire(self):
         descriptor = self.generate_descriptor()
-        await self.upload_descriptor_to_dirserver(descriptor, '192.168.66.241', 9030)
+        await self.upload_descriptor_to_dirserver(descriptor, self.dire_ip, self.dire_port)
 
     async def upload_descriptor_to_dirserver(self,
                                              descriptor_text: str,
@@ -122,20 +122,27 @@ class Tor_Node(Tor_base):
         addr = (ip, port)
         skin = cell.skin
         handshake_type = cell.finger_type
-
+        print("pd:01")
         create2 = Cell_Create2(handshake_type=handshake_type, onion_skin=skin, circuit_id=circuit_id)
-
+        print("pd:02")
         sock = self.socket_map.get(addr, None)
+        print("pd:03")
+
         if sock is None:
+            print("pd:04")
             sock = Tor_Socket(source_ip=self.host, on_cell=self.handle_cell)
             await sock.setup_socket(remote_addr=addr)
             print("build a new socket from: ", addr)
             asyncio.create_task(self.handle_connection(addr, sock))
             await sock.tor_handshake_client()
-
         circuit = self.circuit_list.get_by_id(circuit_id)
+        print("pd:05")
+
         simple_node = Tor_Router_simple(sock)
+        print("pd:06")
+
         circuit.circuit_nodes.append(simple_node)
+        print("pd:07")
 
         await sock.send_cell(create2)
 
@@ -247,16 +254,6 @@ class Tor_Node(Tor_base):
             print("final data: ", data)
         elif isinstance(cell, CellRelayData):
             await self.handle_data_relay(circuit, cell, origin_cell, sock)
-            # stream = circuit.streams.get_by_id(origin_cell.stream_id)
-            # stream.append(cell.data)
-            # text = await stream.extract_guessed_message_from_buffer()
-            # cell_list = stream.make_relays_server(text)
-            # for cell in cell_list:
-            #     await sock.send_cell(cell)
-            # end_cell = CellRelayEnd(StreamReason(6), circuit.id)
-            # relay_cell = circuit.make_relay(inner_cell=end_cell, relay_type=CellRelay, stream_id=origin_cell.stream_id)
-            # await sock.send_cell(relay_cell)
-
         elif isinstance(cell, CellRelaySendMe):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.window.package_inc()

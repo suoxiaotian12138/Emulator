@@ -23,6 +23,7 @@ class ByteBuffer:
         """Append raw data and notify waiting consumers."""
         async with self.condition:
             self.buffer.extend(data)
+            print(f"[BufferAdd] {len(data)} bytes added, total={len(self.buffer)}")
             self.condition.notify_all()
 
     async def extract_by_head(self):
@@ -32,6 +33,7 @@ class ByteBuffer:
                 length = self.get_next_length()
                 if length is not None and len(self.buffer) >= 4 + length:
                     raw = self.read(4 + length)
+                    print(f"[BufferExtract] {length} bytes extracted, remaining={len(self.buffer)}")
                     return decode(raw[4:])
                 await self.condition.wait()
 
@@ -473,7 +475,7 @@ async def send_any(loop: asyncio.BaseEventLoop, sock: socket.socket, data: bytes
         def _blocking_sendall():
             try:
                 sock.setblocking(True)
-                sock.sendall(data)  # 若触发 TLS alert，会 raise ssl.SSLError
+                sock.sendall(data)
             except Exception as e:
                 print(f"[SendErr] {sock.getpeername()} {e}")
                 raise

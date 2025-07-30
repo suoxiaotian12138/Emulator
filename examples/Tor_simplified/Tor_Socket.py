@@ -192,9 +192,9 @@ class Tor_Socket():
                     print(f"[Error] Socket send failed: {e}")
 
     async def send_cell(self, cell):
-        print("send cell:", cell)
+        print(self.source_ip, "send cell:", self.socket.getpeername(), cell)
         buffer = self.protocal.serialize(cell)
-        # print("send cell content:", buffer)
+        print("send cell content:", buffer)
 
         async with self._send_lock:
             try:
@@ -227,11 +227,11 @@ class Tor_Socket():
         try:
             circ_id, cmd_num = struct.unpack(self.protocal.header_format, header)
             cell_cls = TorCommands.get_by_num(cmd_num)
-            if cell_cls is None:
-                # 非法命令：丢 1 字节，让流对齐后继续
-                await self.buffer.pop(1)
-                self.print(f"Unknown command {cmd_num}, drop 1 byte to resync")
-                return None
+            # if cell_cls is None:
+            #     # 非法命令：丢 1 字节，让流对齐后继续
+            #     await self.buffer.pop(1)
+            #     self.print(f"Unknown command {cmd_num}, drop 1 byte to resync")
+            #     return None
         except struct.error as e:
             self.print(f"Header unpack error: {e}")
             await self.buffer.pop(1)
@@ -250,6 +250,7 @@ class Tor_Socket():
 
         # 3) 真正取走整包
         raw = await self._wait_for_bytes(total_len, consume=True)
+        print("recv raw:", raw)
         if raw is None:
             return None
 

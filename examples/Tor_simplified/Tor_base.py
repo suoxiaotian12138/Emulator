@@ -27,7 +27,7 @@ class Tor_base:
 
         self.socket = self.socket_recv_set(self.host, self.port)   # Used to accept socket connections,not to send or receive data directly.
         self.socket_map = {}   # dict[Tuple[str, int], socket.socket]
-        self.directory_address = self.get_directory_address()
+        self.dire_ip, self.dire_port = self.get_directory_address()
         self.model = model
         self.tasks = {}  # save handles
 
