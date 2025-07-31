@@ -7,7 +7,7 @@ import socket
 import asyncio
 
 from tools.Log.LogPrinter import LogPrinter
-from tools.Packet.packet_TCP import accept_tls_connections
+from tools.Packet.packet_TCP import accept_tls_connections, TLSConnector
 from tools.Crypt.key_generator import create_server_context, ed25519_setup, rsa_setup, generate_cert_and_key_from_ed25519, generate_tls_rsa_cert
 
 from examples.Tor_simplified.Tor_Socket import Tor_Socket
@@ -37,10 +37,11 @@ class Tor_base:
 
         self.cert_file, self.key_file = generate_tls_rsa_cert(self.rsa_tls_pvk)
         self.context = create_server_context(self.cert_file, self.key_file)
-
+        self.tls_connector = TLSConnector(certfile=self.cert_file, keyfile=self.key_file)
 
         # Unified log output format
         printer = LogPrinter(name)
+
         self.print = printer.print
 
 
@@ -56,7 +57,7 @@ class Tor_base:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((host, port))
-        sock.listen(128)
+        sock.listen(512)
         sock.setblocking(False)  # ★ 关键：非阻塞，供 loop.sock_accept 使用
         return sock
 
@@ -80,13 +81,15 @@ class Tor_base:
 
     async def monitor_tor_socket(self):
         """
-        持续监听新 TLS 连接,为每个连接创建独立的 Tor_Socket 管理任务
+        持续监听 TLS 连接；握手一成功就启动 Tor_Socket.listen()
         """
-        # 注意：self.socket 已经是 socket_recv_set 返回的非阻塞 socket
-        async for tls_sock, addr in accept_tls_connections(self.socket, self.context):
-            print("accept a new socket from: ", addr)
+
+        def on_accept(tls_sock, addr):
+            self.print("accept a new socket from:", addr)
             tor_sock = Tor_Socket(source_ip=self.host, sock=tls_sock, on_cell=self.handle_cell)
             asyncio.create_task(self.handle_connection(addr, tor_sock))
+
+        await accept_tls_connections(self.socket, self.tls_connector, on_accept)
 
     async def handle_connection(self, addr, tor_sock):
         try:

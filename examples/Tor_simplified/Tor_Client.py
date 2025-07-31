@@ -30,16 +30,16 @@ class Tor_Client(Tor_base):
         await self.consensus_init()
         await asyncio.gather(*self.tasks.values())
 
-    async def handle_connection(self, addr, tor_sock):
-        try:
-            self.socket_map[addr] = tor_sock
-            handle = await tor_sock.start_listen()  # 返回 monitor_handle task
-            await tor_sock.tor_handshake_client()   #
-            self.ready_to_send.set()
-            await handle  # 等连接断开
-        finally:
-            self.socket_map.pop(addr, None)
-            self.print(f"[Monitor] Connection {addr} closed and removed from map.")
+    # async def handle_connection(self, addr, tor_sock):
+    #     try:
+    #         self.socket_map[addr] = tor_sock
+    #         handle = await tor_sock.start_listen()  # 返回 monitor_handle task
+    #         await tor_sock.tor_handshake_client()   #
+    #         self.ready_to_send.set()
+    #         await handle  # 等连接断开
+    #     finally:
+    #         self.socket_map.pop(addr, None)
+    #         self.print(f"[Monitor] Connection {addr} closed and removed from map.")
 
     async def consensus_init(self):
         await self.consensus.consus_init_async()
@@ -52,6 +52,14 @@ class Tor_Client(Tor_base):
         socket = Tor_Socket(self.host, on_cell=self.handle_cell)
         await socket.setup_socket(remote_addr=self.guard.addr)
         asyncio.create_task(self.handle_connection(self.guard.addr, socket))
+
+        # 等监听就绪，不再是 sleep(0)
+        await socket.listen_started.wait()
+
+        # 再进行 Tor 握手
+        await socket.tor_handshake_client()
+        await socket.handshake_done.wait()
+        self.ready_to_send.set()
 
     async def make_stream(self, message, addr, hops_count=3, extend_routers=None):
         await self.ready_to_send.wait()
@@ -108,8 +116,8 @@ class Tor_Client(Tor_base):
         self.print("receive client cell_type:", type(cell))
         self.print("cell content",cell)
         if isinstance(cell, CellVersions):
-            sock.protocal.version = sock.handshake.retrieve_versions(cell)
-            self.print("sock protocal:", sock.protocal.version)
+            sock.protocol.version = sock.handshake.retrieve_versions(cell)
+            self.print("sock protocol:", sock.protocol.version)
         elif isinstance(cell, CellCerts):
             sock.handshake.retrieve_certs(cell)
         elif isinstance(cell, CellAuthChallenge):

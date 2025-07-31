@@ -21,6 +21,7 @@ from tools.Crypt.crypt_common import (
     debug_build_crosscert
 )
 from examples.Tor_simplified.Tor_Cell import CellCerts
+from collections import defaultdict
 
 class Tor_Node(Tor_base):
     def __init__(self, name: str, host: str, port: int, flags,
@@ -47,6 +48,7 @@ class Tor_Node(Tor_base):
         now_hr = int(self.start_time // 3600)
         self.exp_hr = now_hr + 24 * 7
         self.dns_solver = DNSResolver(nameservers=["1.1.1.1", "8.8.8.8", "9.9.9.9"], timeout=1.5, lifetime=3.0)
+        self._socket_locks = defaultdict(asyncio.Lock)
 
 
     async def start_protocol(self):
@@ -114,6 +116,8 @@ class Tor_Node(Tor_base):
         circuit = await self.circuit_list.create_circuit_server(circuit_id)
         created_cell = circuit.server_connected(self.protocol_version, create_cell, sock)
         await sock.send_cell(created_cell)
+        simple_node = Tor_Router_simple(sock)
+        circuit.circuit_nodes.append(simple_node)
         return circuit
 
     async def extend_next_node(self, cell: CellRelayExtend2, circuit_id: int):
@@ -122,29 +126,34 @@ class Tor_Node(Tor_base):
         addr = (ip, port)
         skin = cell.skin
         handshake_type = cell.finger_type
-        print("pd:01")
-        create2 = Cell_Create2(handshake_type=handshake_type, onion_skin=skin, circuit_id=circuit_id)
-        print("pd:02")
+
         sock = self.socket_map.get(addr, None)
-        print("pd:03")
+        self.print("socket_map", self.socket_map)
 
         if sock is None:
-            print("pd:04")
-            sock = Tor_Socket(source_ip=self.host, on_cell=self.handle_cell)
-            await sock.setup_socket(remote_addr=addr)
-            print("build a new socket from: ", addr)
-            asyncio.create_task(self.handle_connection(addr, sock))
-            await sock.tor_handshake_client()
+            lock = self._socket_locks[addr]
+            async with lock:
+                # 再次检查是否已有连接（可能其他协程建好了）
+                sock = self.socket_map.get(addr, None)
+                if sock is None:
+                    sock = Tor_Socket(source_ip=self.host, on_cell=self.handle_cell)
+                    await sock.setup_socket(remote_addr=addr)
+                    print("build a new socket from: ", addr)
+                    self.socket_map[addr] = sock
+                    asyncio.create_task(self.handle_connection(addr, sock))
+                    await sock.listen_started.wait()
+                    await sock.tor_handshake_client()
+        await sock.handshake_done.wait()
+
         circuit = self.circuit_list.get_by_id(circuit_id)
-        print("pd:05")
 
         simple_node = Tor_Router_simple(sock)
-        print("pd:06")
 
         circuit.circuit_nodes.append(simple_node)
-        print("pd:07")
+        create2 = Cell_Create2(handshake_type=handshake_type, onion_skin=skin, circuit_id=circuit_id)
 
         await sock.send_cell(create2)
+
 
     async def reply_extend(self, cell: CellCreated2):
         circuit_id = cell.circuit_id
@@ -164,7 +173,7 @@ class Tor_Node(Tor_base):
                 certs_cell = self.make_certs_cell()
                 await sock.tor_handshake_server(cell, certs_cell, self.cert_file)
             else:
-                sock.protocal.version = sock.handshake.retrieve_versions(cell)
+                sock.protocol.version = sock.handshake.retrieve_versions(cell)
         elif isinstance(cell, CellCerts):
             sock.handshake.retrieve_certs(cell)
         elif isinstance(cell, CellAuthChallenge):
@@ -238,6 +247,8 @@ class Tor_Node(Tor_base):
             port = cell.port
             addr = (host, port)
             circuit.streams.set_stream(stream_id=origin_cell.stream_id, target_addr=addr)
+            self.print("circuit_nodes: ", circuit.circuit_nodes)
+
             ip_address = await self.resolve_ipv4_async(host)
             connected_cell = CellRelayConnected(ip_address, 0, origin_cell.circuit_id)
 
@@ -261,47 +272,63 @@ class Tor_Node(Tor_base):
     async def handle_data_relay(self, circuit, cell, origin_cell, sock):
         stream = circuit.streams.get_by_id(origin_cell.stream_id)
         stream.append(cell.data)  # 上行数据 -> stream 内部 buffer
-
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + 0.05  # 50ms 抽干窗口；可调为 20–100ms
+        now = loop.time()
+
+        # 配置时间控制参数
+        MAX_TOTAL_DURATION = 1.0  # 最长生存时间
+        SOFT_RETRY_WINDOW = 0.8  # 可重试时间
+        EXTRACT_TIMEOUT = 0.2  # 每次提取最长等待时间
+
+        deadline_soft = now + SOFT_RETRY_WINDOW
+        deadline_hard = now + MAX_TOTAL_DURATION
+
 
         while True:
-            try:
-                # 建议把 coalesce_bytes 设成 498 的倍数，减少小尾巴 cell
-                chunk = await stream.extract_guessed_message_from_buffer(
-                    timeout_ms=20, coalesce_bytes=498 * 64
-                )
-            except Exception:
-                # 发生异常：发送 END(Internal/Misc)
-                end = CellRelayEnd(StreamReason(10), circuit.id)  # INTERNAL=10（或按你的枚举）
-                relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay,
-                                           stream_id=origin_cell.stream_id)
+            now = loop.time()
+
+            if now > deadline_hard:
+                end = CellRelayEnd(StreamReason(10), circuit.id)
+                relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=origin_cell.stream_id)
                 await sock.send_cell(relay)
-                break
+                return
+
+            try:
+                chunk = await asyncio.wait_for(
+                    stream.extract_guessed_message_from_buffer(timeout_ms=20, coalesce_bytes=498 * 64),
+                    timeout=EXTRACT_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                end = CellRelayEnd(StreamReason(10), circuit.id)
+                relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=origin_cell.stream_id)
+                await sock.send_cell(relay)
+                return
 
             if chunk is None:
-                # 暂无可回写数据：在窗口内再试；超时后退出本轮
-                if loop.time() < deadline:
+                if loop.time() < deadline_soft:
+                    await asyncio.sleep(0)
                     continue
-                break
+                else:
+                    end = CellRelayEnd(StreamReason(10), circuit.id)  # Reason: Timeout
+                    relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=origin_cell.stream_id)
+                    await sock.send_cell(relay)
+                    return
 
             if chunk == b'':
-                # 远端 EOF，正常结束
-                end = CellRelayEnd(StreamReason(6), circuit.id)  # DONE=6
-                relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay,
-                                           stream_id=origin_cell.stream_id)
+                end = CellRelayEnd(StreamReason(6), circuit.id)  # DONE
+                relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=origin_cell.stream_id)
                 await sock.send_cell(relay)
                 break
 
-            # 有数据：切分为 RelayData cells 发送
+            # 正常数据发送
             for rc in stream.make_relays_server(chunk):
                 await sock.send_cell(rc)
 
     async def resolve_ipv4_async(self, domain: str) -> str:
         ip = await self.dns_solver.resolve_ipv4(domain)
         return ip
-
-
 
     async def close_stream(self, stream):
         items = self.socket_map.items()

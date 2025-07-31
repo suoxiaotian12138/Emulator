@@ -7,6 +7,7 @@ from tools.Crypt.serialization import decode
 import asyncio
 import socket
 from ssl import SSLWantReadError, SSLWantWriteError
+import errno, ssl
 
 class ByteBuffer:
     """
@@ -304,63 +305,134 @@ async def listen_to_tcp(
         await asyncio.gather(accept_task, manager_task, return_exceptions=True)
 
 
-
-
-
-# async def accept_tls_connections(listener_sock, ssl_ctx):
+# async def accept_tls_connections(listener_sock: socket.socket, ssl_ctx: ssl.SSLContext):
 #     loop = asyncio.get_running_loop()
-#     listener_sock.setblocking(False)
-#     while True:
-#         raw_sock, addr = await loop.sock_accept(listener_sock)
-#         print(f"[+] Accepted raw {addr}")
+#     queue: asyncio.Queue[tuple[socket.socket, tuple[str,int]]] = asyncio.Queue()
 #
-#         def _wrap():
-#             raw_sock.setblocking(True)   # 握手期间必须阻塞
-#             tls_sock = ssl_ctx.wrap_socket(raw_sock, server_side=True)
-#             tls_sock.setblocking(True)   # 后续所有阻塞I/O（如果你在线程池里用 recv）
+#     # 内部：处理一次 TLS 握手并把结果放队列
+#     async def do_handshake(raw_sock: socket.socket, addr):
+#         def wrap():
+#             raw_sock.setblocking(True)  # 握手前必须阻塞
+#             tls_sock = ssl_ctx.wrap_socket(raw_sock, server_side=True, do_handshake_on_connect=True)
+#             tls_sock.setblocking(False)  # ★ 握手后立刻切成非阻塞 ★
 #             return tls_sock
 #
 #         try:
-#             tls_sock = await loop.run_in_executor(None, _wrap)
-#             yield tls_sock, addr
+#             tls = await loop.run_in_executor(None, wrap)
+#
+#             await queue.put((tls, addr))
 #         except ssl.SSLError as e:
-#             print("[!] TLS fail:", e)
+#             print(f"[!] TLS 握手失败 {addr}: {e}")
+#             raw_sock.close()
+#
+#     # 背景：不停 accept raw socket，并发起 handshake 任务
+#     async def accept_loop():
+#         while True:
+#             raw_sock, addr = await loop.sock_accept(listener_sock)
+#             print(f"[+] Accepted raw {addr}")
+#             # 丢给后台去握手
+#             asyncio.create_task(do_handshake(raw_sock, addr))
+#
+#     # 启动背景 accept
+#     asyncio.create_task(accept_loop())
+#
+#     # 主循环：不断从 queue 拿到已完成握手的 tls_sock
+#     while True:
+#         tls_sock, addr = await queue.get()
+#         yield tls_sock, addr
 
-async def accept_tls_connections(listener_sock: socket.socket, ssl_ctx: ssl.SSLContext):
+class TLSConnector:
+    def __init__(
+        self,
+        certfile: str = "cert.pem",
+        keyfile: str = "key.pem",
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        max_concurrent_tls: int = 64,
+        handshake_timeout: float = 10.0,
+    ):
+        self.loop = loop or asyncio.get_event_loop()
+        self.semaphore = asyncio.Semaphore(max_concurrent_tls)
+        self.handshake_timeout = handshake_timeout
+        self.ctx = self.make_ssl_context(certfile, keyfile)
+
+    def make_ssl_context(self, certfile: str, keyfile: str) -> ssl.SSLContext:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+
+        # 必须在 load_cert_chain 之前设置 SECLEVEL
+        ctx.set_ciphers("ALL:@SECLEVEL=1")
+
+        ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
+        return ctx
+    async def wrap_tls(self, raw_sock: socket.socket, timeout: Optional[float] = None) -> socket.socket:
+        """
+        将一个 raw socket 包装为 TLS socket，带超时和并发限制
+        """
+        timeout = timeout or self.handshake_timeout
+        async with self.semaphore:
+            try:
+                return await asyncio.wait_for(
+                    self.loop.run_in_executor(None, self._wrap_blocking_tls, raw_sock),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                print(f"[TLSConnector] Handshake timeout for {raw_sock.getpeername()}")
+                raw_sock.close()
+                raise
+            except Exception as e:
+                print(f"[TLSConnector] Handshake failed: {e}")
+                raw_sock.close()
+                raise
+
+    def _wrap_blocking_tls(self, raw_sock: socket.socket) -> socket.socket:
+        raw_sock.setblocking(True)
+        tls_sock = self.ctx.wrap_socket(raw_sock, server_side=True, do_handshake_on_connect=True)
+        tls_sock.setblocking(False)
+        return tls_sock
+
+# async def accept_tls_connections(listener_sock: socket.socket, tls_connector: TLSConnector):
+#     loop = asyncio.get_running_loop()
+#     queue: asyncio.Queue[tuple[socket.socket, tuple[str, int]]] = asyncio.Queue()
+#
+#     async def do_handshake(raw_sock, addr):
+#         try:
+#             tls_sock = await tls_connector.wrap_tls(raw_sock)
+#             await queue.put((tls_sock, addr))
+#         except Exception as e:
+#             print(f"[!] TLS handshake failed for {addr}: {e}")
+#             raw_sock.close()
+#
+#     async def accept_loop():
+#         while True:
+#             raw_sock, addr = await loop.sock_accept(listener_sock)
+#             asyncio.create_task(do_handshake(raw_sock, addr))
+#
+#     asyncio.create_task(accept_loop())
+#
+#     while True:
+#         tls_sock, addr = await queue.get()
+#         yield tls_sock, addr
+# accept_tls_connections.py
+async def accept_tls_connections(listener_sock: socket.socket,
+                                 tls_connector: TLSConnector,
+                                 on_accept: Callable[[socket.socket, tuple[str,int]], None]):
+    """
+    接收 TCP -> 升级 TLS -> 立即交给 on_accept
+    无内部 queue，不存在 '握手完成但没人收' 的窗口
+    """
     loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[tuple[socket.socket, tuple[str,int]]] = asyncio.Queue()
 
-    # 内部：处理一次 TLS 握手并把结果放队列
-    async def do_handshake(raw_sock: socket.socket, addr):
-        def wrap():
-            raw_sock.setblocking(True)  # 握手前必须阻塞
-            tls_sock = ssl_ctx.wrap_socket(raw_sock, server_side=True, do_handshake_on_connect=True)
-            tls_sock.setblocking(False)  # ★ 握手后立刻切成非阻塞 ★
-            return tls_sock
-
+    async def handle(raw_sock, addr):
         try:
-            tls = await loop.run_in_executor(None, wrap)
-            await queue.put((tls, addr))
-        except ssl.SSLError as e:
-            print(f"[!] TLS 握手失败 {addr}: {e}")
+            tls_sock = await tls_connector.wrap_tls(raw_sock)
+            # 👇 握手成功后立刻调用回调（on_accept 里会启动 monitor）
+            on_accept(tls_sock, addr)
+        except Exception as e:
+            print(f"[!] TLS handshake failed for {addr}: {e}")
             raw_sock.close()
 
-    # 背景：不停 accept raw socket，并发起 handshake 任务
-    async def accept_loop():
-        while True:
-            raw_sock, addr = await loop.sock_accept(listener_sock)
-            print(f"[+] Accepted raw {addr}")
-            # 丢给后台去握手
-            asyncio.create_task(do_handshake(raw_sock, addr))
-
-    # 启动背景 accept
-    asyncio.create_task(accept_loop())
-
-    # 主循环：不断从 queue 拿到已完成握手的 tls_sock
     while True:
-        tls_sock, addr = await queue.get()
-        yield tls_sock, addr
-
+        raw_sock, addr = await loop.sock_accept(listener_sock)
+        asyncio.create_task(handle(raw_sock, addr))
 
 async def monitor_connection_tls(
     conn: socket.socket,
@@ -368,82 +440,39 @@ async def monitor_connection_tls(
     buffer,
     buffer_size: int = 4094,
     timeout: float = 600.0,
-    handler: Optional[Callable[[Tuple[bytes, Tuple[str, int]], any], None]] = None,
 ):
-    """
-    - 不再 run_in_executor；靠 loop.sock_recv 做真正的异步 I/O
-    - 仍然用 queue 把 I/O 与解析解耦，避免一个慢 handler 阻塞 recv
-    """
-    if handler is None:
-        handler = handle_tcp
-
     loop = asyncio.get_running_loop()
-    conn.setblocking(False)                      # ****** 关键：非阻塞 ******
+    conn.setblocking(False)
     identifier = f"{addr[0]}:{addr[1]}"
-    queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
-    alive = True
-
-    # ------------ Task‑1: 纯异步 recv ----------------
-    async def recv_loop():
-        nonlocal alive
-        last = time.monotonic()
-        try:
-            while alive:
-                try:
-                    data = await asyncio.wait_for(
-                        recv_any(loop, conn, buffer_size),
-                        timeout=timeout
-                    )
-
-                    if not data:  # ← 对端已优雅关闭 (FIN)
-                        print(f"[PeerClose] {identifier} FIN received")
-                        break  # ★ 立即退出循环，走 finally
-
-                    await queue.put(data)
-                    last = time.monotonic()
-
-                except ssl.SSLError as e:
-                    # WANT_READ / WANT_WRITE → 轻微等待后重试
-                    if isinstance(e, (SSLWantReadError, SSLWantWriteError)) or \
-                            e.errno in (ssl.SSL_ERROR_WANT_READ, ssl.SSL_ERROR_WANT_WRITE):
-                        await asyncio.sleep(0.01)
-                        continue
-                    print(f"[RecvErr] {identifier} {e}")
-                    break
-
-                except asyncio.TimeoutError:
-                    print(f"[Timeout] {identifier} >{timeout}s no data")
-                    break
-
-        finally:
-            alive = False
-
-    # ------------ Task‑2: 解析 / 业务处理 -------------
-    async def process_loop():
-        nonlocal alive
-        try:
-            while alive:
-                try:
-                    data = await queue.get()
-                    await handler((data, addr), buffer)
-                except Exception as e:
-                    print(f"[HandlerErr] {identifier} {e}")
-        finally:
-            alive = False
-
-    # ------------- 调度与清理 -------------------------
-    recv_task = asyncio.create_task(recv_loop(),  name=f"recv-{identifier}")
-    process_task = asyncio.create_task(process_loop(), name=f"proc-{identifier}")
 
     try:
-        await asyncio.wait(
-            [recv_task, process_task],
-            return_when=asyncio.FIRST_COMPLETED
-        )
+        while True:
+            try:
+                data = await asyncio.wait_for(
+                    recv_any(loop, conn, buffer_size),
+                    timeout=timeout
+                )
+                if not data:                 # FIN
+                    print(f"[PeerClose] {identifier} FIN received")
+                    break
+                await buffer.add(data)
+
+            except ssl.SSLWantReadError:
+                # ↻ 非阻塞场景下很常见：继续下一轮
+                continue
+
+            except OSError as e:
+                # Windows 下 SSLWantRead 会包装成 OSError 10035
+                if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK, 10035):
+                    continue
+                print(f"[RecvErr] {identifier} {e}")
+                break            # 其它 OSError 才视为致命
+
+            except asyncio.TimeoutError:
+                print(f"[Timeout] {identifier} >{timeout}s no data")
+                break
+
     finally:
-        alive = False
-        recv_task.cancel()
-        process_task.cancel()
         with contextlib.suppress(Exception):
             conn.shutdown(socket.SHUT_RDWR)
         conn.close()
@@ -497,3 +526,4 @@ async def recv_any(loop: asyncio.BaseEventLoop, sock: socket.socket, nbytes: int
             finally:
                 sock.setblocking(blocking)
         return await loop.run_in_executor(None, _blocking_recv)
+

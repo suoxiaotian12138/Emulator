@@ -345,6 +345,7 @@ class Tor_Stream:
                 return msg
 
         return None
+
     def _ensure_stream_state(self):
         if not hasattr(self, "_buffer"): self._buffer = bytearray()
         if not hasattr(self, "_mode"): self._mode = None  # None|'http-tunnel'|'tls-tunnel'|'connect-tunnel'

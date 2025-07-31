@@ -49,32 +49,35 @@ class TorCell:
 
     def serialize(self, proto_version, negotiating=False):
         payload = self._serialize_payload()
-
         # 特殊处理：VERSIONS cell在协议协商期间必须使用旧格式
         # 即使目标是协议4，VERSIONS cell本身也要用协议3的格式发送
         effective_version = proto_version
+
         if self.NUM == 7 and negotiating:  # VERSIONS command during negotiation
             effective_version = 3  # 强制使用协议3格式进行协商
             # VERSIONS cell的circuit_id必须为0
             if self.circuit_id != 0:
                 raise ValueError("VERSIONS cell must have circuit_id=0")
-
         # Link protocol 4 increases circuit ID width to 4 bytes.
         if effective_version < 4:
+
             # Protocol version < 4: 2-byte circuit ID + 1-byte command
             header = struct.pack('!HB', self.circuit_id, self.NUM)
             cell_header_size = 3  # 2 + 1
         else:
+
             # Protocol version >= 4: 4-byte circuit ID + 1-byte command
             header = struct.pack('!IB', self.circuit_id, self.NUM)
             cell_header_size = 5  # 4 + 1
 
         if self.is_var_len():
+
             # 可变长度cell：header + 2字节长度 + payload
             buffer = header + struct.pack('!H', len(payload)) + payload
         else:
             # 固定长度cell：需要确保总长度正确
             if effective_version < 4:
+
                 # 协议版本 < 4：总长度 = 512字节 (2+1+509)
                 total_cell_size = 512
             else:
@@ -83,13 +86,11 @@ class TorCell:
 
             # 计算需要的payload大小
             payload_size = total_cell_size - cell_header_size
-
             # 如果payload太长，截断；如果太短，用零填充
             if len(payload) > payload_size:
                 payload = payload[:payload_size]
             else:
                 payload = payload.ljust(payload_size, b'\x00')
-
             buffer = header + payload
 
         return buffer
@@ -244,7 +245,8 @@ class Cell_Create2(TorCell):
         super().__init__(circuit_id)
         self.handshake_type = handshake_type
         self.onion_skin = onion_skin
-
+        if len(onion_skin) > 507:
+            raise ValueError(f"onion_skin too long: {len(onion_skin)} > 507")
     def _serialize_payload(self):
         return struct.pack('!HH', self.handshake_type, len(self.onion_skin)) + self.onion_skin
 
