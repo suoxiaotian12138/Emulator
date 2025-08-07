@@ -30,18 +30,23 @@ class Tor_base:
         self.dire_ip, self.dire_port = self.get_directory_address()
         self.model = model
         self.tasks = {}  # save handles
+        self.running = True
 
         self.tls_privt, self.tls_pubk = ed25519_setup()
         self.rsa_pvk, _ = rsa_setup()
         self.rsa_tls_pvk, self.rsa_tls_puk = rsa_setup()
 
         self.cert_file, self.key_file = generate_tls_rsa_cert(self.rsa_tls_pvk)
-        self.context = create_server_context(self.cert_file, self.key_file)
-        self.tls_connector = TLSConnector(certfile=self.cert_file, keyfile=self.key_file)
+        # self.context = create_server_context(self.cert_file, self.key_file)
+        self.tls_connector = TLSConnector(
+            certfile=self.cert_file,  # self.cert_file
+            keyfile=self.key_file,  # self.key_file
+            max_concurrent_tls=2000,  # 服务端并发TLS握手限制
+            handshake_timeout=15.0  # 适当的握手超时
+        )
 
         # Unified log output format
         printer = LogPrinter(name)
-
         self.print = printer.print
 
 
@@ -57,8 +62,8 @@ class Tor_base:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((host, port))
-        sock.listen(512)
-        sock.setblocking(False)  # ★ 关键：非阻塞，供 loop.sock_accept 使用
+        sock.listen(2048)  # backlog >= max_concurrent_tls
+        sock.setblocking(False)
         return sock
 
     @staticmethod
@@ -80,31 +85,39 @@ class Tor_base:
         return (host, port)
 
     async def monitor_tor_socket(self):
-        """
-        持续监听 TLS 连接；握手一成功就启动 Tor_Socket.listen()
-        """
+        """使用异步TLS监听连接"""
 
-        def on_accept(tls_sock, addr):
-            self.print("accept a new socket from:", addr)
-            tor_sock = Tor_Socket(source_ip=self.host, sock=tls_sock, on_cell=self.handle_cell)
-            asyncio.create_task(self.handle_connection(addr, tor_sock))
+        def on_accept(reader: asyncio.StreamReader,
+                      writer: asyncio.StreamWriter,
+                      addr: tuple[str, int]):
+            tor_sock = Tor_Socket(reader=reader, writer=writer,
+                                  source_ip=self.host, on_cell=self.handle_cell)
+            asyncio.create_task(tor_sock.start_listen())
+
+        self.print(f"[LISTEN] Node {self.name} listening on {self.host}:{self.port}")
 
         await accept_tls_connections(self.socket, self.tls_connector, on_accept)
 
     async def handle_connection(self, addr, tor_sock):
         try:
             self.socket_map[addr] = tor_sock
-            handle = await tor_sock.start_listen()  # 返回 monitor_handle task
-            await handle  # 等连接断开
+            # 等待streams设置完成
+            while tor_sock.reader is None or tor_sock.writer is None:
+                if tor_sock._closing.is_set():
+                    return
+                await asyncio.sleep(0.01)
+
+            handle = await tor_sock.start_listen()
+            await handle
         finally:
             self.socket_map.pop(addr, None)
-            self.print(f"[Monitor] Connection {addr} closed and removed from map.")
+            self.print(f"[AsyncMonitor] Connection {addr} closed and removed from map.")
 
     def handle_cell(self, cell, sock):
         pass
 
     async def stop_protocol(self):
-        """停止所有任务，包括TCP服务器"""
+        """停止所有任务"""
         self.running = False
         for task in self.tasks.values():
             if not task.done():

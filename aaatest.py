@@ -90,12 +90,14 @@ async def periodic_dump(interval=30):
 async def main():
     # 启动目录服务器
     loop = asyncio.get_running_loop()
+    print("event-loop =>", type(loop))
 
-    # 1. 打开调试模式
-    loop.set_debug(True)
-
-    # 2. 定义“慢回调”阈值（秒）
-    loop.slow_callback_duration = 0.5   # >0.5 s 即打印 “Executing … took …”
+    # # 1. 打开调试模式
+    # loop.set_debug(True)
+    #
+    # # 2. 定义“慢回调”阈值（秒）
+    # loop.slow_callback_duration = 0.5   # >0.5 s 即打印 “Executing … took …”
+    # asyncio.create_task(periodic_dump(30))
 
     # 3. 其他初始化（线程池、任务等）
     max_workers = 128
@@ -108,15 +110,14 @@ async def main():
 
     os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
     # asyncio.create_task(_debug_watchdog())
-    asyncio.create_task(periodic_dump(30))
     # 多个 guard 配置
     guard_configs = [
         ("guard1", "192.168.66.241", 9001, 'Guard', ["Running", "Valid", "Guard","Fast","Stable"]),
-        # ("guard2", "192.168.66.242", 9002, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"]),
-        # ("Middle1", "192.168.66.243", 9003, 'Middle',["Running", "Valid", "Fast","Stable"]),
-        # ("Middle2", "192.168.66.244", 9004, 'Middle',["Running", "Valid", "Fast","Stable"]),
-        ("Exit1", "192.168.66.245", 9005, 'Exit',["Running", "Valid", "Exit","Fast","Stable"]),
-        ("Exit2", "192.168.66.246", 9006, 'Exit',["Running", "Valid", "Exit","Fast","Stable"]),
+        ("guard2", "192.168.66.242", 9002, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"]),
+        ("Middle1", "192.168.66.243", 9003, 'Middle',["Running", "Valid", "Fast","Stable"]),
+        ("Middle2", "192.168.66.244", 9004, 'Middle',["Running", "Valid", "Fast","Stable"]),
+        ("Exit1", "192.168.66.241", 9005, 'Exit',["Running", "Valid", "Exit","Fast","Stable"]),
+        ("Exit2", "192.168.66.241", 9006, 'Exit',["Running", "Valid", "Exit","Fast","Stable"]),
 
     ]
 

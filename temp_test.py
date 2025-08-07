@@ -72,10 +72,11 @@ import concurrent.futures
 
 async def main():
     loop = asyncio.get_running_loop()
+    print("event-loop =>", type(loop))
 
-    # 调试设置
-    loop.set_debug(True)
-    loop.slow_callback_duration = 0.5
+    # # 调试设置
+    # loop.set_debug(True)
+    # loop.slow_callback_duration = 0.5
 
     # 设置线程池
     max_workers = 128
@@ -90,10 +91,10 @@ async def main():
     os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
 
     # 配置参数
-    total_batches = 2
+    total_batches = 1
     clients_per_batch = 100
     # delay_before_stream_send = 10  # 每批建立连接后等多少秒再发流
-    delay_between_batches = 60      # 每批之间间隔几秒
+    delay_between_batches = 20      # 每批之间间隔几秒
 
     all_clients = []
     client_index = 0

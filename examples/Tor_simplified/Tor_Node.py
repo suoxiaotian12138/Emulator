@@ -136,8 +136,9 @@ class Tor_Node(Tor_base):
                 # 再次检查是否已有连接（可能其他协程建好了）
                 sock = self.socket_map.get(addr, None)
                 if sock is None:
-                    sock = Tor_Socket(source_ip=self.host, on_cell=self.handle_cell)
-                    await sock.setup_socket(remote_addr=addr)
+                    sock = await Tor_Socket.dial(remote_addr=addr,
+                                                 source_ip=self.host,
+                                                 on_cell=self.handle_cell)
                     print("build a new socket from: ", addr)
                     self.socket_map[addr] = sock
                     asyncio.create_task(self.handle_connection(addr, sock))
