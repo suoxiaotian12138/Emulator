@@ -1,9 +1,4 @@
-import sys
-import asyncio, tracemalloc
-from examples.Tor_simplified.Tor_Node import Tor_Node
-from examples.Tor_simplified.Tor_Directory import TorDirectoryServer
-from examples.Tor_simplified.Tor_Client import Tor_Client
-import aiohttp
+
 from examples.Tor_simplified.Tor_Client import Tor_Client
 import signal, faulthandler, sys, traceback
 import asyncio, concurrent.futures, os, logging
@@ -11,6 +6,7 @@ import asyncio, threading, psutil, os
 
 
 
+import concurrent.futures
 
 # os.environ["PYTHONASYNCIODEBUG"] = "1"
 #
@@ -68,7 +64,6 @@ def dump_stats():
 
 
 
-import concurrent.futures
 
 async def main():
     loop = asyncio.get_running_loop()
@@ -140,53 +135,6 @@ async def main():
         print("[Main] Finished.")
 
     await asyncio.Event().wait()
-
-
-
-    # tracemalloc.start()
-    os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
-    # asyncio.create_task(_debug_watchdog())
-    client_list = []
-    i = 0
-    total_batches = 9
-    clients_per_batch = 5
-    delay_between_batches = 5  # 秒
-
-    for batch in range(total_batches):
-        for _ in range(clients_per_batch):
-            name = f"client{i}"
-            port = 9102 + i
-            client = Tor_Client(name=name, host="192.168.66.242", port=port, model='sim')
-            client_list.append(client)
-            i += 1
-        print(f"Batch {batch + 1} created, sleeping {delay_between_batches}s...")
-        await asyncio.sleep(delay_between_batches)
-
-    message = b"HEAD / HTTP/1.1\r\nHost: www.baidu.com\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
-
-    addr = ("www.baidu.com", 443)
-    hop = 3
-    for client in client_list:
-        asyncio.create_task(client.start_protocol())
-
-    print("[Main] Listener started. Waiting 10 seconds before sending...")
-
-    # 等待10秒后再开始发送流
-    print("[Main] make_stream started.")
-
-    for i in range(1):
-        for client in client_list:
-            asyncio.create_task(client.make_stream(message=message, addr=addr, hops_count=hop))
-
-    try:
-        await asyncio.sleep(800)
-    finally:
-        print("end")
-
-    # 阻塞等待
-    await asyncio.Event().wait()
-
-
 
 
 if __name__ == "__main__":

@@ -1,9 +1,10 @@
 import asyncio
 from queue import Queue
 from typing import Literal
+import time
 
-
-from tools.Crypt.key_generator import curve25519_setup
+from tools.Log.stream_tracker import StreamTracker
+from tools.Log.utils import HopTimer, classify_exception, FailReason
 
 from examples.Tor_simplified.Tor_base import Tor_base
 from examples.Tor_simplified.Tor_Circuit import Tor_CircuitsList
@@ -24,62 +25,89 @@ class Tor_Client(Tor_base):
 
         self.circuit_list = Tor_CircuitsList()
         self.ready_to_send = asyncio.Event()
+        self.stream_tracker = StreamTracker()     # ★ 新增
+        self._sid2uid: dict[int, str] = {}
 
     async def start_protocol(self):
         self.tasks['listener_task'] = asyncio.create_task(self.monitor_tor_socket())
         await self.consensus_init()
+
+        self._ev("client_start_protocol", ip=self.host, port=self.port)
         await asyncio.gather(*self.tasks.values())
 
-    # async def handle_connection(self, addr, tor_sock):
-    #     try:
-    #         self.socket_map[addr] = tor_sock
-    #         handle = await tor_sock.start_listen()  # 返回 monitor_handle task
-    #         await tor_sock.tor_handshake_client()   #
-    #         self.ready_to_send.set()
-    #         await handle  # 等连接断开
-    #     finally:
-    #         self.socket_map.pop(addr, None)
-    #         self.print(f"[Monitor] Connection {addr} closed and removed from map.")
 
     async def consensus_init(self):
         await self.consensus.consus_init_async()
         guard = self.consensus.get_random_guard_node()
         self.guard = Tor_Router(guard)
+
         desc = await self.consensus.fetch_descriptor(self.guard.fingerprint_str)
         self.guard.set_descriptor(desc)
         self.print("guard_name:", self.guard.nickname)
-
         socket = Tor_Socket(self.host, on_cell=self.handle_cell)
+
+        #和guard的tls握手记录
         await socket.setup_socket(remote_addr=self.guard.addr)
+        self._ev("tls_handshake_done", peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}", side="client")
+
         asyncio.create_task(self.handle_connection(self.guard.addr, socket))
-
-        # 等监听就绪，不再是 sleep(0)
         await socket.listen_started.wait()
-
-        # 再进行 Tor 握手
+        #和guard的tor握手
         await socket.tor_handshake_client()
         await socket.handshake_done.wait()
+        self._ev("tor_handshake_done", peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}", versions=[3, 4], auth="none")
+
         self.ready_to_send.set()
 
     async def make_stream(self, message, addr, hops_count=3, extend_routers=None):
         await self.ready_to_send.wait()
         socket = self.socket_map.get(self.guard.addr, None)
         circuit = await self.create_circuit(socket, hops_count, extend_routers)
-
         stream = circuit.create_stream()
-        connect_cell = stream.make_connect(addr)
-        await socket.send_cell(connect_cell)
-        await stream.wait_connect_ack()
-        cells = stream.make_relays(message)
 
-        await socket.send_cells(cells)
+        #记录一下流开始
+        stream_id = stream.id
+        stream_uid = f"{self.name}:{circuit.id}:{stream_id if stream_id is not None else int(time.time() * 1e6)}"
+        dst = f"{addr[0]}:{addr[1]}"
+        self.stream_tracker.start(stream_uid, src=self.name, dst=dst)
+        if stream_id is not None:
+            self._sid2uid[stream_id] = stream_uid
+
+        try:
+            connect_cell = stream.make_connect(addr)
+            await socket.send_cell(connect_cell)
+            await stream.wait_connect_ack()
+            cells = stream.make_relays(message)
+            await socket.send_cells(cells)
+
+        except asyncio.TimeoutError:
+            self.stream_tracker.set_status(stream_uid, "timeout")
+            rec = self.stream_tracker.end(stream_uid)
+            self._stream(**rec) if rec else None
+            raise
+        except ConnectionResetError:
+            self.stream_tracker.set_status(stream_uid, "reset")
+            rec = self.stream_tracker.end(stream_uid)
+            self._stream(**rec) if rec else None
+            raise
+        except Exception:
+            self.stream_tracker.set_status(stream_uid, "error")
+            rec = self.stream_tracker.end(stream_uid)
+            self._stream(**rec) if rec else None
+            raise
 
     async def create_circuit(self, socket, hops_count=3, extend_routers=None):
         circuit = await self.circuit_list.create_new_client()
-
+        #guard选择记录
+        snap = self.consensus.get_consensus_snapshot()
+        t0_total = time.perf_counter()
         used_fp = set()
         used_fp.add(self.guard.fingerprint_str)
 
+        #电路的第一跳记录
+        self._ev("path_step_selected", circ_id=circuit.id, hop=1, nickname=self.guard.nickname,
+                 fp=self.guard.fingerprint_str, role="guard",
+                 consensus_id=snap["consensus_id"])
         create_cell = circuit.connect_to_guard(self.guard)
         await socket.send_cell(create_cell)
         await circuit.guard_handsake(wait_time=600)
@@ -87,28 +115,56 @@ class Tor_Client(Tor_base):
         while circuit.nodes_count < hops_count:
             if circuit.nodes_count == hops_count - 1:
                 router = self.consensus.get_random_exit_node(exclude=used_fp)
+                role = "exit"
+                hop = circuit.nodes_count + 1
             else:
                 router = self.consensus.get_random_middle_node(exclude=used_fp)
+                role = "middle"
+                hop = circuit.nodes_count + 1
+
             used_fp.add(router["fingerprint"])
+            self._ev("path_step_selected", circ_id=circuit.id, hop=hop, nickname=router['nickname'],
+                     fp=router["fingerprint"], role=role,
+                     weight=router.get("bandwidth"),  # 作为权重的近似
+                     consensus_id=snap["consensus_id"])
 
             descriptor_str = await self.consensus.fetch_descriptor(router["fingerprint"])
             extend_node = Tor_Router(router)
             extend_node.set_descriptor(descriptor_str)
-            self.print("node_name:", extend_node.nickname)
-            extend_cell = circuit.connect_to_extend(extend_node)
-            await socket.send_cell(extend_cell)
-            await circuit.extend_handshake(descriptor_str, wait_time=60)
 
-        if extend_routers:
-            for router in extend_routers:
-                if router["fingerprint"] in used_fp:
-                    continue
-                used_fp.add(router["fingerprint"])
-
-                extend_cell = circuit.extend(router)
+            t_rtt = HopTimer().start()
+            try:
+                extend_cell = circuit.connect_to_extend(extend_node)
                 await socket.send_cell(extend_cell)
-                descriptor_str = await self.consensus.fetch_descriptor(router["fingerprint"])
                 await circuit.extend_handshake(descriptor_str, wait_time=60)
+                self._ev("circuit_extend_success", circ_id=circuit.id, hop=hop, nickname=router['nickname'],
+                         fp=router["fingerprint"], rtt_ms=t_rtt.ms())
+            except Exception as e:
+                reason = classify_exception(e).value
+                self._ev("circuit_extend_fail", circ_id=circuit.id, hop=hop, nickname=router['nickname'], rtt_ms=t_rtt.ms(),
+                         fp=router["fingerprint"], fail_reason=reason, error=str(e))
+                # 聚合一条 circuits（失败版）
+                self._circuit(circ_id=f"{self.name}:{circuit.id}", client=self.name,
+                              guard=self.guard.fingerprint_str,
+                              middle=None, exit=None,
+                              build_ms=(time.perf_counter() - t0_total) * 1000.0,
+                              success=False, fail_reason=f"extend_hop{hop}:{e}")
+                raise
+
+        # ---- 全部完成：写最终 paths + circuits 成功 ----
+
+        guard_fp = circuit.circuit_nodes[0].fingerprint_str
+        exit_fp = circuit.circuit_nodes[-1].fingerprint_str
+
+        # 收集所有 middle（可能有多个）
+        middles = [n.fingerprint_str for n in circuit.circuit_nodes[1:-1]]
+        middle_str = ";".join(middles) if middles else None
+
+        # 写 path 日志
+        self._path(client=self.name, guard=guard_fp ,middle=middle_str, exit=exit_fp, wg=1.0, we=1.0, consensus_id=snap["consensus_id"])
+
+        # 写 circuit 日志
+        self._circuit(circ_id=f"{self.name}:{circuit.id}", client=self.name, guard=guard_fp, middle=middle_str, exit=exit_fp, build_ms=(time.perf_counter() - t0_total) * 1000.0, success=True)
 
         return circuit
 
@@ -146,12 +202,24 @@ class Tor_Client(Tor_base):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.set_end(cell)
             data = await stream.recv(2048)
+            # === 新增：结束 stream 并写日志 ===
+            stream_uid = self._sid2uid.pop(origin_cell.stream_id, None)
+            if stream_uid:
+                rec = self.stream_tracker.end(stream_uid)
+                if rec:
+                    self._stream(**rec)  # 写入 streams.jsonl（或 flows.jsonl 兼容别名）
             self.print("final data: ", data)
         elif isinstance(cell, CellRelayData):
             self.print("cell data: ", cell.data)
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.append(cell.data)
             stream.window.deliver_dec()
+
+            # === 新增：记录首包与累计字节 ===
+            stream_uid = self._sid2uid.get(origin_cell.stream_id)
+            if stream_uid:
+                self.stream_tracker.on_down_chunk(stream_uid, nbytes=len(cell.data))
+
             if stream.window.need_sendme():
                 sendme_cell = stream.make_relay(CellRelaySendMe(circuit_id=cell.circuit_id))
                 socket = self.socket_map.get(self.guard.addr, None)

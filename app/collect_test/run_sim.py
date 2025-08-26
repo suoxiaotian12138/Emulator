@@ -18,10 +18,17 @@ loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(
 ))
 
 
-async def register_all_guards(guard_configs):
+async def register_all_guards(guard_configs, bus_factory):
     guards = []
     for name, ip, port, role, flags in guard_configs:
         guard = Tor_Node(name, ip, port, flags)
+
+        guard.attach_bus(bus_factory(name, role.lower()))
+        # 可选：让节点内部也能直接写 JSONL（方便你在类里调用）
+        guard.emit = guard.event_bus.emit  # 或者 writer.emit_nowait
+        # <<< NEW
+
+
         guards.append(guard)
 
     # 启动所有guard但不等待完成
@@ -55,8 +62,21 @@ async def main():
 
     ]
 
+    # >>> NEW: 启动一个进程级日志写手 + 资源探针
+    writer = AsyncJsonlWriter(out_dir="exp/logs", rotate_mb=100, batch_size=200, flush_every_ms=100)
+    writer.start()
+    # 进程级资源探针：只开一次（CPU/内存/FD/loop lag）
+    probe_task = asyncio.create_task(resource_probe(
+        node_id="proc:nodes", role="relay-proc",
+        emit=writer.emit_nowait, interval_s=1.0, lag_tick_ms=100
+    ))
+
+    # 给每个节点创建自己的 bus（node_id=节点名、role=guard/middle/exit）
+    def bus_factory(node_name: str, role: str) -> EventBus:
+        return EventBus(writer.emit_nowait, node_id=node_name, role=role)
+
     # 注册所有 guard
-    await register_all_guards(guard_configs)
+    await register_all_guards(guard_configs, bus_factory)
 
     try:
         await asyncio.sleep(30000)

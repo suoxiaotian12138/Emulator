@@ -5,8 +5,10 @@ from typing import Literal
 
 import socket
 import asyncio
+from typing import Optional
 
 from tools.Log.LogPrinter import LogPrinter
+from tools.Log.bus import EventBus, NoOpBus, GlobalBus
 from tools.Packet.packet_TCP import accept_tls_connections, TLSConnector
 from tools.Crypt.key_generator import create_server_context, ed25519_setup, rsa_setup, generate_cert_and_key_from_ed25519, generate_tls_rsa_cert
 
@@ -48,6 +50,23 @@ class Tor_base:
         # Unified log output format
         printer = LogPrinter(name)
         self.print = printer.print
+
+        # 默认给 NoOpBus，确保永不为 None（零侵入调用）
+        self.event_bus: EventBus | NoOpBus = NoOpBus()
+        # 绑定常用方法引用，减少属性查找开销（微优化）
+        self._ev = self.event_bus.ev
+        self._circuit = self.event_bus.circuit
+        self._path = self.event_bus.path
+        self._stream = self.event_bus.stream
+
+    def attach_bus(self, bus: Optional[EventBus]):
+        """在启动脚本里调用；忘记传就用全局默认。"""
+        self.event_bus = bus
+        # 重新绑定快捷引用（避免每次 getattr）
+        self._ev = bus.ev
+        self._circuit = bus.circuit
+        self._path = bus.path
+        self._stream = bus.stream
 
 
     def sign_message(self, private_key, message):

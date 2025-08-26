@@ -5,6 +5,7 @@ import time, hashlib
 from tools.Crypt.key_generator import curve25519_setup, ed25519_setup, rsa_setup
 from tools.Crypt.crypt_common import rsa_identity_digest
 from tools.Network_Management.DNSResolver import DNSResolver
+from tools.Log.utils import HopTimer, classify_exception, FailReason
 
 from examples.Tor_simplified.Tor_Cell import *
 from examples.Tor_simplified.Tor_base import Tor_base
@@ -50,6 +51,8 @@ class Tor_Node(Tor_base):
         self.dns_solver = DNSResolver(nameservers=["1.1.1.1", "8.8.8.8", "9.9.9.9"], timeout=1.5, lifetime=3.0)
         self._socket_locks = defaultdict(asyncio.Lock)
 
+        self._relay_bytes = {}  # key=(circ_id, stream_id, direction) -> {"bytes":0,"cells":0,"t0":mono_ns}
+        self._relay_flush_task = asyncio.create_task(self._flush_relay_agg())
 
     async def start_protocol(self):
         self.tasks['routing_task'] = asyncio.create_task(self.register_to_dire())
@@ -58,8 +61,12 @@ class Tor_Node(Tor_base):
         await asyncio.gather(*self.tasks.values())
 
     async def register_to_dire(self):
-        descriptor = self.generate_descriptor()
-        await self.upload_descriptor_to_dirserver(descriptor, self.dire_ip, self.dire_port)
+        try:
+            descriptor = self.generate_descriptor()
+            await self.upload_descriptor_to_dirserver(descriptor, self.dire_ip, self.dire_port)
+            self._ev("descriptor_upload_ok", url=f"{self.dire_ip}:{self.dire_port}", bytes=len(descriptor))
+        except Exception as e:
+            self._ev("descriptor_upload_fail", error=str(e))
 
     async def upload_descriptor_to_dirserver(self,
                                              descriptor_text: str,
@@ -113,8 +120,10 @@ class Tor_Node(Tor_base):
 
     async def create_circuit(self, create_cell, sock, circuit_id):
         """Quickly select several random nodes and freely add nodes, such as exit nodes"""
+        t0 = time.perf_counter()
         circuit = await self.circuit_list.create_circuit_server(circuit_id)
         created_cell = circuit.server_connected(self.protocol_version, create_cell, sock)
+        self._ev("circuit_server_connected", circ_id=circuit_id, peer=str(sock.socket.getpeername()), ms=(time.perf_counter()-t0)*1000.0)
         await sock.send_cell(created_cell)
         simple_node = Tor_Router_simple(sock)
         circuit.circuit_nodes.append(simple_node)
@@ -128,33 +137,50 @@ class Tor_Node(Tor_base):
         handshake_type = cell.finger_type
 
         sock = self.socket_map.get(addr, None)
-        self.print("socket_map", self.socket_map)
-
         if sock is None:
             lock = self._socket_locks[addr]
             async with lock:
-                # 再次检查是否已有连接（可能其他协程建好了）
                 sock = self.socket_map.get(addr, None)
                 if sock is None:
-                    sock = await Tor_Socket.dial(remote_addr=addr,
-                                                 source_ip=self.host,
-                                                 on_cell=self.handle_cell)
-                    print("build a new socket from: ", addr)
-                    self.socket_map[addr] = sock
-                    asyncio.create_task(self.handle_connection(addr, sock))
-                    await sock.listen_started.wait()
-                    await sock.tor_handshake_client()
+                    t_tls = time.perf_counter()
+                    try:
+                        sock = await Tor_Socket.dial(remote_addr=addr, source_ip=self.host, on_cell=self.handle_cell)
+                        print("build a new socket from: ", addr)
+                        self.socket_map[addr] = sock
+                        asyncio.create_task(self.handle_connection(addr, sock))
+                        await sock.listen_started.wait()
+                        self._ev("tls_handshake_done", peer=f"{ip}:{port}", side="client", ms=(time.perf_counter() - t_tls) * 1000.0)
+                    except Exception as e:
+                        self._ev("tls_handshake_fail", peer=f"{ip}:{port}", side="client", fail_reason=FailReason.TLS_FAIL.value, error=str(e), ms=(time.perf_counter() - t_tls) * 1000.0)
+                        raise
+
+                    # Tor 链路握手
+                    t_tor = time.perf_counter()
+                    try:
+                        await sock.tor_handshake_client()
+                        self._ev("tor_handshake_done", peer=f"{ip}:{port}", side="client", version=getattr(sock.protocol, "version", None), ms=(time.perf_counter() - t_tor) * 1000.0)
+                    except Exception as e:
+                        self._ev("tor_handshake_fail", peer=f"{ip}:{port}", side="client", fail_reason=FailReason.NTOR_FAIL.value, error=str(e), version=getattr(sock.protocol, "version", None), ms=(time.perf_counter() - t_tor) * 1000.0)
+                        raise
+
         await sock.handshake_done.wait()
 
         circuit = self.circuit_list.get_by_id(circuit_id)
-
         simple_node = Tor_Router_simple(sock)
-
         circuit.circuit_nodes.append(simple_node)
+
+        # 发送下游 CREATE2，计时并记录是否成功（下游会回 EXTENDED2）
         create2 = Cell_Create2(handshake_type=handshake_type, onion_skin=skin, circuit_id=circuit_id)
-
-        await sock.send_cell(create2)
-
+        t_ext = time.perf_counter()
+        try:
+            await sock.send_cell(create2)
+            self._ev("circuit_extend_downstream_sent",
+                     circ_id=circuit_id, target=f"{ip}:{port}")
+        except Exception as e:
+            self._ev("circuit_extend_downstream_fail",
+                     circ_id=circuit_id, target=f"{ip}:{port}", error=str(e),
+                     ms=(time.perf_counter() - t_ext) * 1000.0)
+            raise
 
     async def reply_extend(self, cell: CellCreated2):
         circuit_id = cell.circuit_id
@@ -172,7 +198,13 @@ class Tor_Node(Tor_base):
         if isinstance(cell, CellVersions):
             if not sock.handshake_initiator:
                 certs_cell = self.make_certs_cell()
-                await sock.tor_handshake_server(cell, certs_cell, self.cert_file)
+                t_tor = time.perf_counter()
+                try:
+                    await sock.tor_handshake_server(cell, certs_cell, self.cert_file)
+                    self._ev("tor_handshake_done",peer=str(sock.socket.getpeername()), side="server",version=getattr(sock.protocol, "version", None),ms=(time.perf_counter() - t_tor) * 1000.0)
+                except Exception as e:
+                    self._ev("tor_handshake_fail",peer=str(sock.socket.getpeername()), side="server",error=str(e),version=getattr(sock.protocol, "version", None),ms=(time.perf_counter() - t_tor) * 1000.0)
+                    raise
             else:
                 sock.protocol.version = sock.handshake.retrieve_versions(cell)
         elif isinstance(cell, CellCerts):
@@ -206,6 +238,7 @@ class Tor_Node(Tor_base):
             await self.handle_cell_relay(inner_cell, circuit, cell, sock)
         elif isinstance(cell, CellDestroy):
             circuit = self.circuit_list.get_by_id(cell.circuit_id)
+            self._ev("circuit_destroy_forwarded", circ_id=cell.circuit_id, from_side=("upstream" if sock == circuit.circuit_nodes[0].sock else "downstream"))
             if sock == circuit.circuit_nodes[0].sock:
                 next_hop_sock = circuit.circuit_nodes[-1].sock
             else:
@@ -264,11 +297,34 @@ class Tor_Node(Tor_base):
             stream.set_end(cell)
             data = await stream.recv(2048)
             print("final data: ", data)
+
+            key_up = (circuit.id, origin_cell.stream_id, "up")
+            key_dn = (circuit.id, origin_cell.stream_id, "down")
+            for k in (key_up, key_dn):
+                st = self._relay_bytes.pop(k, None)
+                if st:
+                    self._ev("relay_agg", circ_id=circuit.id, stream_id=origin_cell.stream_id,
+                             direction=k[2], bytes=st["bytes"], cells=st["cells"], interval_ms=None)
         elif isinstance(cell, CellRelayData):
             await self.handle_data_relay(circuit, cell, origin_cell, sock)
+
+            key = (circuit.id, origin_cell.stream_id, "down" if sock == circuit.circuit_nodes[0].sock else "up")
+            st = self._relay_bytes.get(key)
+            if not st:
+                st = self._relay_bytes[key] = {"bytes": 0, "cells": 0, "t0": time.monotonic_ns()}
+            st["bytes"] += len(cell.data)
+            st["cells"] += 1
         elif isinstance(cell, CellRelaySendMe):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.window.package_inc()
+
+            # 记录“收到 sendme”
+            cid = circuit.id
+            sid = origin_cell.stream_id
+            st = self._relay_agg.get((cid, sid))
+            if not st:
+                st = self._relay_agg[(cid, sid)] = {"up_bytes": 0, "up_cells": 0, "down_bytes": 0, "down_cells": 0, "sendme_sent": 0, "sendme_recv": 0, "last_win": None}
+            st["sendme_recv"] = st.get("sendme_recv", 0) + 1
 
     async def handle_data_relay(self, circuit, cell, origin_cell, sock):
         stream = circuit.streams.get_by_id(origin_cell.stream_id)
@@ -328,8 +384,14 @@ class Tor_Node(Tor_base):
                 await sock.send_cell(rc)
 
     async def resolve_ipv4_async(self, domain: str) -> str:
-        ip = await self.dns_solver.resolve_ipv4(domain)
-        return ip
+        t0 = time.perf_counter()
+        try:
+            ip = await self.dns_solver.resolve_ipv4(domain)
+            self._ev("dns_resolve_ok", domain=domain, ip=ip, ms=(time.perf_counter() - t0) * 1000.0)
+            return ip
+        except Exception as e:
+            self._ev("dns_resolve_fail", domain=domain,fail_reason=FailReason.UNREACHABLE.value, error=str(e), ms=(time.perf_counter() - t0) * 1000.0)
+            raise
 
     async def close_stream(self, stream):
         items = self.socket_map.items()
@@ -376,9 +438,6 @@ class Tor_Node(Tor_base):
         )
         # 4) type 2  RSA ID X.509
         cert2 = rsa_identity_x509_der(self.rsa_id_sk)  # 直接 DER
-
-
-
         return CellCerts([
             (CT_RSA_ID_X509, cert2),
             (CT_ED_ID_SIGNING, cert4),
@@ -386,3 +445,22 @@ class Tor_Node(Tor_base):
             (CT_RSA_TO_ED_CROSS, cert7),
         ])
 
+    async def _flush_relay_agg(self, interval_ms: int = 500):
+        try:
+            while True:
+                await asyncio.sleep(interval_ms / 1000)
+                current, self._relay_agg = self._relay_agg, {}
+                for (cid, sid), st in current.items():
+                    # 上下行分两条写，便于画双向曲线
+                    if st.get("up_cells", 0) or st.get("up_bytes", 0):
+                        self._ev("relay_agg", circ_id=cid, stream_id=sid, direction="up",
+                                 bytes=st.get("up_bytes", 0), cells=st.get("up_cells", 0),
+                                 sendme_sent=st.get("sendme_sent", 0), sendme_recv=st.get("sendme_recv", 0),
+                                 win_cur=st.get("last_win", None), sample_ms=interval_ms)
+                    if st.get("down_cells", 0) or st.get("down_bytes", 0):
+                        self._ev("relay_agg", circ_id=cid, stream_id=sid, direction="down",
+                                 bytes=st.get("down_bytes", 0), cells=st.get("down_cells", 0),
+                                 sendme_sent=st.get("sendme_sent", 0), sendme_recv=st.get("sendme_recv", 0),
+                                 win_cur=st.get("last_win", None), sample_ms=interval_ms)
+        except asyncio.CancelledError:
+            pass  # 正常退出

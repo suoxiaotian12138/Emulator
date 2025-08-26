@@ -7,6 +7,8 @@ from stem.descriptor.server_descriptor import RelayDescriptor
 import aiohttp, asyncio, random, base64, binascii
 from typing import Optional, List, Dict
 from datetime import datetime
+import hashlib, time, statistics
+from typing import Optional, List, Dict
 
 # class Tor_Consensus:
 #     def __init__(self, model, dire_ip='192.168.66.241', dire_port=9030) -> None:
@@ -148,6 +150,12 @@ class Tor_Consensus:
         self._session: aiohttp.ClientSession | None = None      # ★ 持久化 session
         self.fetch_consensus, self.fetch_descriptor = self.setup_model(model)
         self.relays: Optional[List[Dict]] = None
+        # === NEW: 元数据（仅存储，不做日志） ===
+        self.model = model
+        self.consensus_id: Optional[str] = None  # 稳定ID
+        self.fetched_at: Optional[float] = None  # time.time()
+        self.meta: Dict = {}  # 摘要统计（数量/旗标/带宽）
+        # （real 模式下你可以后续再填 valid_after/valid_until）
 
     def setup_model(self, model):
         if model == 'real':
@@ -181,8 +189,12 @@ class Tor_Consensus:
 
     # ---------- 外部入口 ----------
     async def consus_init_async(self):
-        """异步拉取共识并解析。"""
+        """异步拉取共识并解析。【轻改动】填充 consensus_id/meta，但不做日志。"""
         self.relays = await self.fetch_consensus()
+        # NEW: 拉取成功后生成 ID/摘要
+        self.fetched_at = time.time()
+        self.consensus_id = self._compute_consensus_id(self.relays, self.model, self.dire_ip, self.dire_port)
+        self.meta = self._summarize_relays(self.relays)
 
     # ---------- SIM model ----------
     async def _fetch_consensus_sim(self):
@@ -283,6 +295,59 @@ class Tor_Consensus:
     def get_random_exit_node(self, exclude=None):
         flags = ['Exit', 'Fast', 'Running', 'Valid']
         return self.get_random_router(flags=flags, exclude=exclude)
+
+    @staticmethod
+    def _compute_consensus_id(relays: List[Dict], model: str, dire_ip: str, dire_port: int) -> str:
+        fps = [r.get("fingerprint", "") for r in relays]
+        fps = [fp.upper() for fp in fps if fp]  # 统一 HEX 大写
+        fps.sort()
+        base = f"{model}|{dire_ip}:{dire_port}|{','.join(fps)}"
+        return hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]  # 取前16位即可
+
+    # === NEW: 做一个很轻的摘要，便于写到 paths/circuits 里当标签或供分析使用 ===
+    @staticmethod
+    def _summarize_relays(relays: List[Dict]) -> Dict:
+        n = len(relays)
+        flags_count = {"Guard": 0, "Exit": 0, "Fast": 0, "Running": 0, "Valid": 0}
+        bw = []
+        for r in relays:
+            rf = r.get("flags", [])
+            for f in flags_count.keys():
+                if f in rf: flags_count[f] += 1
+            if "bandwidth" in r and isinstance(r["bandwidth"], int):
+                bw.append(r["bandwidth"])
+        bw_stats = {}
+        if bw:
+            # 注意：statistics.quantiles 默认等分；这里只要中位数就行
+            try:
+                p50 = statistics.median(bw)
+            except Exception:
+                p50 = None
+            bw_stats = {"count": len(bw), "mean": statistics.fmean(bw), "p50": p50,
+                        "min": min(bw), "max": max(bw)}
+        return {"count": n, "flags": flags_count, "bandwidth": bw_stats}
+
+    # === NEW: 对外快照接口（client 用这个拿到 id+摘要） ===
+    def get_consensus_snapshot(self) -> Dict:
+        """
+        返回 {'consensus_id', 'fetched_at', 'meta', 'dire', 'model'}
+        （纯数据，不做任何日志/副作用）
+        """
+        return {
+            "consensus_id": self.consensus_id,
+            "fetched_at": self.fetched_at,
+            "meta": self.meta,
+            "dire": f"{self.dire_ip}:{self.dire_port}",
+            "model": self.model,
+        }
+
+    # === NEW: 可选的“按TTL刷新”接口（你愿意再用，不用也行；不写日志） ===
+    def should_refresh(self, ttl_sec: int = 3600) -> bool:
+        return (self.fetched_at is None) or (time.time() - self.fetched_at >= ttl_sec)
+
+    async def refresh_if_needed(self, ttl_sec: int = 3600):
+        if self.should_refresh(ttl_sec):
+            await self.consus_init_async()
 
 
 def split_tor_descriptors(text: str) -> list[str]:
