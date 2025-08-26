@@ -8,7 +8,7 @@ from tools.Log.bus import EventBus
 from tools.Log.resources import resource_probe
 
 if sys.platform.startswith("win"):
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 MAX_TLS_THREADS = 128
 loop = asyncio.get_event_loop()
