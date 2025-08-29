@@ -58,7 +58,7 @@ class Tor_Stream:
         self.data_event = asyncio.Event()
         self._received_callbacks = []
 
-        self._conn_timeout = 30
+        self._conn_timeout = 60
         self._recv_timeout = 60
 
         self._state = StreamState.Closed
@@ -66,7 +66,7 @@ class Tor_Stream:
 
         self.window = TorWindow(start=500, increment=50)
 
-        self.connect_event = self._make_new_event()
+        self.connect_event = asyncio.Event()
 
         self._buffer = bytearray()
         self._mode = None  # None | 'http-tunnel' | 'tls-tunnel' | 'connect-tunnel'
@@ -111,8 +111,10 @@ class Tor_Stream:
 
     async def wait_connect_ack(self):
         try:
+            # 已经 set 过就立刻返回；否则等到 _conn_timeout
+            if self.connect_event.is_set():
+                return
             await asyncio.wait_for(self.connect_event.wait(), self._conn_timeout)
-            self.connect_event = self._make_new_event()
         except asyncio.TimeoutError:
             raise TimeoutError("Timed out waiting for CONNECT ACK")
 

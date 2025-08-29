@@ -4,10 +4,16 @@ import sys, contextlib
 from typing import Dict, Tuple, Callable
 from typing import Optional
 from tools.Crypt.serialization import decode
-import asyncio
-import socket
-from ssl import SSLWantReadError, SSLWantWriteError
+
 import errno, ssl
+import asyncio, ssl, socket, time
+from typing import Callable, Tuple, Optional
+
+from tools.Network_Management.tls_registry import (
+    get_server_ctx, get_client_ctx,
+    get_global_sem, get_node_sem,
+)
+
 
 class ByteBuffer:
     """
@@ -24,7 +30,7 @@ class ByteBuffer:
         """Append raw data and notify waiting consumers."""
         async with self.condition:
             self.buffer.extend(data)
-            print(f"[BufferAdd] {len(data)} bytes added, total={len(self.buffer)}")
+            # print(f"[BufferAdd] {len(data)} bytes added, total={len(self.buffer)}")
             self.condition.notify_all()
 
     async def extract_by_head(self):
@@ -381,98 +387,94 @@ class _DummyProto(asyncio.Protocol):
         pass
 
 
+
 class TLSConnector:
-    def __init__(
-            self,
-            certfile: str = "cert.pem",
-            keyfile: str = "key.pem",
-            max_concurrent_tls: int = 2000,
-            handshake_timeout: float = 15.0,  # 适当提高超时
-    ):
-        self.semaphore = asyncio.Semaphore(max_concurrent_tls)
+    """保留作配置容器（兼容旧调用）；上下文/并发控制交给 tls_registry。"""
+    def __init__(self,
+                 certfile: str = "cert.pem",
+                 keyfile: str = "key.pem",
+                 max_concurrent_tls: int = 2000,   # 仅作信息参考；不在此处限流
+                 handshake_timeout: float = 15.0):
+        self.certfile = certfile
+        self.keyfile = keyfile
         self.handshake_timeout = handshake_timeout
-        self.ssl_context = self.make_ssl_context(certfile, keyfile)
-        self.python_version = sys.version_info
 
-    def make_ssl_context(self, certfile: str, keyfile: str) -> ssl.SSLContext:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.set_ciphers("ALL:@SECLEVEL=1")
-        ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
-        return ctx
-
-    async def wrap_tls_async(self, raw_sock: socket.socket, addr):
-        timeout = min(self.handshake_timeout, 15.0)
-        addr_str = f"{addr[0]}:{addr[1]}"
-
-        async with self.semaphore:
-            try:
-                loop = asyncio.get_running_loop()
-                raw_sock.setblocking(False)
-
-                # 1️⃣ 先把 raw_sock 变成 transport，但立即暂停读取
-                dummy_proto = _DummyProto()
-                transport, _ = await loop.create_connection(
-                    lambda: dummy_proto, sock=raw_sock
-                )
-
-                # 2️⃣ 做 TLS 握手（transport 仍然暂停，不会漏包）
-                tls_transport = await asyncio.wait_for(
-                    loop.start_tls(
-                        transport, dummy_proto,
-                        sslcontext=self.ssl_context,
-                        server_side=True,
-                        ssl_handshake_timeout=timeout,
-                    ),
-                    timeout,
-                )
-
-                # 3️⃣ 握手成功 → 切换到 StreamReaderProtocol 并恢复读取
-                reader = asyncio.StreamReader()
-                stream_proto = asyncio.StreamReaderProtocol(reader)
-                tls_transport.set_protocol(stream_proto)
-                tls_transport.resume_reading()  # ⬅ 重新打开水龙头
-
-                writer = asyncio.StreamWriter(tls_transport, stream_proto, reader, loop)
-                return reader, writer
-
-            except Exception:
-                raw_sock.close()
-                raise
 
 async def accept_tls_connections(
-        listener_sock: socket.socket,
-        tls_connector: TLSConnector,
-        on_accept: Callable[[asyncio.StreamReader,  asyncio.StreamWriter, tuple[str, int]], None]
-):
-    """
-    使用完全异步的方式接收和处理TLS连接
-    """
+    listener_sock: socket.socket,
+    tls_connector: TLSConnector,
+    on_accept: Callable[[asyncio.StreamReader, asyncio.StreamWriter, tuple[str,int]], None],
+    *,
+    node_id: str,
+    on_server_ready=None
+) -> None:
     loop = asyncio.get_running_loop()
+    handshake_timeout = getattr(tls_connector, "handshake_timeout", 15.0)
 
-    async def handle_connection(raw_sock, addr):
-        try:
-            loop = asyncio.get_running_loop()
-            print(f"[DEBUG] Event loop type: {type(loop)}")
-            # 使用异步TLS握手，传入addr避免后续getpeername问题
-            print(f"[ACCEPT] raw connection from {addr} at {time.time():.2f}")
-            reader, writer = await tls_connector.wrap_tls_async(raw_sock, addr)
-            print(f"[ACCEPT] TLS handshake completed for {addr} at {time.time():.2f}")
+    if sys.platform.startswith("win"):
+        # Windows: 不要 start_tls，直接交给 asyncio TLS
+        server = await asyncio.start_server(
+            on_accept,
+            sock=listener_sock,
+            ssl=get_server_ctx(node_id),
+            ssl_handshake_timeout=handshake_timeout,
+            backlog=2048
+        )
+    else:
+        # Linux/macOS: 先明文 accept，再 start_tls 升级
+        async def plain_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            transport = writer.transport
+            transport.pause_reading()
+            try:
+                async with get_global_sem(), get_node_sem(node_id):
+                    tls_transport = await loop.start_tls(
+                        transport, writer._protocol,
+                        sslcontext=get_server_ctx(node_id),
+                        server_side=True,
+                        ssl_handshake_timeout=handshake_timeout,
+                    )
+            except Exception as e:
+                transport.close()
+                return
 
-            on_accept(reader, writer, addr)  # ⬅ 传 reader / writer
+            reader2 = asyncio.StreamReader(limit=64*1024)  # ★ buffer 提大
+            proto2  = asyncio.StreamReaderProtocol(reader2)
+            tls_transport.set_protocol(proto2)
+            tls_transport.resume_reading()
+            writer2 = asyncio.StreamWriter(tls_transport, proto2, reader2, loop)
 
-        except Exception as e:
-            print(f"[AsyncTLS] TLS handshake failed for {addr}: {e}")
+            peer = tls_transport.get_extra_info("peername")
+            on_accept(reader2, writer2, peer)
 
-    while True:
-        try:
-            raw_sock, addr = await loop.sock_accept(listener_sock)
-            # 创建任务处理连接，但不等待
-            asyncio.create_task(handle_connection(raw_sock, addr))
-        except Exception as e:
-            print(f"[AsyncTLS] Accept error: {e}")
-            await asyncio.sleep(0.1)
+        server = await asyncio.start_server(plain_handler, sock=listener_sock, backlog=2048)
+    if on_server_ready:
+        on_server_ready()
+    async with server:
+        await server.serve_forever()
 
+# —— 出站：统一拨号 + 受限握手
+async def dial_tls(
+    remote_addr: tuple[str, int],
+    *,
+    source_ip: str | None = None,
+    node_id: str | None = None,
+    timeout: float = 15.0,
+):
+    ctx = get_client_ctx()
+    nid = node_id or source_ip or "default"
 
+    async with get_global_sem(), get_node_sem(nid):
+        reader, writer = await asyncio.open_connection(
+            remote_addr[0], remote_addr[1],
+            ssl=ctx,
+            server_hostname=None,
+            ssl_handshake_timeout=timeout,
+            local_addr=(source_ip, 0) if source_ip else None
+        )
+    ssl_obj = writer.get_extra_info("ssl_object")
+    if ssl_obj:
+        print(f"[dial_tls] {remote_addr} -> TLS {ssl_obj.version()} {ssl_obj.cipher()}")
+    return reader, writer
 
 async def monitor_connection_tls(
     conn: socket.socket,
@@ -516,6 +518,9 @@ async def monitor_connection_tls(
         with contextlib.suppress(Exception):
             conn.shutdown(socket.SHUT_RDWR)
         conn.close()
+
+
+
 
 
 
@@ -566,4 +571,5 @@ async def recv_any(loop: asyncio.BaseEventLoop, sock: socket.socket, nbytes: int
             finally:
                 sock.setblocking(blocking)
         return await loop.run_in_executor(None, _blocking_recv)
+
 

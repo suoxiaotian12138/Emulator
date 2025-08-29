@@ -7,7 +7,8 @@ from tools.Log.bus import EventBus
 from tools.Log.resources import resource_probe
 # <<< NEW
 
-
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 async def main():
     loop = asyncio.get_running_loop()
@@ -25,7 +26,7 @@ async def main():
     os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
 
     total_batches = 1
-    clients_per_batch = 1000
+    clients_per_batch = 4000
     delay_between_batches = 20
 
     # >>> NEW: 进程级日志写手 + 资源探针（只开一次）
@@ -56,7 +57,7 @@ async def main():
         for _ in range(clients_per_batch):
             name = f"client{client_index}"
             port = 9102 + client_index
-            client = Tor_Client(name=name, host="192.168.66.242", port=port, model='sim')
+            client = Tor_Client(name=name, host="192.168.66.245", port=port, model='sim')
 
             # >>> NEW: 挂事件总线，类内部就能随时埋点
             client.attach_bus(bus_factory(name))
@@ -71,6 +72,8 @@ async def main():
         # 启动协议任务
         for client in batch_clients:
             asyncio.create_task(client.start_protocol())
+
+        await asyncio.gather(*(g.listener_ready.wait() for g in batch_clients))
 
         # 发流
         print(f"[Main] Sending streams for batch {batch + 1}...")

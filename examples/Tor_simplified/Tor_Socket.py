@@ -1,26 +1,20 @@
 import asyncio
-import socket
 import ssl
 import struct
-from contextlib import suppress
-from typing import Tuple
 import time
-import hashlib
-import os
 import contextlib
 from pathlib import Path
 from typing import Optional, Callable, Awaitable
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
-from tools.Packet.packet_TCP import send_tcp, ByteBuffer, monitor_connection_tls
 
 
 from examples.Tor_simplified.Tor_Cell import TorCell, CellCerts, CellAuthChallenge, TorCommands,\
     CellVersions, CellNetInfo, AUTH_METHOD_ED25519_SHA256, CellAuthenticate
 from examples.Tor_simplified.Tor_Router import logger
-
-from tools.Packet.packet_TCP import send_any
+from tools.Packet.packet_TCP import ByteBuffer
+from tools.Packet.packet_TCP import dial_tls
 from tools.Crypt.crypt_common import (
     rsa_identity_digest,
     debug_build_crosscert,
@@ -28,10 +22,13 @@ from tools.Crypt.crypt_common import (
     CT_RSA_TO_ED_CROSS
 )
 
-
+from tools.Network_Management.tls_registry import (
+    get_client_ctx, get_global_sem, get_node_sem
+)
+_TLS_HANDSHAKE_SEM = asyncio.Semaphore(64)
 
 class Tor_Socket():
-    def __init__(self,  source_ip: str, reader: asyncio.StreamReader = None, writer: asyncio.StreamWriter=None, on_cell=None):
+    def __init__(self,  source_ip: str, node_id: Optional[str],  reader: asyncio.StreamReader = None, writer: asyncio.StreamWriter=None, on_cell=None):
         self.protocol = TorProtocol()
         self._send_lock = asyncio.Lock()
         self.handshake = TorHandshake(self)
@@ -40,6 +37,7 @@ class Tor_Socket():
         self.on_cell: Optional[Callable[[TorCell, Tor_Socket], Awaitable[None]]] = on_cell
         self.handshake_initiator = False
         self.source_ip = source_ip
+        self.node_id = node_id
         self.handshake_done = asyncio.Event()
         self.listen_started = asyncio.Event()
         self._closing = asyncio.Event()
@@ -49,8 +47,10 @@ class Tor_Socket():
         self.reader: Optional[asyncio.StreamReader] = reader
         self.writer: Optional[asyncio.StreamWriter] = writer
 
-        # 客户端连接的并发控制
-        self._dial_semaphore = asyncio.Semaphore(500)
+        self._q_ctrl = asyncio.Queue()  # 控制面队列（自动优先）
+        self._q_data = asyncio.Queue()  # 数据面队列
+        self._wakeup = asyncio.Event()  # 有新数据时唤醒 writer
+        self._writer_task = None
 
         if self.reader is not None:
             # 被动连接，已经有SSL socket
@@ -70,43 +70,74 @@ class Tor_Socket():
             self.peer_str = "not_connected"
 
     async def setup_socket(self, remote_addr: tuple[str, int]):
-        # 兼容旧调用：直接用 dial 构造一个新实例并把数据搬过来
-        tmp = await Tor_Socket.dial(remote_addr,
-                                    source_ip=self.source_ip,
-                                    on_cell=self.on_cell,
-                                    sem=self._dial_semaphore)
-        # 把 dial 回来的 reader / writer / socket 等拷贝到 self
-        self.reader, self.writer = tmp.reader, tmp.writer
-        self.socket = tmp.socket
-        self.peer = tmp.peer
-        self.peer_str = tmp.peer_str
+        """通过 tools.dial_tls 拿到 (reader, writer)，保持分层。"""
+        reader, writer = await dial_tls(
+            remote_addr,
+            source_ip=self.source_ip,
+            node_id=self.node_id,
+            timeout=15.0
+        )
+        # 搬运
+        self.reader, self.writer = reader, writer
+        self.transport = writer.transport
+        self.socket = self.transport.get_extra_info("socket")
+        self.peer = self.transport.get_extra_info("peername")
+        self.peer_str = f"{self.peer[0]}:{self.peer[1]}"
         self.local = self.writer.get_extra_info("sockname")
         self.local_str = f"{self.local[0]}:{self.local[1]}"
         self.handshake_initiator = True
+
+    # @classmethod
+    # async def dial(cls, remote_addr: tuple[str, int],
+    #                source_ip: str,
+    #                on_cell,
+    #                sem: asyncio.Semaphore | None = None,
+    #                ssl_ctx: ssl.SSLContext | None = None):
+    #     ssl_ctx = ssl_ctx or _default_client_ctx()
+    #     if sem is None:
+    #         sem = asyncio.Semaphore(200)
+    #     async with sem:                    # 并发限流
+    #         print(f"[CLIENT] dial_tls to {remote_addr} from {source_ip}")
+    #
+    #         reader, writer = await asyncio.open_connection(
+    #             remote_addr[0], remote_addr[1],
+    #             ssl=ssl_ctx,
+    #             ssl_handshake_timeout=15.0,
+    #             local_addr=(source_ip, 0) if source_ip else None
+    #         )
+    #         print(f"[CLIENT] tls handshake completed for {remote_addr}")
+    #
+    #     # 用已有 reader / writer 来构造对象
+    #     self = cls(source_ip=source_ip, reader=reader, writer=writer, on_cell=on_cell)
+    #     self.handshake_initiator = True
+    #     return self
+
     @classmethod
     async def dial(cls, remote_addr: tuple[str, int],
                    source_ip: str,
                    on_cell,
-                   sem: asyncio.Semaphore | None = None,
-                   ssl_ctx: ssl.SSLContext | None = None):
-        ssl_ctx = ssl_ctx or _default_client_ctx()
-        if sem is None:
-            sem = asyncio.Semaphore(200)
-        async with sem:                    # 并发限流
-            print(f"[CLIENT] dial_tls to {remote_addr} from {source_ip}")
-
-            reader, writer = await asyncio.open_connection(
-                remote_addr[0], remote_addr[1],
-                ssl=ssl_ctx,
-                ssl_handshake_timeout=15.0,
-                local_addr=(source_ip, 0) if source_ip else None
-            )
-            print(f"[CLIENT] tls handshake completed for {remote_addr}")
-
-        # 用已有 reader / writer 来构造对象
-        self = cls(source_ip=source_ip, reader=reader, writer=writer, on_cell=on_cell)
+                   sem: asyncio.Semaphore | None = None,          # 仍保留参数以兼容旧调用（不使用）
+                   ssl_ctx: ssl.SSLContext | None = None,          # 兼容位（不使用）
+                   node_id: Optional[str] = None):                 # ★ 新增：显式传 node_id 更稳妥
+        reader, writer = await dial_tls(
+            remote_addr,
+            source_ip=source_ip,
+            node_id=node_id,
+            timeout=15.0
+        )
+        self = cls(source_ip=source_ip, reader=reader, writer=writer, on_cell=on_cell, node_id=node_id)
         self.handshake_initiator = True
+        try:
+            self.transport = writer.transport
+            self.socket = self.transport.get_extra_info("socket")
+            self.peer = self.transport.get_extra_info("peername")
+            self.peer_str = f"{self.peer[0]}:{self.peer[1]}"
+            self.local = self.socket.getsockname()
+            self.local_str = f"{self.local[0]}:{self.local[1]}"
+        except Exception:
+            pass
         return self
+
     async def send(self, buf: bytes):
         """异步发送数据"""
         if self._closing.is_set():
@@ -145,19 +176,34 @@ class Tor_Socket():
         self.writer = None
 
     async def start_listen(self) -> asyncio.Task:
-        """启动监听任务"""
         if self.reader is None or self.writer is None:
             raise RuntimeError("Streams not set; call setup_socket_async() first or wait for setup completion")
 
         loop = asyncio.get_running_loop()
-
-        # 创建异步接收任务
         self._recv_task = loop.create_task(self._async_recv_loop())
         self._process_task = loop.create_task(self._process_loop())
-        self._handle_task = loop.create_task(self._monitor_handle())
+
+        self._writer_task = loop.create_task(self._writer_loop())
+
+        async def _join_and_cleanup():
+            try:
+                await asyncio.wait(
+                    [self._recv_task, self._process_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                await self._abort()
+                for t in (self._recv_task, self._process_task):
+                    with contextlib.suppress(Exception):
+                        t.cancel()
+                if self._writer_task:
+                    with contextlib.suppress(Exception):
+                        self._writer_task.cancel()
+                self.print(f"[CLOSE-{'CLI' if self.handshake_initiator else 'SRV'}]"
+                           f" {self.source_ip} <---> {self.peer_str}")
 
         self.listen_started.set()
-        return self._handle_task
+        return loop.create_task(_join_and_cleanup())
 
     async def _async_recv_loop(self):
         """完全异步的接收循环，使用更大的缓冲区"""
@@ -188,22 +234,7 @@ class Tor_Socket():
         finally:
             await self._abort()
 
-    async def _monitor_handle(self):
-        """监控任务完成情况"""
-        try:
-            await asyncio.wait(
-                [self._recv_task, self._process_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-        finally:
-            await self._abort()
-            # 取消其他任务
-            for task in (self._recv_task, self._process_task):
-                with contextlib.suppress(Exception):
-                    task.cancel()
 
-            self.print(f"[CLOSE-{'CLI' if self.handshake_initiator else 'SRV'}]"
-                       f" {self.source_ip} <---> {self.peer_str}")
 
     async def _process_loop(self):
         """处理接收到的数据"""
@@ -222,12 +253,10 @@ class Tor_Socket():
     async def tor_handshake_client(self):
         version_cell = self.handshake.make_versions()
         await self.send_cell(version_cell)
-        print(self.peer)
         net_info_cell = await self.handshake.make_net_info(self.peer, self.local)
         await self.send_cell(net_info_cell)
 
         self.handshake_done.set()
-        print("handshake has done")
 
     async def tor_handshake_server(self, peer_version_cell: CellVersions, certs_cell, certs_path):
         version_cell = self.handshake.make_versions()
@@ -243,14 +272,115 @@ class Tor_Socket():
         await self.send_cell(net_info_cell)
 
     async def send_cells(self, cells):
+        if not cells:
+            return
+        ba = bytearray()
+        ser = self.protocol.serialize
         for cell in cells:
-            await self.send_cell(cell)
+            ba.extend(ser(cell))
+        await self.send(bytes(ba))  # send() 内部只 drain 一次
 
     async def send_cell(self, cell):
-        print(self.source_ip, "send cell:", self.peer, cell)
-        buffer = self.protocol.serialize(cell)
-        print("send cell content:", buffer)
-        await self.send(buffer)
+        if self._closing.is_set():
+            # 不再把上层炸掉；记录并忽略（统一由 _abort 管生命周期）
+            self.print(f"[SendDrop] closed: {self.peer_str} {cell}")
+            return
+        buf = self.protocol.serialize(cell)
+        # 自动分类
+        if self._is_control_cell(cell):
+            await self._q_ctrl.put(buf)
+        else:
+            await self._q_data.put(buf)
+        self._wakeup.set()
+
+    def _is_control_cell(self, cell) -> bool:
+        # —— 按 Tor 语义把“握手/控制/建立/关闭/流控”都算控制面 ——
+        from examples.Tor_simplified.Tor_Cell import (
+            CellVersions, CellCerts, CellAuthChallenge, CellNetInfo,
+            Cell_Create2, CellCreated2,
+            CellRelayExtend2, CellRelayExtended2,
+            CellRelayBegin, CellRelayConnected, CellRelayEnd,
+            CellRelaySendMe, CellDestroy,
+            Cell_RelayEarly, CellRelay  # 用于判断内部类型
+        )
+
+        # 1) link-level
+        if isinstance(cell, (CellVersions, CellCerts, CellAuthChallenge, CellNetInfo, CellDestroy)):
+            return True
+
+        # 2) circuit 建立/扩展
+        if isinstance(cell, (Cell_Create2, CellCreated2, CellRelayExtend2, CellRelayExtended2, Cell_RelayEarly)):
+            return True
+
+        # 3) 流建立/关闭/流控
+        if isinstance(cell, (CellRelayBegin, CellRelayConnected, CellRelayEnd, CellRelaySendMe)):
+            return True
+
+        # 4) 其他 Relay：
+        #    只有“纯数据”才算数据面。若是 CellRelay，但 inner 是 Data 以外，也归控制面。
+        try:
+            # 你自己的 CellRelay 类型里应能区分 inner 类型；保守起见：
+            return getattr(cell, "is_data", False) is False
+        except Exception:
+            return False
+
+    async def _writer_loop(self):
+        loop = asyncio.get_running_loop()
+        try:
+            while not self._closing.is_set():
+                # 等待有数据
+                if self._q_ctrl.empty() and self._q_data.empty():
+                    self._wakeup.clear()
+                    try:
+                        await asyncio.wait_for(self._wakeup.wait(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+
+                # 优先把控制面取空（微批窗口：例如 200 微秒）
+                out = bytearray()
+                t0 = loop.time()
+                ctrl_count = 0
+                while not self._q_ctrl.empty():
+                    out.extend(await self._q_ctrl.get())
+                    ctrl_count += 1
+                    # 微批：给极短时间让同阶段的几个包入队
+                    if (loop.time() - t0) > 0.0002 or ctrl_count >= 8:
+                        break
+                # 如果刚刚发了控制面，立即冲刷（保证握手/控制低延迟）
+                if out:
+                    await self._write_once(bytes(out))
+                    continue
+
+                # 否则处理数据面：较大窗口合并（例如 2ms / 64KB / 128 cells）
+                out.clear()
+                t0 = loop.time()
+                total = 0
+                cells = 0
+                while not self._q_data.empty():
+                    buf = await self._q_data.get()
+                    out.extend(buf)
+                    total += len(buf)
+                    cells += 1
+                    if (loop.time() - t0) > 0.002 or total >= 64 * 1024 or cells >= 128:
+                        break
+                if out:
+                    await self._write_once(bytes(out))
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self.print(f"[WriterLoopErr] {self.peer_str} {e}")
+        finally:
+            await self._abort()
+
+    async def _write_once(self, blob: bytes):
+        if self._closing.is_set() or self.writer is None:
+            return
+        try:
+            self.writer.write(blob)
+            await self.writer.drain()
+        except Exception as e:
+            self.print(f"[WriteErr] {self.peer_str} {e}")
+            await self._abort()
 
     async def _wait_for_bytes(self, size: int, consume: bool) -> bytes | None:
         """
@@ -299,7 +429,6 @@ class Tor_Socket():
 
         # 3) 真正取走整包
         raw = await self._wait_for_bytes(total_len, consume=True)
-        print(self.source_ip ,"recv raw:", raw)
         if raw is None:
             return None
 
@@ -516,57 +645,3 @@ def _default_client_ctx():
     ctx.set_ciphers("ALL:@SECLEVEL=1")  # 可选：降低安全等级以兼容自签证书
     return ctx
 
-# async def dial_tls(loop: asyncio.AbstractEventLoop,
-#                    remote: tuple[str, int],
-#                    local_ip: Optional[str] = None,
-#                    ctx: Optional[ssl.SSLContext] = None,
-#                    sock_opts: Optional[list[tuple[int, int, int]]] = None,
-#                    timeout: float = 10.0) -> socket.socket:
-#     """
-#     支持：
-#     - TCP连接
-#     - TLS握手（线程池）
-#     - 超时控制
-#     - sockopts 设置
-#     """
-#     ctx = ctx or make_ssl_context()
-#     raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-#
-#     if local_ip:
-#         raw.bind((local_ip, 0))
-#
-#     raw.setblocking(False)
-#
-#     if sock_opts:
-#         for lev, opt, val in sock_opts:
-#             with suppress(OSError):
-#                 raw.setsockopt(lev, opt, val)
-#
-#     try:
-#         print(f"[dial_tls] Connecting to {remote} from {local_ip or 'default'}")
-#         await asyncio.wait_for(loop.sock_connect(raw, remote), timeout=timeout)
-#         print(f"[dial_tls] TCP connected to {remote}")
-#     except Exception as e:
-#         print(f"[dial_tls] TCP connect failed: {e}")
-#         raw.close()
-#         raise
-#
-#     def _wrap():
-#         try:
-#             raw.setblocking(True)
-#             print(f"[dial_tls] Starting TLS handshake to {remote}")
-#             tls_sock = ctx.wrap_socket(raw, do_handshake_on_connect=True)
-#             print(f"[dial_tls] TLS handshake completed with {remote}")
-#             tls_sock.setblocking(False)
-#             return tls_sock
-#         except Exception as e:
-#             print(f"[dial_tls] TLS handshake failed: {e}")
-#             raw.close()
-#             raise
-#
-#     try:
-#         # TLS 也加超时
-#         return await asyncio.wait_for(loop.run_in_executor(None, _wrap), timeout=timeout)
-#     except Exception as e:
-#         print(f"[dial_tls] TLS failed for {remote}: {e}")
-#         raise

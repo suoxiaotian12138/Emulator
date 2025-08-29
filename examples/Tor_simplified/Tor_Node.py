@@ -44,7 +44,6 @@ class Tor_Node(Tor_base):
         self.protocols = protocols
         self.exit_policy = exit_policy
         self.sim_ip = sim_ip
-        self.print(self.sim_ip)
         self.start_time = time.time()
         now_hr = int(self.start_time // 3600)
         self.exp_hr = now_hr + 24 * 7
@@ -144,7 +143,7 @@ class Tor_Node(Tor_base):
                 if sock is None:
                     t_tls = time.perf_counter()
                     try:
-                        sock = await Tor_Socket.dial(remote_addr=addr, source_ip=self.host, on_cell=self.handle_cell)
+                        sock = await Tor_Socket.dial(remote_addr=addr, source_ip=self.host, on_cell=self.handle_cell, node_id=self.node_id)
                         print("build a new socket from: ", addr)
                         self.socket_map[addr] = sock
                         asyncio.create_task(self.handle_connection(addr, sock))
@@ -192,8 +191,8 @@ class Tor_Node(Tor_base):
         await sock.send_cell(cell)
 
     async def handle_cell(self, cell, sock: Tor_Socket):
-        self.print(f"receive cell from {sock.socket.getpeername()}")
-        self.print("cell content:", cell)
+        # self.print(f"receive cell from {sock.socket.getpeername()}")
+        # self.print("cell content:", cell)
 
         if isinstance(cell, CellVersions):
             if not sock.handshake_initiator:
@@ -210,10 +209,11 @@ class Tor_Node(Tor_base):
         elif isinstance(cell, CellCerts):
             sock.handshake.retrieve_certs(cell)
         elif isinstance(cell, CellAuthChallenge):
-            self.print("receive CellAuthChallenge", CellAuthChallenge)
-            self.print("receive CellAuthChallenge content", cell.challenge)
-            self.print("receive CellAuthChallenge method", cell.methods)
+            # self.print("receive CellAuthChallenge", CellAuthChallenge)
+            # self.print("receive CellAuthChallenge content", cell.challenge)
+            # self.print("receive CellAuthChallenge method", cell.methods)
             # sock.handshake.handle_cell_auth_challenge(cell)
+            pass
         elif isinstance(cell, CellNetInfo):
             sock.handshake.retrieve_net_info(cell)
         elif isinstance(cell, Cell_Create2):
@@ -221,7 +221,7 @@ class Tor_Node(Tor_base):
         elif isinstance(cell, CellCreated2):
             await self.reply_extend(cell)
         elif isinstance(cell, CellAuthenticate):  # or cmd == 131
-            self.print("receive a recv_authenticate")
+            # self.print("receive a recv_authenticate")
             sock.handshake.recv_authenticate(cell)
         elif isinstance(cell, CellRelay):
             circuit = self.circuit_list.get_by_id(cell.circuit_id)
@@ -261,7 +261,7 @@ class Tor_Node(Tor_base):
 
 
     async def handle_cell_relay(self, cell, circuit, origin_cell, sock):
-        self.print("inner_cell:", cell)
+        # self.print("inner_cell:", cell)
         if isinstance(cell, CellRelayExtend2):
             await self.extend_next_node(cell, circuit.id)
         elif isinstance(cell, Cell_RelayEarly):
@@ -277,18 +277,31 @@ class Tor_Node(Tor_base):
                 next_hop_sock = circuit.circuit_nodes[0].sock
             await next_hop_sock.send_cell(cell)
         elif isinstance(cell, CellRelayBegin):
+            cid = circuit.id
+            sid = origin_cell.stream_id
             host = cell.address
             port = cell.port
             addr = (host, port)
-            circuit.streams.set_stream(stream_id=origin_cell.stream_id, target_addr=addr)
-            self.print("circuit_nodes: ", circuit.circuit_nodes)
+            self._ev("begin_rx", circ_id=cid, stream_id=sid, host=host, port=port)
+            try:
+                circuit.streams.set_stream(stream_id=origin_cell.stream_id, target_addr=addr)
+                # self.print("circuit_nodes: ", circuit.circuit_nodes)
 
-            ip_address = await self.resolve_ipv4_async(host)
-            connected_cell = CellRelayConnected(ip_address, 0, origin_cell.circuit_id)
+                ip_address = await self.resolve_ipv4_async(host)
+                connected_cell = CellRelayConnected(ip_address, 0, origin_cell.circuit_id)
 
-            relay_cell = circuit.make_relay(inner_cell=connected_cell, relay_type=CellRelay, stream_id=origin_cell.stream_id)
+                relay_cell = circuit.make_relay(inner_cell=connected_cell, relay_type=CellRelay, stream_id=origin_cell.stream_id)
 
-            await sock.send_cell(relay_cell)
+                await sock.send_cell(relay_cell)
+                self._ev("connected_tx", circ_id=cid, stream_id=sid, ip=ip_address)
+
+            except Exception as e:
+                # 不要静默，一定回 END，避免上游无限等
+                end = CellRelayEnd(StreamReason(10), origin_cell.circuit_id)  # 10: timeout / unreachable 自行定义
+                relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=sid)
+                await sock.send_cell(relay)
+                self._ev("begin_fail", circ_id=cid, stream_id=sid, error=str(e))
+
         elif isinstance(cell, CellRelayConnected):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.connect_event.set()

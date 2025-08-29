@@ -193,3 +193,16 @@ class TorCircuit:
     @staticmethod
     def _make_new_event():
         return asyncio.Event()
+
+
+# circuit_policy.py  (或放到 Tor_Client 顶部)
+MAX_CIRCUIT_AGE_S = 600          # 10min
+MAX_STREAMS_PER_CIRCUIT = 256
+IDLE_TIMEOUT_S = 120             # 2min no new streams
+PREBUILD_OPEN = 2                # keep 2 hot OPEN circuits
+BUILD_TIMEOUT_S = 60
+EXTEND_TIMEOUT_S = 30
+
+def compute_isolation_key(dst_host: str, dst_port: int, client_id: str|None=None) -> str:
+    # simple but effective: isolate by destination endpoint (+ optional client id)
+    return f"dst={dst_host}:{dst_port}|cid={client_id or 'default'}"

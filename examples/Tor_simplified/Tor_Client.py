@@ -43,8 +43,7 @@ class Tor_Client(Tor_base):
 
         desc = await self.consensus.fetch_descriptor(self.guard.fingerprint_str)
         self.guard.set_descriptor(desc)
-        self.print("guard_name:", self.guard.nickname)
-        socket = Tor_Socket(self.host, on_cell=self.handle_cell)
+        socket = Tor_Socket(self.host, on_cell=self.handle_cell, node_id=self.node_id)
 
         #和guard的tls握手记录
         await socket.setup_socket(remote_addr=self.guard.addr)
@@ -169,11 +168,11 @@ class Tor_Client(Tor_base):
         return circuit
 
     async def handle_cell(self, cell, sock):
-        self.print("receive client cell_type:", type(cell))
-        self.print("cell content",cell)
+        # self.print("receive client cell_type:", type(cell))
+        # self.print("cell content",cell)
         if isinstance(cell, CellVersions):
             sock.protocol.version = sock.handshake.retrieve_versions(cell)
-            self.print("sock protocol:", sock.protocol.version)
+            # self.print("sock protocol:", sock.protocol.version)
         elif isinstance(cell, CellCerts):
             sock.handshake.retrieve_certs(cell)
         elif isinstance(cell, CellAuthChallenge):
@@ -190,12 +189,12 @@ class Tor_Client(Tor_base):
             await self.handle_cell_relay(inner_cell, circuit, cell)
 
     async def handle_cell_relay(self, cell, circuit, origin_cell):
-        self.print("inner_cell:", cell)
+        # self.print("inner_cell:", cell)
         if isinstance(cell, CellRelayExtended2):
             circuit.extended_cell = cell
             circuit.connect_event.set()
         elif isinstance(cell, CellRelayConnected):
-            self.print(origin_cell.stream_id)
+            # self.print(origin_cell.stream_id)
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.connect_event.set()
         elif isinstance(cell, CellRelayEnd):
@@ -210,7 +209,7 @@ class Tor_Client(Tor_base):
                     self._stream(**rec)  # 写入 streams.jsonl（或 flows.jsonl 兼容别名）
             self.print("final data: ", data)
         elif isinstance(cell, CellRelayData):
-            self.print("cell data: ", cell.data)
+            # self.print("cell data: ", cell.data)
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.append(cell.data)
             stream.window.deliver_dec()
@@ -233,7 +232,7 @@ class Tor_Client(Tor_base):
         socket = self.socket_map.get(self.guard.addr, None)  # 之后补充guard的查验逻辑，即guard是否断线，如果没断就一直保持socket连通
         if not socket:
             raise "socket has closed before stream"
-        end_cell = stream.make_end
+        end_cell = stream.make_end()
         await socket.send_cell( end_cell)
 
         stream.close()

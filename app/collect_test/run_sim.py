@@ -10,12 +10,12 @@ from tools.Log.resources import resource_probe
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-MAX_TLS_THREADS = 128
-loop = asyncio.get_event_loop()
-loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(
-    max_workers=MAX_TLS_THREADS,
-    thread_name_prefix="tls-worker"
-))
+# MAX_TLS_THREADS = 128
+# loop = asyncio.get_event_loop()
+# loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(
+#     max_workers=MAX_TLS_THREADS,
+#     thread_name_prefix="tls-worker"
+# ))
 
 
 async def register_all_guards(guard_configs, bus_factory):
@@ -38,6 +38,50 @@ async def register_all_guards(guard_configs, bus_factory):
 
     return guards
 
+def generate_configs(num_guard, num_middle, num_exit):
+    """
+    根据输入的数量生成包含不同角色的配置列表。
+
+    Args:
+        num_guard (int): 需要生成的Guard角色数量。
+        num_middle (int): 需要生成的Middle角色数量。
+        num_exit (int): 需要生成的Exit角色数量。
+
+    Returns:
+        list: 包含所有角色的配置元组列表。
+    """
+    configs = []
+    base_port = 9001
+
+    # 生成Guard角色配置
+    for i in range(1, num_guard + 1):
+        ip = "192.168.66.242"
+        name = f"guard{i}"
+        tags = ["Running", "Valid", "Guard", "Fast", "Stable"]
+        configs.append((name, ip, base_port, 'Guard', tags))
+        base_port += 1
+
+    # 生成Middle角色配置
+    for i in range(1, num_middle + 1):
+        ip = "192.168.66.243"
+        name = f"Middle{i}"
+        tags = ["Running", "Valid", "Fast", "Stable"]
+        configs.append((name, ip, base_port, 'Middle', tags))
+        base_port += 1
+
+    # 生成Exit角色配置
+    for i in range(1, num_exit + 1):
+        ip = "192.168.66.244"
+        name = f"Exit{i}"
+        tags = ["Running", "Valid", "Exit", "Fast", "Stable"]
+        configs.append((name, ip, base_port, 'Exit', tags))
+        base_port += 1
+
+    return configs
+
+
+
+
 async def main():
     # 启动目录服务器
     loop = asyncio.get_running_loop()
@@ -52,16 +96,8 @@ async def main():
     )
     os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
     # 多个 guard 配置
-    guard_configs = [
-        ("guard1", "192.168.66.241", 9001, 'Guard', ["Running", "Valid", "Guard","Fast","Stable"]),
-        ("guard2", "192.168.66.242", 9002, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"]),
-        ("Middle1", "192.168.66.243", 9003, 'Middle',["Running", "Valid", "Fast","Stable"]),
-        ("Middle2", "192.168.66.244", 9004, 'Middle',["Running", "Valid", "Fast","Stable"]),
-        ("Exit1", "192.168.66.241", 9005, 'Exit',["Running", "Valid", "Exit","Fast","Stable"]),
-        ("Exit2", "192.168.66.241", 9006, 'Exit',["Running", "Valid", "Exit","Fast","Stable"]),
-
-    ]
-
+    guard_configs = generate_configs(num_guard=100, num_middle=50, num_exit=50)
+    print(guard_configs)
     # >>> NEW: 启动一个进程级日志写手 + 资源探针
     writer = AsyncJsonlWriter(out_dir="exp/logs", rotate_mb=100, batch_size=200, flush_every_ms=100)
     writer.start()

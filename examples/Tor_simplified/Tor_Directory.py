@@ -43,6 +43,8 @@ class TorDirectoryServer:
 
         self._cached_consensus_map = {}
         self._cached_microdesc_map = {}
+        self._cached_consensus_map_deflate = {}
+        self._cached_microdesc_map_deflate = {}
         self._cached_key_cert = None
         self._micro_map = {}
         # static config
@@ -95,7 +97,7 @@ class TorDirectoryServer:
     @web.middleware
     async def _log_all_requests(self, request, handler):
         ts = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"[{ts}] \"{request.method} {request.path} HTTP/{request.version.major}.{request.version.minor}\"")
+        # print(f"[{ts}] \"{request.method} {request.path} HTTP/{request.version.major}.{request.version.minor}\"")
         return await handler(request)
 
     def _derive_status_line(self, desc_text: str, is_exit) -> str:
@@ -301,6 +303,12 @@ class TorDirectoryServer:
             self._cached_consensus_map.clear()
             self._cached_consensus_map[rounded] = self._add_signature(content)
             self._consensus_dirty = False
+
+            signed = self._add_signature(content)
+            self._cached_consensus_map_deflate.clear()
+            self._cached_consensus_map_deflate[rounded] = zlib.compress(signed.encode('utf-8'))
+            self._consensus_dirty = False
+
         return self._cached_consensus_map[rounded]
 
     def _get_signed_microdesc(self) -> str:
@@ -893,12 +901,11 @@ bandwidth-weights Wbd=3333 Wbe=0 Wbg=0 Wbm=10000 Wdb=10000 Web=10000 Wed=3333 We
     # run
     # --------------------------------------------------------------------- #
     def run(self):
-        web.run_app(
-            self.app,
-            host=self.host,
-            port=self.port,
-            print=lambda *a: None,  # mute aiohttp banner
-        )
+        web.run_app(self.app,
+                    host=self.host,
+                    port=self.port,
+                    backlog=2048,  # ↑
+                    print=lambda *a: None)
 
 
 
