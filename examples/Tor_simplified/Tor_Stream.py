@@ -75,6 +75,8 @@ class Tor_Stream:
         self._recvq = asyncio.Queue(maxsize=64)
         self._remote_closed = False
         self._reader_task = None  # 后台读取远端数据 -> recvq
+        self._close_lock = asyncio.Lock()
+
 
     def __enter__(self):
         """Start using the stream."""
@@ -96,18 +98,17 @@ class Tor_Stream:
         self._buffer.extend(data)
         self.data_event.set()
 
-    def close(self):
-        logger.info('Stream #%i: closing (state = %s)...', self.id, self._state.name)
-
-        with self._close_lock:
+    async def aclose(self):
+        """Async-safe close; used by client when actively closing a stream."""
+        async with self._close_lock:
             if self._state == StreamState.Closed:
-                logger.warning('Stream #%i: closed already', self.id)
                 return
-
             self._circuit.remove_stream(self)
-
             self._state = StreamState.Closed
-            logger.debug('Stream #%i: closed', self.id)
+
+    def close(self):
+        """Backward-compat: schedule async close."""
+        asyncio.create_task(self.aclose())
 
     async def wait_connect_ack(self):
         try:

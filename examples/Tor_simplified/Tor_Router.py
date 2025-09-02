@@ -23,7 +23,11 @@ class Tor_Router:
         if type(fingerprint) is not bytes:
             fingerprint = b64decode(fingerprint)
         self.fingerprint = fingerprint
-        self.digest = b64_desc_to_hex(router['digest']) if router['digest'] else None
+        self._digest_b64 = router.get('digest')
+
+        # 仍然生成 hex 摘要供现有代码使用
+        self.digest = b64_desc_to_hex(router['digest']) if router.get('digest') else None
+
         self.ip = router['ip']
         self.or_port = router['or_port']
         self.addr = (self.ip, self.or_port)
@@ -59,6 +63,29 @@ class Tor_Router:
 
     def set_descriptor(self, descriptor_str):
         self.descriptor_str = descriptor_str
+
+    def spawn_circuit_hop(self) -> "Tor_Router":
+        """
+        基于本节点的静态元信息（IP、端口、指纹、flags、descriptor 等），
+        生成一个“用于单条电路的”全新 Router 实例：
+          - 复制 *元数据*
+          - 继承 descriptor_str（若已缓存）
+          - 不复制任何会话/密钥状态（_crypto_state、window、key_agreement 等重置）
+        """
+        meta = {
+            "nickname": self.nickname,
+            "fingerprint": self.fingerprint_str,   # 仍用你现有的字符串形式
+            "digest": self._digest_b64,
+            "ip": self.ip,
+            "or_port": self.or_port,
+            "dir_port": self.dir_port,
+            "version": self.version,
+            "flags": self.flags,
+        }
+        hop = Tor_Router(meta)
+        # 复用已拉取的 descriptor，避免重复网络 I/O
+        hop.descriptor_str = self.descriptor_str
+        return hop
 
     @staticmethod
     def parse(data):

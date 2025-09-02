@@ -286,6 +286,9 @@ class Tor_Socket():
             self.print(f"[SendDrop] closed: {self.peer_str} {cell}")
             return
         buf = self.protocol.serialize(cell)
+        # self.print(f"[SEND] {self.local_str}({self.node_id}) -> {self.peer_str}: "
+        #            f"{type(cell).__name__} cid={getattr(cell, 'circuit_id', None)} "
+        #            f"sid={getattr(cell, 'stream_id', None)}")
         # 自动分类
         if self._is_control_cell(cell):
             await self._q_ctrl.put(buf)

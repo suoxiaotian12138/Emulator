@@ -191,8 +191,8 @@ class Tor_Node(Tor_base):
         await sock.send_cell(cell)
 
     async def handle_cell(self, cell, sock: Tor_Socket):
-        # self.print(f"receive cell from {sock.socket.getpeername()}")
-        # self.print("cell content:", cell)
+        self.print(f"receive cell from {sock.socket.getpeername()}")
+        self.print("cell content:", cell)
 
         if isinstance(cell, CellVersions):
             if not sock.handshake_initiator:
@@ -261,7 +261,7 @@ class Tor_Node(Tor_base):
 
 
     async def handle_cell_relay(self, cell, circuit, origin_cell, sock):
-        # self.print("inner_cell:", cell)
+        self.print("inner_cell:", cell)
         if isinstance(cell, CellRelayExtend2):
             await self.extend_next_node(cell, circuit.id)
         elif isinstance(cell, Cell_RelayEarly):

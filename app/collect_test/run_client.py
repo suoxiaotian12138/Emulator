@@ -26,7 +26,7 @@ async def main():
     os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
 
     total_batches = 1
-    clients_per_batch = 4000
+    clients_per_batch = 2000
     delay_between_batches = 20
 
     # >>> NEW: 进程级日志写手 + 资源探针（只开一次）
@@ -73,12 +73,16 @@ async def main():
         for client in batch_clients:
             asyncio.create_task(client.start_protocol())
 
-        await asyncio.gather(*(g.listener_ready.wait() for g in batch_clients))
+        # await asyncio.gather(*(g.listener_ready.wait() for g in batch_clients))
 
         # 发流
         print(f"[Main] Sending streams for batch {batch + 1}...")
         for client in batch_clients:
             asyncio.create_task(client.make_stream(message=message, addr=addr, hops_count=hop))
+
+        await asyncio.sleep(10)
+        total_circuits = sum(len(c.circuit_mgr.pool) for c in all_clients)
+        print(f"[Main] total circuits across {len(all_clients)} clients = {total_circuits}")
 
         print(f"[Main] Batch {batch + 1} completed. Waiting {delay_between_batches}s before next batch...")
         await asyncio.sleep(delay_between_batches)

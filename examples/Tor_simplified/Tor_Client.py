@@ -13,7 +13,8 @@ from examples.Tor_simplified.Tor_Router import Tor_Router
 from examples.Tor_simplified.Tor_Socket import Tor_Socket
 from examples.Tor_simplified.Tor_Cell import *
 
-
+from examples.Tor_simplified.Tor_Circuit import CircuitManager, MAX_CIRCUIT_AGE_S, \
+    MAX_STREAMS_PER_CIRCUIT, IDLE_TIMEOUT_S, PREBUILD_OPEN, compute_isolation_key
 
 class Tor_Client(Tor_base):
     def __init__(self, name: str, host: str, port: int, model: Literal["sim", "real"] = "sim"):
@@ -27,14 +28,24 @@ class Tor_Client(Tor_base):
         self.ready_to_send = asyncio.Event()
         self.stream_tracker = StreamTracker()     # ★ 新增
         self._sid2uid: dict[int, str] = {}
+        self.circuit_mgr = CircuitManager(self)
+
 
     async def start_protocol(self):
         self.tasks['listener_task'] = asyncio.create_task(self.monitor_tor_socket())
         await self.consensus_init()
 
         self._ev("client_start_protocol", ip=self.host, port=self.port)
+
+        self.tasks['prebuild'] = asyncio.create_task(self.circuit_mgr.maintain_prebuild())
+        self.tasks['housekeeping'] = asyncio.create_task(self._circuit_housekeeping())
+
         await asyncio.gather(*self.tasks.values())
 
+    async def _circuit_housekeeping(self):
+        while True:
+            self.circuit_mgr.tick()
+            await asyncio.sleep(1.0)
 
     async def consensus_init(self):
         await self.consensus.consus_init_async()
@@ -61,7 +72,17 @@ class Tor_Client(Tor_base):
     async def make_stream(self, message, addr, hops_count=3, extend_routers=None):
         await self.ready_to_send.wait()
         socket = self.socket_map.get(self.guard.addr, None)
-        circuit = await self.create_circuit(socket, hops_count, extend_routers)
+        if getattr(self.circuit_mgr, "isolation_enabled", False):
+            iso_key = compute_isolation_key(addr[0], addr[1])
+        else:
+            iso_key = "general"
+
+        circuit = await self.circuit_mgr.get_or_build(
+            iso_key, exit_hint=None,
+            hops_count=hops_count,
+            extend_routers=extend_routers
+        )
+        self.circuit_mgr.mark_used(circuit)
         stream = circuit.create_stream()
 
         #记录一下流开始
@@ -96,6 +117,7 @@ class Tor_Client(Tor_base):
             raise
 
     async def create_circuit(self, socket, hops_count=3, extend_routers=None):
+        # print(f"[create_circuit] begin -> guard {self.guard.addr} hops={hops_count}")
         circuit = await self.circuit_list.create_new_client()
         #guard选择记录
         snap = self.consensus.get_consensus_snapshot()
@@ -103,11 +125,17 @@ class Tor_Client(Tor_base):
         used_fp = set()
         used_fp.add(self.guard.fingerprint_str)
 
+        if not getattr(self.guard, "descriptor_str", None):
+            desc = await self.consensus.fetch_descriptor(self.guard.fingerprint_str)
+            self.guard.set_descriptor(desc)
+
+        guard_hop = self.guard.spawn_circuit_hop()
+
         #电路的第一跳记录
-        self._ev("path_step_selected", circ_id=circuit.id, hop=1, nickname=self.guard.nickname,
-                 fp=self.guard.fingerprint_str, role="guard",
+        self._ev("path_step_selected", circ_id=circuit.id, hop=1, nickname=guard_hop.nickname,
+                 fp=guard_hop.fingerprint_str, role="guard",
                  consensus_id=snap["consensus_id"])
-        create_cell = circuit.connect_to_guard(self.guard)
+        create_cell = circuit.connect_to_guard(guard_hop)
         await socket.send_cell(create_cell)
         await circuit.guard_handsake(wait_time=600)
 
@@ -144,7 +172,7 @@ class Tor_Client(Tor_base):
                          fp=router["fingerprint"], fail_reason=reason, error=str(e))
                 # 聚合一条 circuits（失败版）
                 self._circuit(circ_id=f"{self.name}:{circuit.id}", client=self.name,
-                              guard=self.guard.fingerprint_str,
+                              guard=guard_hop.fingerprint_str,
                               middle=None, exit=None,
                               build_ms=(time.perf_counter() - t0_total) * 1000.0,
                               success=False, fail_reason=f"extend_hop{hop}:{e}")
@@ -202,6 +230,7 @@ class Tor_Client(Tor_base):
             stream.set_end(cell)
             data = await stream.recv(2048)
             # === 新增：结束 stream 并写日志 ===
+            self.circuit_mgr.on_stream_end(circuit)
             stream_uid = self._sid2uid.pop(origin_cell.stream_id, None)
             if stream_uid:
                 rec = self.stream_tracker.end(stream_uid)
@@ -227,15 +256,16 @@ class Tor_Client(Tor_base):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.window.package_inc()
 
-
     async def close_stream(self, stream):
-        socket = self.socket_map.get(self.guard.addr, None)  # 之后补充guard的查验逻辑，即guard是否断线，如果没断就一直保持socket连通
+        socket = self.socket_map.get(self.guard.addr, None)
         if not socket:
-            raise "socket has closed before stream"
+            raise RuntimeError("socket has closed before stream")
         end_cell = stream.make_end()
-        await socket.send_cell( end_cell)
-
-        stream.close()
+        await socket.send_cell(end_cell)
+        await asyncio.sleep(0)  # let END go out
+        # optional: also notify manager here if你主动关闭流:
+        self.circuit_mgr.on_stream_end(stream._circuit)
+        await stream.aclose()  # 见下文对 Tor_Stream 的修改
 
 
 

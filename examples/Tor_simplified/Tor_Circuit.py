@@ -11,6 +11,19 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# circuit_policy.py  (或放到 Tor_Client 顶部)
+MAX_CIRCUIT_AGE_S = 600          # 10min
+MAX_STREAMS_PER_CIRCUIT = 256
+IDLE_TIMEOUT_S = 120             # 2min no new streams
+PREBUILD_OPEN = 1                # keep 2 hot OPEN circuits
+BUILD_TIMEOUT_S = 60
+EXTEND_TIMEOUT_S = 30
+
+
+
+import time, asyncio
+from typing import Dict, Set, Optional
+from examples.Tor_simplified.Tor_Cell import CellDestroy  # 若类名不同，替换为你项目里的 DESTROY cell
 
 class Tor_CircuitsList:
     LOCK = asyncio.Lock()
@@ -110,6 +123,10 @@ class TorCircuit:
         self.connect_event = self._make_new_event()
         self.role_ops = ClientCircuitOps(self) if role == "client" else ServerCircuitOps(self)
 
+        self.created_at = time.time()
+        self.last_used = self.created_at
+        self._n_streams = 0
+
     def connect_to_guard(self, guard):
         key_agreement_cls = NtorKeyAgreement
         circuit_node = guard
@@ -135,6 +152,17 @@ class TorCircuit:
         self.circuit_nodes.append(extend_node)
         self.extended_cell = None
         return extend_cell
+
+    def create_stream(self):
+        st = self.streams.create_new()
+        # optional local counters:
+        self._n_streams += 1
+        self.last_used = time.time()
+        return st
+    def remove_stream(self, tor_stream):
+        self.streams.remove(tor_stream)
+        # optional local counters:
+        self._n_streams = max(0, self._n_streams - 1)
 
     async def extend_handshake(self, descriptor_str, wait_time=60):
         try:
@@ -165,15 +193,10 @@ class TorCircuit:
         self.role_ops.encrypt(relay_cell)
         return relay_cell
 
-    def create_stream(self):
-        return self.streams.create_new()
-
-    def remove_stream(self, tor_stream):
-        self.streams.remove(tor_stream)
 
     def close_all_streams(self):
         for stream in list(self.streams.values()):
-            stream.close()
+            stream.aclose()
 
     def destroy(self, send_destroy=True):
         pass
@@ -195,14 +218,188 @@ class TorCircuit:
         return asyncio.Event()
 
 
-# circuit_policy.py  (或放到 Tor_Client 顶部)
-MAX_CIRCUIT_AGE_S = 600          # 10min
-MAX_STREAMS_PER_CIRCUIT = 256
-IDLE_TIMEOUT_S = 120             # 2min no new streams
-PREBUILD_OPEN = 2                # keep 2 hot OPEN circuits
-BUILD_TIMEOUT_S = 60
-EXTEND_TIMEOUT_S = 30
 
 def compute_isolation_key(dst_host: str, dst_port: int, client_id: str|None=None) -> str:
     # simple but effective: isolate by destination endpoint (+ optional client id)
     return f"dst={dst_host}:{dst_port}|cid={client_id or 'default'}"
+
+
+class CircuitMeta:
+    """Metadata for lifecycle & isolation."""
+    __slots__ = ("id","created_at","last_used","n_streams","purpose","exit_fp","isolation_key","state")
+    def __init__(self, cid: int, isolation_key: str, purpose: str="general", exit_fp: Optional[str]=None):
+        self.id = cid
+        self.created_at = time.time()
+        self.last_used = self.created_at
+        self.n_streams = 0
+        self.purpose = purpose
+        self.exit_fp = exit_fp
+        self.isolation_key = isolation_key
+        self.state = "OPEN"   # BUILDING->OPEN->DIRTY->CLOSING
+
+class CircuitManager:
+    """Own-customer multiplexing only (per Tor_Client)."""
+    def __init__(self, client, isolation_enabled: bool = False):
+        self.client = client      # Tor_Client
+        self.pool: Dict[int, CircuitMeta] = {}      # circ_id -> meta
+        self.index: Dict[str, Set[int]] = {}        # isolation_key -> set(circ_id)
+        self._lock = asyncio.Lock()
+        self._build_sem = asyncio.Semaphore(1)
+        self.isolation_enabled = isolation_enabled
+
+    def _register(self, circ, isolation_key: str, purpose="general", exit_fp=None):
+        m = CircuitMeta(circ.id, isolation_key, purpose, exit_fp)
+        self.pool[circ.id] = m
+        self.index.setdefault(isolation_key, set()).add(circ.id)
+
+    def _unregister(self, circ_id: int):
+        m = self.pool.pop(circ_id, None)
+        if not m: return
+        s = self.index.get(m.isolation_key)
+        if s: s.discard(circ_id)
+        if s and not s: self.index.pop(m.isolation_key, None)
+
+    def _compatible(self, want_key: str, have_key: str) -> bool:
+        # 开启隔离且目标不是 general 时，必须严格匹配
+        if self.isolation_enabled and want_key != "general":
+            return have_key == want_key
+        # 否则允许 general 作为兜底
+        return have_key == want_key or have_key == "general"
+
+    def _pick_open(self, isolation_key: str):
+        # pick an OPEN & compatible circuit with least load, then LRU
+        cand: list[tuple[int, CircuitMeta]] = []
+        for cid, m in self.pool.items():
+            if m.state == "OPEN" and self._compatible(isolation_key, m.isolation_key):
+                cand.append((cid, m))
+        if not cand:
+            return None
+        cand.sort(key=lambda kv: (kv[1].n_streams, kv[1].last_used))  # min streams, then LRU
+        cid = cand[0][0]
+        return self.client.circuit_list.get_by_id(cid)
+
+    async def get_or_build(self, isolation_key: str,
+                           exit_hint=None, hops_count=3, extend_routers=None,
+                           prefer_new: bool = False):
+        # —— 第一次检查：持锁只做查表、准备 —— #
+        async with self._lock:
+            circ = self._pick_open(isolation_key)
+            if circ:
+                return circ
+
+            if not self.isolation_enabled:
+                # 没开隔离，可以复用 general
+                circ = self._pick_open("general")
+                if circ:
+                    # 给 general 电路挂别名
+                    self.index.setdefault(isolation_key, set()).add(circ.id)
+                    return circ
+
+        # 如果没开隔离：只允许等 general，不允许新建
+        if not self.isolation_enabled and not prefer_new:
+            # 等待直到有 general 出现
+            while True:
+                await asyncio.sleep(0.5)
+                async with self._lock:
+                    circ = self._pick_open("general")
+                    if circ:
+                        self.index.setdefault(isolation_key, set()).add(circ.id)
+                        return circ
+
+        # —— isolation 模式，或者显式要求新建 —— #
+        await self.client.ready_to_send.wait()
+        socket = self.client.socket_map.get(self.client.guard.addr)
+        if not socket:
+            raise RuntimeError("[cirmgr] guard socket not ready")
+
+        # 串行化建路
+        async with self._build_sem:
+            async with self._lock:
+                circ = self._pick_open(isolation_key)
+                if circ:
+                    return circ
+                if not self.isolation_enabled:
+                    circ = self._pick_open("general")
+                    if circ:
+                        self.index.setdefault(isolation_key, set()).add(circ.id)
+                        return circ
+
+            # 真正建路
+            circ = await self.client.create_circuit(socket, hops_count, extend_routers)
+            async with self._lock:
+                self._register(circ, isolation_key=isolation_key, purpose="general", exit_fp=None)
+            return circ
+
+    def mark_used(self, circ):
+        m = self.pool.get(circ.id)
+        if not m:
+            return
+        m.last_used = time.time()
+        m.n_streams += 1
+        if m.n_streams >= MAX_STREAMS_PER_CIRCUIT:
+            m.state = "DIRTY"
+
+    def on_stream_end(self, circ):
+        m = self.pool.get(circ.id)
+        if not m: return
+        m.n_streams = max(0, m.n_streams - 1)
+
+    def _send_destroy(self, circ_id: int):
+        sock = self.client.socket_map.get(self.client.guard.addr)
+        if not sock: return
+        try:
+            # Adjust if your project uses another destroy cell constructor
+            destroy = CellDestroy(circuit_id=circ_id)
+            asyncio.create_task(sock.send_cell(destroy))
+        except Exception:
+            pass
+
+    def _maybe_close(self, cid: int, m: CircuitMeta):
+        # close only when no streams active
+        if m.n_streams == 0:
+            m.state = "CLOSING"
+
+    def tick(self):
+        now = time.time()
+        to_close = []
+        for cid, m in self.pool.items():
+            if m.state == "OPEN":
+                if (now - m.created_at > MAX_CIRCUIT_AGE_S) or (m.n_streams >= MAX_STREAMS_PER_CIRCUIT):
+                    m.state = "DIRTY"
+                elif (now - m.last_used > IDLE_TIMEOUT_S) and m.n_streams == 0:
+                    m.state = "CLOSING"
+            elif m.state == "DIRTY":
+                self._maybe_close(cid, m)
+            if m.state == "CLOSING":
+                to_close.append(cid)
+        # actually destroy and unregister
+        for cid in to_close:
+            self._send_destroy(cid)
+            self._unregister(cid)
+
+    async def maintain_prebuild(self):
+        # 避免链路未就绪就建路
+        await self.client.ready_to_send.wait()
+
+        while True:
+            try:
+                async with self._lock:
+                    idle = sum(1 for m in self.pool.values()
+                               if m.state == "OPEN" and m.purpose == "general" and m.n_streams == 0)
+                    target = PREBUILD_OPEN
+                # print(f"[prebuild] tick idle_general={idle} target={target}")
+
+                need = max(0, target - idle)
+                for _ in range(need):
+                    # 预建最好“真新建”，以便把 idle 拉到目标
+                    try:
+                        await self.get_or_build("general", hops_count=3, extend_routers=None, prefer_new=True)
+                    except TypeError:
+                        await self.get_or_build("general", hops_count=3, extend_routers=None)
+            except Exception as e:
+                print(f"[prebuild] error: {e}")
+
+            await asyncio.sleep(2.0)
+
+
+
