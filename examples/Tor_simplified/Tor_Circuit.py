@@ -9,21 +9,21 @@ from examples.Tor_simplified.Tor_Crypt import NtorKeyAgreement
 from examples.Tor_simplified.Tor_Cell import *
 import logging
 
+import time, asyncio
+from typing import Dict, Set, Optional
+from examples.Tor_simplified.Tor_Cell import CellDestroy  # 若类名不同，替换为你项目里的 DESTROY cell
+
+
 logger = logging.getLogger(__name__)
 
 # circuit_policy.py  (或放到 Tor_Client 顶部)
 MAX_CIRCUIT_AGE_S = 600          # 10min
 MAX_STREAMS_PER_CIRCUIT = 256
-IDLE_TIMEOUT_S = 120             # 2min no new streams
+IDLE_TIMEOUT_S = 120              # 2min no new streams
 PREBUILD_OPEN = 1                # keep 2 hot OPEN circuits
 BUILD_TIMEOUT_S = 60
 EXTEND_TIMEOUT_S = 30
 
-
-
-import time, asyncio
-from typing import Dict, Set, Optional
-from examples.Tor_simplified.Tor_Cell import CellDestroy  # 若类名不同，替换为你项目里的 DESTROY cell
 
 class Tor_CircuitsList:
     LOCK = asyncio.Lock()

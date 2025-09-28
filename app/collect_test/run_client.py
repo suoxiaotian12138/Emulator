@@ -26,7 +26,7 @@ async def main():
     os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
 
     total_batches = 1
-    clients_per_batch = 2000
+    clients_per_batch = 4000
     delay_between_batches = 20
 
     # >>> NEW: 进程级日志写手 + 资源探针（只开一次）

@@ -23,6 +23,7 @@ from tools.Crypt.crypt_common import (
 )
 from examples.Tor_simplified.Tor_Cell import CellCerts
 from collections import defaultdict
+from tools.Network_Management.delay_env import get_args
 
 class Tor_Node(Tor_base):
     def __init__(self, name: str, host: str, port: int, flags,
@@ -47,10 +48,11 @@ class Tor_Node(Tor_base):
         self.start_time = time.time()
         now_hr = int(self.start_time // 3600)
         self.exp_hr = now_hr + 24 * 7
-        self.dns_solver = DNSResolver(nameservers=["1.1.1.1", "8.8.8.8", "9.9.9.9"], timeout=1.5, lifetime=3.0)
+        self.dns_solver = DNSResolver(use_cache=True, nameservers=["223.5.5.5","114.114.114.114"], timeout=1.0, lifetime=2.0, min_ttl=5, max_ttl=1800, neg_ttl=20, parallel_ns=True)
         self._socket_locks = defaultdict(asyncio.Lock)
 
         self._relay_bytes = {}  # key=(circ_id, stream_id, direction) -> {"bytes":0,"cells":0,"t0":mono_ns}
+        self._relay_agg = {}
         self._relay_flush_task = asyncio.create_task(self._flush_relay_agg())
 
     async def start_protocol(self):
@@ -143,7 +145,7 @@ class Tor_Node(Tor_base):
                 if sock is None:
                     t_tls = time.perf_counter()
                     try:
-                        sock = await Tor_Socket.dial(remote_addr=addr, source_ip=self.host, on_cell=self.handle_cell, node_id=self.node_id)
+                        sock = await Tor_Socket.dial(remote_addr=addr, source_ip=self.host, on_cell=self.handle_cell, node_id=self.node_id, **get_args(sim_ip=self.sim_ip))
                         print("build a new socket from: ", addr)
                         self.socket_map[addr] = sock
                         asyncio.create_task(self.handle_connection(addr, sock))

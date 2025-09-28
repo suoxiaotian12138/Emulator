@@ -99,7 +99,6 @@ class Tor_Consensus:
     @staticmethod
     async def _fetch_desc_real_sync(fingerprint: str, timeout: int = 30) -> RelayDescriptor:
         fp = fingerprint
-
         processed = []
         if len(fp) == 27:
             fp = base64_to_hex_fingerprint(fp)

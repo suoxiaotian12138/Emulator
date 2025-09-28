@@ -16,7 +16,7 @@ from tools.Packet.packet_TCP import accept_tls_connections, TLSConnector
 from tools.Crypt.key_generator import create_server_context, ed25519_setup, rsa_setup, generate_cert_and_key_from_ed25519, generate_tls_rsa_cert
 
 from examples.Tor_simplified.Tor_Socket import Tor_Socket
-
+from tools.Network_Management.delay_env import get_args
 
 class Tor_base:
 
@@ -119,7 +119,9 @@ class Tor_base:
             tor_sock = Tor_Socket(reader=reader, writer=writer,
                                   source_ip=self.host,
                                   on_cell=self.handle_cell,
-                                  node_id=self.node_id)  # ★ 传入 node_id，便于上层追踪/复用
+                                  node_id=self.node_id,
+                                  **get_args(sim_ip=getattr(self, "sim_ip", None))
+                                  )
             asyncio.create_task(tor_sock.start_listen())
 
         self.print(f"[LISTEN] Node {self.name} listening on {self.host}:{self.port}")

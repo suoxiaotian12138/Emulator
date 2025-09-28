@@ -87,7 +87,7 @@ async def main():
 
     # 配置参数
     total_batches = 1
-    clients_per_batch = 100
+    clients_per_batch = 10
     # delay_before_stream_send = 10  # 每批建立连接后等多少秒再发流
     delay_between_batches = 20      # 每批之间间隔几秒
 

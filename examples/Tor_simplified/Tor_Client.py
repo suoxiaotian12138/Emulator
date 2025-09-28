@@ -16,8 +16,9 @@ from examples.Tor_simplified.Tor_Cell import *
 from examples.Tor_simplified.Tor_Circuit import CircuitManager, MAX_CIRCUIT_AGE_S, \
     MAX_STREAMS_PER_CIRCUIT, IDLE_TIMEOUT_S, PREBUILD_OPEN, compute_isolation_key
 
+from tools.Network_Management.delay_env import get_args
 class Tor_Client(Tor_base):
-    def __init__(self, name: str, host: str, port: int, model: Literal["sim", "real"] = "sim"):
+    def __init__(self, name: str, host: str, port: int, model: Literal["sim", "real"] = "sim", sim_ip: str | None = None):
         super().__init__(name, host, port, model)
         self.output_buffer = Queue()
 
@@ -30,7 +31,7 @@ class Tor_Client(Tor_base):
         self._sid2uid: dict[int, str] = {}
         self.circuit_mgr = CircuitManager(self)
 
-
+        self.sim_ip = sim_ip or "9.9.9.9"
     async def start_protocol(self):
         self.tasks['listener_task'] = asyncio.create_task(self.monitor_tor_socket())
         await self.consensus_init()
@@ -54,7 +55,7 @@ class Tor_Client(Tor_base):
 
         desc = await self.consensus.fetch_descriptor(self.guard.fingerprint_str)
         self.guard.set_descriptor(desc)
-        socket = Tor_Socket(self.host, on_cell=self.handle_cell, node_id=self.node_id)
+        socket = Tor_Socket(self.host, on_cell=self.handle_cell, node_id=self.node_id, **get_args(sim_ip=self.sim_ip))
 
         #和guard的tls握手记录
         await socket.setup_socket(remote_addr=self.guard.addr)
