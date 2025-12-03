@@ -5,6 +5,7 @@ import time
 from collections import deque
 import math
 from typing import Optional, Tuple
+
 import geoip2.database
 import aiohttp
 
@@ -68,7 +69,7 @@ class MappingCache:
         self.dir = directory
         self.default_sim_ip = default_sim_ip
         self.ttl = float(ttl_sec)
-        self._fp2sim: dict[str, Tuple[str, float]] = {}           # fp -> (sim_ip, expires_at)
+        self._fp2sim: dict[str, Tuple[str, float]] = {}                # fp -> (sim_ip, expires_at)
         self._addr2sim: dict[Tuple[str, int], Tuple[str, float]] = {}  # 退化用
 
     @staticmethod
@@ -111,18 +112,37 @@ class GeoDelayModel:
       - 如果 src_sim == dst_sim：返回 1ms
       - 否则返回 40ms（你可以传入自定义函数/表，替换这个策略）
     抖动：~10% 基于截断正态，最多 ±30%
+
+    新增：可选“人工附加延迟”功能（保持兼容，默认不生效）
+      - manual_offset_ms: 对所有路径附加的单向固定 OWD（默认 0ms）
+      - per_pair_offset: 对特定 (src_sim, dst_sim) 路径附加的单向固定 OWD（默认无）
     """
-    def __init__(self, latency_fn=None, jitter_ratio: float = 0.10, jitter_cap: float = 0.30, floor_ms: float = 1.0):
+    def __init__(
+        self,
+        latency_fn=None,
+        jitter_ratio: float = 0.10,
+        jitter_cap: float = 0.30,
+        floor_ms: float = 1.0,
+        *,
+        manual_offset_ms: float = 0.0,
+        per_pair_offset: Optional[dict[tuple[str, str], float]] = None,
+    ):
         """
         latency_fn: Callable(src_sim_ip:str, dst_sim_ip:str) -> base_ms
         jitter_ratio: 抖动标准差占基线比例（默认 10%）
         jitter_cap: 抖动截断上限（默认 ±30%）
         floor_ms: 同地最低 1ms
+        manual_offset_ms: 对所有路径附加的单向固定延迟（默认 0ms）
+        per_pair_offset: 对特定 (src_sim, dst_sim) 路径附加的单向固定延迟（ms）
         """
         self.latency_fn = latency_fn or self._default_latency
         self.jitter_ratio = float(jitter_ratio)
         self.jitter_cap = float(jitter_cap)
         self.floor_ms = float(floor_ms)
+
+        # 新增：可选人工偏置（不传即为 0，不影响旧逻辑）
+        self.manual_offset_ms = float(manual_offset_ms)
+        self.per_pair_offset = dict(per_pair_offset or {})
 
     @staticmethod
     def _default_latency(src_sim: str, dst_sim: str) -> float:
@@ -132,6 +152,14 @@ class GeoDelayModel:
 
     def base_owd_ms(self, src_sim: str, dst_sim: str) -> float:
         return max(self.floor_ms, float(self.latency_fn(src_sim, dst_sim)))
+
+    def _pair_extra_ms(self, src_sim: str, dst_sim: str) -> float:
+        # 精确匹配；如需对称可同时填两向
+        return float(self.per_pair_offset.get((src_sim, dst_sim), 0.0))
+
+    def extra_offset_ms(self, src_sim: str, dst_sim: str) -> float:
+        """返回本次路径的人工附加 OWD(ms) = 全局 + per-pair"""
+        return max(0.0, self.manual_offset_ms) + max(0.0, self._pair_extra_ms(src_sim, dst_sim))
 
     def jitter_ms(self, base_ms: float) -> float:
         sigma = max(0.2, base_ms * self.jitter_ratio)
@@ -144,13 +172,18 @@ class GeoDelayModel:
         # 传播延迟是非负，这里只允许“增加或少量不增加”，不允许变成负值
         return max(0.0, j)
 
+    # 便捷组合（不影响旧用法）
+    def composed_owd_ms(self, src_sim: str, dst_sim: str) -> float:
+        base = self.base_owd_ms(src_sim, dst_sim)
+        return base + self.jitter_ms(base) + self.extra_offset_ms(src_sim, dst_sim)
+
 
 # ========= 写端注入器（只做地理延迟；不做带宽/排队） =========
 
 class DelayInjectorWriter:
     """
-    包装底层 writer，把“地理传播延迟 + 抖动”注入到 *首批* 数据：
-      - 当队列从 empty -> non-empty：等待 base_owd + jitter 后 flush 一次（“预热”）
+    包装底层 writer，把“地理传播延迟 + 抖动 (+可选人工偏置)”注入到 *首批* 数据：
+      - 当队列从 empty -> non-empty：等待 base_owd + jitter (+ extra_offset) 后 flush 一次（“预热”）
       - 队列持续非空时：立即 flush（不再叠加传播延迟），直到清空
       - 队列再次从空 -> 非空：重复“预热”
 
@@ -172,8 +205,12 @@ class DelayInjectorWriter:
         self._dst = dst_sim_ip
         self._model = model
 
-        self._base_s = (self._model.base_owd_ms(self._src, self._dst) + self._model.jitter_ms(
-            self._model.base_owd_ms(self._src, self._dst))) / 1000.0
+        # 旧字段保留（兼容），但实际预热时会重新计算
+        self._base_s = (
+            self._model.base_owd_ms(self._src, self._dst)
+            + self._model.jitter_ms(self._model.base_owd_ms(self._src, self._dst))
+            + self._model.extra_offset_ms(self._src, self._dst)
+        ) / 1000.0
 
         self._q: deque[bytes] = deque()
         self._wake = asyncio.Event()
@@ -238,12 +275,13 @@ class DelayInjectorWriter:
                     except asyncio.TimeoutError:
                         continue
 
-                # 队列非空；若尚未“预热”，先等待一次 base 传播+抖动
+                # 队列非空；若尚未“预热”，先等待一次 base 传播+抖动+人工偏置
                 if not self._pipeline_hot:
-                    # 重新计算一遍 jitter（让每次“预热”不完全相同）
+                    # 重新计算一遍（让每次“预热”不完全相同）
                     base_ms = self._model.base_owd_ms(self._src, self._dst)
                     jitter_ms = self._model.jitter_ms(base_ms)
-                    base_s = (base_ms + jitter_ms) / 1000.0
+                    extra_ms = self._model.extra_offset_ms(self._src, self._dst)  # 新增：人工附加
+                    base_s = (base_ms + jitter_ms + extra_ms) / 1000.0
                     if base_s > 0:
                         await asyncio.sleep(base_s)
                     self._pipeline_hot = True
@@ -275,8 +313,6 @@ class DelayInjectorWriter:
 
 
 # ======== GeoIP 驱动：经纬度 -> 大圆距离 -> OWD(ms) ========
-
-
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """大圆距离（km）"""

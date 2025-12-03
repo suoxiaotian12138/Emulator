@@ -152,30 +152,50 @@ class Tor_Socket():
                    ssl_ctx: ssl.SSLContext | None = None,
                    node_id: Optional[str] = None,
                    *,
-                   enable_delay: bool = False,                   # ★ 透传
-                   sim_ip: Optional[str] = None,                 # ★ 透传
-                   delay_mapping: Optional[MappingCache] = None, # ★ 透传
-                   delay_model: Optional[GeoDelayModel] = None   # ★ 透传
+                   enable_delay: bool = False,
+                   sim_ip: Optional[str] = None,
+                   delay_mapping: Optional[MappingCache] = None,
+                   delay_model: Optional[GeoDelayModel] = None
                    ):
+        # 1) 先做 TLS 拨号（保持你 tools.dial_tls 的封装）
         reader, writer = await dial_tls(
             remote_addr,
             source_ip=source_ip,
             node_id=node_id,
             timeout=15.0
         )
+
+        # 2) 用现成的 reader/writer 构造 Tor_Socket
         self = cls(
-            source_ip=source_ip, reader=reader, writer=writer, on_cell=on_cell,
+            source_ip=source_ip,
+            reader=reader,
+            writer=writer,
+            on_cell=on_cell,
             node_id=node_id,
-            enable_delay=enable_delay,            # ★
-            sim_ip=sim_ip,                        # ★
-            delay_mapping=delay_mapping,          # ★
-            delay_model=delay_model               # ★
+            enable_delay=enable_delay,
+            sim_ip=sim_ip,
+            delay_mapping=delay_mapping,
+            delay_model=delay_model
         )
         self.handshake_initiator = True
-        ...
-        # 建好即尝试创建注入器（若启用）  # ★
-        await self._ensure_injector()            # ★
+
+        # 3) 和 setup_socket() 一致，把底层 transport / socket / peer / local 补齐
+        try:
+            self.transport = writer.transport
+            self.socket = self.transport.get_extra_info("socket")
+            self.peer = self.transport.get_extra_info("peername")
+            self.peer_str = f"{self.peer[0]}:{self.peer[1]}"
+            self.local = self.writer.get_extra_info("sockname")
+            self.local_str = f"{self.local[0]}:{self.local[1]}"
+        except Exception:
+            # 出错也别影响后续逻辑
+            pass
+
+        # 4) 若启用注入且依赖齐全，则创建连接级注入器
+        await self._ensure_injector()
+
         return self
+
 
 
     async def send(self, buf: bytes):

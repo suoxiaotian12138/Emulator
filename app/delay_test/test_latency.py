@@ -1,203 +1,240 @@
 import sys
 import os
 import asyncio
-import concurrent.futures
 import time
-import json
-from contextlib import suppress
+import statistics as stats
+import contextlib
+from aiohttp import web
 
-# ==== Windows 事件循环 & 线程池（与你原脚本一致风格） ====
+# Win 兼容
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-MAX_TLS_THREADS = min(64, (os.cpu_count() or 4) * 8)
-loop = asyncio.get_event_loop()
-loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(
-    max_workers=MAX_TLS_THREADS,
-    thread_name_prefix="tls-worker"
-))
-
-# ==== 你工程里的模块 ====
-from aiohttp import web
+# 你的工程对象
 from examples.Tor_simplified.Tor_Directory import TorDirectoryServer
 from examples.Tor_simplified.Tor_Node import Tor_Node
 from examples.Tor_simplified.Tor_Client import Tor_Client
-from tools.Network_Management.topology import select_relays_by_role
 
-# ==== 延迟注入一键封装（你已上传） ====
-from tools.Network_Management.delay_env import DelayEnv
+# 延迟注入工具
+from tools.Network_Management.geo_delay_injector import DirectoryClient, MappingCache, GeoDelayModel
+
+# 注册器（被动端自动注入）
 from tools.Network_Management.socket_delay_registry import (
-    install_global_socket_delay,   # 全局安装“默认 socket 延迟参数”
-    uninstall_global_socket_delay  # 全局卸载
+    set_default_env, clear_default_env, register_delay_env, clear_all
 )
 
-# ================== 可调参数 ==================
-CONSENSUS_FILE = os.environ.get("CONSENSUS_FILE",
-    r"D:\project\Oniverse_refactor\2023-01-01-00-00-00-consensus"
-)
-DIR_HOST = "127.0.0.1"
-DIR_PORT = 8080
+# 主动端透传参数
+from tools.Network_Management.delay_env import configure
+
+# ================= 基本配置 =================
+DIR_HOST, DIR_PORT = "127.0.0.1", 8080
 os.environ["DIRECTORY_ADDR"] = f"{DIR_HOST}:{DIR_PORT}"
 
-# 每类节点数量（>3 可避免角色被抢用导致不够）
-N_GUARD = 4
-N_MIDDLE = 4
-N_EXIT = 4
-
-# 三跳
 HOPS = 3
-
-# 请求：
-REQ = b"HEAD / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+REQUEST = b"HEAD / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
 DST = ("example.com", 80)
 
-# 给每类节点准备一些 sim_ip（可按需扩展/替换）
-SIM_IPS_GUARD = ["1.1.1.1", "1.0.0.1", "8.8.8.8", "9.9.9.9"]
-SIM_IPS_MID   = ["23.228.128.136", "52.0.0.1", "104.16.0.1", "151.101.1.69"]
-SIM_IPS_EXIT  = ["203.0.113.10", "198.51.100.20", "185.199.108.153", "140.82.113.4"]
+# 三类节点的 sim_ip（用首段标识“洲”）
+# 10.* -> NA  20.* -> EU  30.* -> AS  40.* -> AU
+SIM_POOL = [
+    "10.0.0.1","10.0.0.2","10.0.0.3",   # Guard : 北美
+    "20.0.0.1","20.0.0.2","20.0.0.3",   # Middle: 欧洲
+    "30.0.0.1","30.0.0.2","30.0.0.3",   # Exit  : 亚洲
+]
 
-# 端口段（避免冲突）
 BASE_PORT = 9700
 CLIENT_PORT = 9801
 
-RESULTS_FILE = os.path.join(os.path.dirname(__file__), "latency_results.jsonl")
+# 近/远 两组 client 的 sim_ip
+CLIENT_NEAR = "10.0.9.9"   # 与 Guard 同洲（北美）
+CLIENT_FAR  = "40.0.0.1"   # 澳大利亚，远离三跳路径（NA→EU→AS）
+
+# 每个场景的重复次数
+REPEAT = 5
 
 
-# ================== 小工具 ==================
-async def start_directory_nonblocking():
-    """用 AppRunner/TCPSite 启目录服务，不接管事件循环。"""
-    dir_server = TorDirectoryServer(host=DIR_HOST, port=DIR_PORT)
-    runner = web.AppRunner(dir_server.app)
+# ================= 目录服务 =================
+async def start_directory():
+    srv = TorDirectoryServer(host=DIR_HOST, port=DIR_PORT)
+    runner = web.AppRunner(srv.app)
     await runner.setup()
     site = web.TCPSite(runner, DIR_HOST, DIR_PORT)
     await site.start()
     print(f"[DIR] http://{DIR_HOST}:{DIR_PORT}")
     return runner
 
-async def spawn_nodes_with_simip(guards, middles, exits, base_port):
-    """按选出的 relays 启动节点，并为每一类按顺序分配 sim_ip。"""
+
+# ================= 启动节点 =================
+async def start_nodes():
     nodes = []
+    role_flags = {
+        "Guard":  ["Running","Valid","Guard","Fast"],
+        "Middle": ["Running","Valid","Fast"],
+        "Exit":   ["Running","Valid","Exit","Fast"],
+    }
+    names = [
+        ("N1-GUA","Guard"),
+        ("N2-GUA","Guard"),
+        ("N3-GUA","Guard"),
+        ("N4-MID","Middle"),
+        ("N5-MID","Middle"),
+        ("N6-MID","Middle"),
+        ("N7-EXT","Exit"),
+        ("N8-EXT","Exit"),
+        ("N9-EXT","Exit"),
+    ]
 
-    # Guard
-    for i, r in enumerate(guards):
-        ip = "127.0.0.1"; port = base_port + i
-        sim_ip = SIM_IPS_GUARD[i % len(SIM_IPS_GUARD)]
-        n = Tor_Node(
-            name=r["nickname"], host=ip, port=port, flags=r["flags"],
-            protocols=r["protocols"], exit_policy=r["exit_policy"], sim_ip=sim_ip
+    for i, (name, role) in enumerate(names, start=1):
+        port = BASE_PORT + i
+        sim_ip = SIM_POOL[i-1]
+        node = Tor_Node(
+            name=name, host="127.0.0.1", port=port,
+            flags=role_flags[role],
+            protocols="Cons=2 Desc=2 DirCache=2 FlowCtrl=2 Link=4-5 LinkAuth=3 Microdesc=2 Padding=2 Relay=4",
+            exit_policy="accept *:1-65535" if role == "Exit" else "reject *:*",
+            sim_ip=sim_ip,
         )
-        nodes.append(n)
-        asyncio.create_task(n.start_protocol())
+        nodes.append(node)
+        asyncio.create_task(node.start_protocol())
 
-    # Middle
-    offset = len(guards)
-    for i, r in enumerate(middles):
-        ip = "127.0.0.1"; port = base_port + offset + i
-        sim_ip = SIM_IPS_MID[i % len(SIM_IPS_MID)]
-        n = Tor_Node(
-            name=r["nickname"], host=ip, port=port, flags=r["flags"],
-            protocols=r["protocols"], exit_policy=r["exit_policy"], sim_ip=sim_ip
-        )
-        nodes.append(n)
-        asyncio.create_task(n.start_protocol())
-
-    # Exit
-    offset += len(middles)
-    for i, r in enumerate(exits):
-        ip = "127.0.0.1"; port = base_port + offset + i
-        sim_ip = SIM_IPS_EXIT[i % len(SIM_IPS_EXIT)]
-        n = Tor_Node(
-            name=r["nickname"], host=ip, port=port, flags=r["flags"],
-            protocols=r["protocols"], exit_policy=r["exit_policy"], sim_ip=sim_ip
-        )
-        nodes.append(n)
-        asyncio.create_task(n.start_protocol())
-
-    # 等一会儿，确保节点监听起来 & 描述符上传
+    # 给目录注册一些时间
     await asyncio.sleep(1.2)
     return nodes
 
-async def build_topology(base_port):
-    relays = select_relays_by_role(CONSENSUS_FILE, N_GUARD, N_MIDDLE, N_EXIT)
-    guards, middles, exits = relays["guard"], relays["middle"], relays["exit"]
-    nodes = await spawn_nodes_with_simip(guards, middles, exits, base_port)
-    return nodes
+
+# ================= 洲际延迟模型 =================
+def region_of(sim_ip: str) -> str:
+    # 根据首段粗暴映射：10->NA 20->EU 30->AS 40->AU 其他->NA
+    try:
+        first = int(sim_ip.split(".")[0])
+    except Exception:
+        return "NA"
+    return {10:"NA", 20:"EU", 30:"AS", 40:"AU"}.get(first, "NA")
+
+def make_latency_fn():
+    # 基础/更激进的洲际时延（单程，毫秒）
+    # 同洲：3ms；跨洲：更大
+    base = {
+        "NA": {"NA": 3,   "EU": 80,  "AS": 140, "AU": 160},
+        "EU": {"NA": 80,  "EU": 3,   "AS": 120, "AU": 180},
+        "AS": {"NA": 140, "EU": 120, "AS": 3,   "AU": 100},
+        "AU": {"NA": 160, "EU": 180, "AS": 100, "AU": 3},
+    }
+
+    def latency_ms(src_ip: str, dst_ip: str) -> float:
+        r1, r2 = region_of(src_ip), region_of(dst_ip)
+        return float(base[r1][r2])
+
+    return latency_ms
 
 
-async def run_one_round(label: str, enable_delay: bool, env: DelayEnv | None):
-    """
-    - enable_delay=False：卸载全局 socket 延迟参数
-    - enable_delay=True ：安装 env 的 socket_kwargs 到全局
-    然后起客户端，打一条 3-hop 请求，测 E2E。
-    """
-    # 切换“全局延迟参数”
-    if enable_delay and env:
-        install_global_socket_delay(**env.socket_kwargs())
-        print(f"[{label}] delay=ON  (global socket kwargs installed)")
-    else:
-        uninstall_global_socket_delay()
-        print(f"[{label}] delay=OFF (global socket kwargs cleared)")
+# ================= 注入参数下发（默认+节点级） =================
+def apply_delay_env(*, enable: bool, nodes, mapping: MappingCache, model: GeoDelayModel, client_sim_ip: str):
+    # A) 主动端透传（Tor_Socket(..., **get_args(...)) 取用）
+    configure(enabled=enable, mapping=mapping, model=model)
 
-    # 启客户端
-    client = Tor_Client(name=f"client-{label}", host="127.0.0.1", port=CLIENT_PORT, model="sim")
-    task_client = asyncio.create_task(client.start_protocol())
+    # B) 被动端自动查表（listen 侧）
+    clear_all()
+    clear_default_env()
 
-    # 等待 client 就绪
-    await asyncio.sleep(0.6)
+    # client 默认（被动接收的socket会继承，除非节点级覆盖）
+    set_default_env(enable=enable, local_sim_ip=client_sim_ip, mapping=mapping, model=model)
 
-    # 建路+发流（一次），测 E2E
+    # 每个节点用自己的 sim_ip（覆盖默认）
+    for n in nodes:
+        register_delay_env(
+            n.node_id,
+            enable=enable,
+            local_sim_ip=getattr(n, "sim_ip", client_sim_ip),
+            mapping=mapping,
+            model=model
+        )
+
+
+# ================= 单次请求（返回E2E ms） =================
+async def one_request(label: str, *, enable_delay: bool, mapping: MappingCache, model: GeoDelayModel, nodes, client_sim_ip: str) -> float:
+    apply_delay_env(enable=enable_delay, nodes=nodes, mapping=mapping, model=model, client_sim_ip=client_sim_ip)
+
+    client = Tor_Client(name=f"client-{label}", host="127.0.0.1", port=CLIENT_PORT, model='sim', sim_ip=client_sim_ip)
+    t_client = asyncio.create_task(client.start_protocol())
+
+    # 等握手
+    await asyncio.sleep(0.8)
+
     t0 = time.perf_counter()
     try:
-        await client.make_stream(message=REQ, addr=DST, hops_count=HOPS)
-        e2e_ms = (time.perf_counter() - t0) * 1000.0
-        print(f"[{label}] E2E = {e2e_ms:.1f} ms")
+        await client.make_stream(message=REQUEST, addr=DST, hops_count=HOPS)
+        e2e = (time.perf_counter() - t0) * 1000.0
+        print(f"[{label}] E2E = {e2e:.1f} ms")
     except Exception as e:
-        print(f"[{label}] E2E FAIL: {e!r}")
-        e2e_ms = float("nan")
+        print(f"[{label}] FAILED: {e}")
+        e2e = float('nan')
 
-    # 给协议栈一点时间把 END/日志刷出
-    await asyncio.sleep(0.6)
+    # 等日志刷出
+    await asyncio.sleep(0.8)
 
-    # 关闭客户端
-    with suppress(Exception):
-        task_client.cancel()
-        await task_client
+    with contextlib.suppress(asyncio.CancelledError):
+        t_client.cancel()
+        await t_client
 
-    return {"label": label, "E2E_ms": e2e_ms}
+    return e2e
 
 
-async def main():
-    # 1) 启目录
-    dir_runner = await start_directory_nonblocking()
-
-    # 2) 起拓扑（≥3 跳且每类多台）
-    _nodes = await build_topology(BASE_PORT)
-
-    # 3) 延迟环境（只在“有延迟”回合用；一键打包 mapping+model+开关）
-    #    这里的 `client_sim_ip` 是“本端”的模拟 IP，可写成你运行 client 所在的“地区代表 IP”
-    env = await DelayEnv.create(
-        dire_addr=(DIR_HOST, DIR_PORT),
-        client_sim_ip="198.18.0.1",    # 随意取个测试网段/地区代表IP
-        jitter_ratio=0.10,             # 抖动 10%
-        jitter_cap=0.30,               # 抖动封顶 30%
-        same_city_ms=1.0,              # 同城/同点最小 1ms
-        default_owd_ms=40.0            # 异地单程基线 40ms（GeoIP 会覆盖具体对）
+# ================= N次场景测试 =================
+async def run_scenario(name: str, *, enable_delay: bool, mapping: MappingCache, base_model: GeoDelayModel, nodes, client_sim_ip: str, repeat: int):
+    # 每个场景可独立定制模型抖动，避免过于“死板”
+    model = GeoDelayModel(
+        latency_fn=base_model.latency_fn,
+        jitter_ratio=0.05 if enable_delay else 0.0,  # GEO 场景加一点抖动
+        jitter_cap=0.35,
+        floor_ms=1.0
     )
+    results = []
+    for i in range(1, repeat + 1):
+        label = f"{name}-{i}"
+        e2e = await one_request(label, enable_delay=enable_delay, mapping=mapping, model=model, nodes=nodes, client_sim_ip=client_sim_ip)
+        results.append(e2e)
+    # 统计
+    valid = [x for x in results if x == x]  # 过滤 NaN
+    mean = stats.mean(valid) if valid else float('nan')
+    stdev = stats.pstdev(valid) if len(valid) > 1 else 0.0
+    print(f"[{name}] MEAN={mean:.1f} ms  STD={stdev:.1f} ms  (n={len(valid)}/{repeat})")
+    return name, results, mean, stdev
 
-    # 4) 两轮对比
-    res_no  = await run_one_round("NO_DELAY", enable_delay=False, env=None)
-    res_geo = await run_one_round("GEO_DELAY", enable_delay=True,  env=env)
 
-    # 5) 写结果
-    os.makedirs(os.path.dirname(RESULTS_FILE), exist_ok=True)
-    with open(RESULTS_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(res_no, ensure_ascii=False) + "\n")
-        f.write(json.dumps(res_geo, ensure_ascii=False) + "\n")
-    print(f"[WRITE] -> {RESULTS_FILE}")
+# ================= 主流程 =================
+async def main():
+    # 目录
+    dir_runner = await start_directory()
 
-    # 6) 稍等让节点把日志 flush 完，再清理目录 runner
-    await asyncio.sleep(1.0)
-    await dir_runner.cleanup()
+    # 映射/模型
+    dcli = DirectoryClient(f"http://{DIR_HOST}:{DIR_PORT}")
+    mapping = MappingCache(directory=dcli, default_sim_ip="127.0.0.1", ttl_sec=180.0)
+    base_model = GeoDelayModel(latency_fn=make_latency_fn(), jitter_ratio=0.0, jitter_cap=0.0, floor_ms=1.0)
+
+    # 9 节点
+    nodes = await start_nodes()
+
+    # 三个场景：NO_DELAY / GEO_NEAR / GEO_FAR
+    s1 = await run_scenario("NO_DELAY",  enable_delay=False, mapping=mapping, base_model=base_model, nodes=nodes, client_sim_ip=CLIENT_NEAR, repeat=REPEAT)
+    s2 = await run_scenario("GEO_NEAR",  enable_delay=True,  mapping=mapping, base_model=base_model, nodes=nodes, client_sim_ip=CLIENT_NEAR, repeat=REPEAT)
+    s3 = await run_scenario("GEO_FAR",   enable_delay=True,  mapping=mapping, base_model=base_model, nodes=nodes, client_sim_ip=CLIENT_FAR,  repeat=REPEAT)
+
+    # 总结
+    print("\n===== SUMMARY =====")
+    for name, results, mean, stdev in (s1, s2, s3):
+        print(f"{name:<10}: {mean:6.1f} ms (±{stdev:.1f})  -> {', '.join(f'{x:.1f}' for x in results)}")
+
+    # 关节点
+    stop_tasks = [asyncio.create_task(n.stop_protocol()) for n in nodes]
+    await asyncio.gather(*stop_tasks, return_exceptions=True)
+
+    # 清理
+    await asyncio.sleep(0.5)
+    with contextlib.suppress(Exception):
+        await dcli.aclose()
+    with contextlib.suppress(Exception):
+        await dir_runner.cleanup()
 
 
 if __name__ == "__main__":

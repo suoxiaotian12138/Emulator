@@ -1,159 +1,131 @@
+# tools/Network_Management/geo_delay_preset.py
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
+import math
+from functools import lru_cache
+from typing import Callable, Dict, Tuple, Optional
 
-# 依赖：你已经有的这些类/函数（在 geo_delay_injector.py 里）
-from tools.Network_Management.geo_delay_injector import (
-    DirectoryClient, MappingCache,
-    GeoDelayModel, GeoIPLocator, make_geo_latency_fn,
-)
+# 可选依赖：MaxMind GeoIP2
+try:
+    import geoip2.database  # pip install geoip2  （需要 MaxMind 的 *.mmdb 文件）
+except Exception:  # 不强依赖
+    geoip2 = None
 
-# --------- 环境参数解析小工具 ---------
 
-def _env_bool(name: str, default: bool) -> bool:
-    v = os.environ.get(name, "")
-    if v == "":
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "on")
+# --------- 基础：大圆距离（km） ----------
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371.0088  # WGS-84 平均半径
+    phi1 = math.radians(lat1); phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlmb/2)**2
+    return 2 * R * math.asin(math.sqrt(a))
 
-def _normalize_url(addr_or_url: Optional[str]) -> Optional[str]:
-    if not addr_or_url:
+
+# --------- 解析 IP -> (lat, lon) 的解析器 ----------
+class GeoResolver:
+    """
+    两级解析：
+      1) manual_coords: 人工表优先（适合 sim_ip 不是“真实公网IP”时）
+      2) GeoIP2 数据库（若可用）
+    """
+    def __init__(self, db_path: Optional[str] = None,
+                 manual_coords: Optional[Dict[str, Tuple[float, float]]] = None):
+        self._manual = manual_coords or {}
+        self._reader = None
+        if db_path and geoip2 is not None:
+            try:
+                self._reader = geoip2.database.Reader(db_path)
+            except Exception:
+                self._reader = None  # 打不开就算了
+
+    def close(self):
+        if self._reader:
+            try:
+                self._reader.close()
+            except Exception:
+                pass
+
+    @lru_cache(maxsize=4096)
+    def ip_to_latlon(self, ip: str) -> Optional[Tuple[float, float]]:
+        # 1) 人工表优先
+        if ip in self._manual:
+            return self._manual[ip]
+
+        # 2) GeoIP2
+        if self._reader:
+            try:
+                rec = self._reader.city(ip)
+                lat = rec.location.latitude
+                lon = rec.location.longitude
+                if lat is not None and lon is not None:
+                    return (float(lat), float(lon))
+            except Exception:
+                pass
+
         return None
-    s = addr_or_url.strip()
-    if "://" in s:
-        return s
-    return f"http://{s}"
 
-# --------- 封装好的“一键延迟环境” ---------
 
-@dataclass
-class DelayEnv:
-    enable: bool
-    mapping: Optional[MappingCache]
-    model: Optional[GeoDelayModel]
-    directory: Optional[DirectoryClient]
-    locator: Optional[GeoIPLocator]
-    default_sim_ip: str
+# --------- “真实传播时延”的经验模型 ----------
+def _fiber_owd_ms(distance_km: float,
+                  *,
+                  index_of_refraction: float = 1.468,   # 常用折射率
+                  extra_ms: float = 0.0,
+                  inflate_factor: float = 1.35         # 铺设绕路/交换机绕行的等效放大
+                  ) -> float:
+    """
+    传播速度 ~= c / n    (c≈299792 km/s, n≈1.468 => ~204,000 km/s)
+    一次单向传播:  (distance / (c/n)) * 1000 ms
+    再乘以 inflate_factor（路由绕行）+ 额外常量 extra_ms（交换/排队常量）。
+    """
+    C = 299792.458  # km/s
+    speed_km_s = C / float(index_of_refraction)  # ~204,000 km/s
+    base_ms = (distance_km / speed_km_s) * 1000.0
+    return base_ms * float(inflate_factor) + float(extra_ms)
 
-    # ——— 主入口：用配置或环境变量创建 ———
-    @classmethod
-    async def create(
-        cls,
-        *,
-        enable: Optional[bool] = None,
-        directory_url: Optional[str] = None,     # 例如 "http://127.0.0.1:8080"；缺省读 env DIRECTORY_ADDR
-        mmdb_path: Optional[str] = None,         # 例如 r"D:\data\GeoLite2-City.mmdb"；缺省读 env GEO_MMDB
-        default_sim_ip: str = "1.1.1.1",
-        cache_ttl_sec: float = 300.0,
-        # Geo 传播模型参数（可不改）
-        fiber_k: float = 1.8,
-        access_ms: float = 2.0,
-        floor_same_city_ms: float = 1.0,
-        fallback_region_default_ms: float = 40.0,
-        # 抖动
-        jitter_ratio: float = 0.10,
-        jitter_cap: float = 0.30,
-        floor_ms: float = 1.0,
-    ) -> "DelayEnv":
 
-        # 开关优先使用显式参数，其次环境变量，默认开
-        if enable is None:
-            enable = _env_bool("GEO_DELAY_ENABLE", True)
+def build_latency_fn_by_geoip(*,
+                              db_path: Optional[str],
+                              manual_coords: Optional[Dict[str, Tuple[float, float]]] = None,
+                              same_site_floor_ms: float = 1.0,
+                              same_city_thresh_km: float = 10.0,
+                              metro_thresh_km: float = 80.0,
+                              metro_bias_ms: float = 2.0,
+                              extra_ms: float = 1.0,
+                              inflate_factor: float = 1.35) -> Tuple[Callable[[str, str], float], GeoResolver]:
+    """
+    返回 (latency_fn, resolver)：
+      - latency_fn(src_sim_ip, dst_sim_ip) -> one-way delay (ms)
+      - resolver.close() 可在测试收尾关掉（防泄露 “Unclosed client session/connector”）
 
-        if not enable:
-            # 一键关闭：不占用任何资源，也不用修改调用代码
-            return cls(False, None, None, None, None, default_sim_ip)
+    规则：
+      1) 如果两 IP 无法解析经纬度 => 给一个温和的保守值（40ms）
+      2) 若距离 < same_city_thresh_km => 返回 same_site_floor_ms
+      3) 若距离 < metro_thresh_km    => 返回 floor + metro_bias_ms
+      4) 其余：fiber 传播 + 膨胀因子 + 常量开销
+    """
+    resolver = GeoResolver(db_path=db_path, manual_coords=manual_coords or {})
 
-        # 目录地址：优先参数，其次 env:DIRECTORY_ADDR（可写 "127.0.0.1:8080"）
-        if directory_url is None:
-            directory_url = os.environ.get("DIRECTORY_ADDR", "127.0.0.1:8080")
-        directory_url = _normalize_url(directory_url)
+    def _latency_fn(src_ip: str, dst_ip: str) -> float:
+        if not src_ip or not dst_ip:
+            return 40.0
+        a = resolver.ip_to_latlon(src_ip)
+        b = resolver.ip_to_latlon(dst_ip)
+        if a is None or b is None:
+            return 40.0  # 查不到经纬度时的兜底
 
-        # GeoIP mmdb：优先参数，其次 env:GEO_MMDB
-        if mmdb_path is None:
-            mmdb_path = os.environ.get("GEO_MMDB", None)
+        d_km = _haversine_km(a[0], a[1], b[0], b[1])
 
-        # 1) 目录客户端（指纹->descriptor）
-        dire = DirectoryClient(base_url=directory_url)
+        if d_km <= same_city_thresh_km:
+            return max(0.1, same_site_floor_ms)
+        if d_km <= metro_thresh_km:
+            return max(0.5, same_site_floor_ms + metro_bias_ms)
 
-        # 2) GeoIP 定位器（经纬度/大洲）
-        locator = GeoIPLocator(mmdb_path=mmdb_path)
-
-        # 3) 基于 GeoIP 的“单向传播基线函数”
-        geo_latency_fn = make_geo_latency_fn(
-            locator,
-            fiber_k=fiber_k,
-            access_ms=access_ms,
-            floor_same_city_ms=floor_same_city_ms,
-            fallback_region_default_ms=fallback_region_default_ms,
+        return _fiber_owd_ms(
+            d_km,
+            index_of_refraction=1.468,
+            extra_ms=extra_ms,
+            inflate_factor=inflate_factor
         )
 
-        # 4) 延迟模型（把基线 + 抖动封进去）
-        model = GeoDelayModel(
-            latency_fn=geo_latency_fn,
-            jitter_ratio=jitter_ratio,
-            jitter_cap=jitter_cap,
-            floor_ms=floor_ms,
-        )
-
-        # 5) 指纹/IP -> sim_ip 的缓存
-        mapping = MappingCache(directory=dire, default_sim_ip=default_sim_ip, ttl_sec=cache_ttl_sec)
-
-        return cls(True, mapping, model, dire, locator, default_sim_ip)
-
-    # —— 给 Tor_Socket.dial() 的参数，一把梭 ——
-    def socket_kwargs(self, *, local_sim_ip: Optional[str] = None, force_disable: Optional[bool] = None) -> Dict[str, Any]:
-        """
-        直接这样用：
-           sock = await Tor_Socket.dial(..., **env.socket_kwargs(local_sim_ip="8.8.8.8"))
-        """
-        if (force_disable is True) or (not self.enable):
-            return {"enable_delay": False}
-
-        return {
-            "enable_delay": True,
-            "local_sim_ip": local_sim_ip or self.default_sim_ip,
-            "delay_mapping": self.mapping,
-            "delay_model": self.model,
-        }
-
-    # —— 异步上下文：自动清理资源（aiohttp/GeoIP reader） ——
-    async def aclose(self):
-        try:
-            if self.directory:
-                await self.directory.aclose()
-        finally:
-            if self.locator:
-                self.locator.close()
-
-    async def __aenter__(self) -> "DelayEnv":
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        await self.aclose()
-
-    # —— 极简：完全从环境变量构造（一个函数就够） ——
-    @classmethod
-    async def from_env(cls) -> "DelayEnv":
-        """
-        支持的环境变量：
-          GEO_DELAY_ENABLE=1/0
-          DIRECTORY_ADDR=127.0.0.1:8080 或 http://...
-          GEO_MMDB=D:\\data\\GeoLite2-City.mmdb
-          GEO_CACHE_TTL=300
-          GEO_DEFAULT_SIM_IP=1.1.1.1
-          GEO_JITTER_RATIO=0.10
-          GEO_JITTER_CAP=0.30
-        """
-        ttl = float(os.environ.get("GEO_CACHE_TTL", "300"))
-        return await cls.create(
-            enable=_env_bool("GEO_DELAY_ENABLE", True),
-            directory_url=os.environ.get("DIRECTORY_ADDR"),
-            mmdb_path=os.environ.get("GEO_MMDB"),
-            default_sim_ip=os.environ.get("GEO_DEFAULT_SIM_IP", "1.1.1.1"),
-            cache_ttl_sec=ttl,
-            jitter_ratio=float(os.environ.get("GEO_JITTER_RATIO", "0.10")),
-            jitter_cap=float(os.environ.get("GEO_JITTER_CAP", "0.30")),
-        )
+    return _latency_fn, resolver

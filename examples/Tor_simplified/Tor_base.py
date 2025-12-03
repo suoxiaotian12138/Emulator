@@ -20,7 +20,7 @@ from tools.Network_Management.delay_env import get_args
 
 class Tor_base:
 
-    def __init__(self, name: str, host: str, port: int, model: Literal["sim", "real"] = "sim"):
+    def __init__(self, name: str, host: str, port: int, model: Literal["sim", "real"] = "sim", sim_ip: str | None = None):
 
         self.host = host
         self.port = port
@@ -66,6 +66,7 @@ class Tor_base:
         self._path = self.event_bus.path
         self._stream = self.event_bus.stream
 
+        self.sim_ip = sim_ip
     def attach_bus(self, bus: Optional[EventBus]):
         """在启动脚本里调用；忘记传就用全局默认。"""
         self.event_bus = bus
@@ -110,24 +111,30 @@ class Tor_base:
 
         return (host, port)
 
-    async def monitor_tor_socket(self):
-        """TLS 完全在 tools 层处理；Tor 只收 (reader, writer)。"""
+    # examples/Tor_simplified/Tor_base.py
 
-        def on_accept(reader: asyncio.StreamReader,
-                      writer: asyncio.StreamWriter
-                      ):
-            tor_sock = Tor_Socket(reader=reader, writer=writer,
-                                  source_ip=self.host,
-                                  on_cell=self.handle_cell,
-                                  node_id=self.node_id,
-                                  **get_args(sim_ip=getattr(self, "sim_ip", None))
-                                  )
+    from tools.Network_Management.delay_env import get_args  # 顶部已有就不用再加
+
+    async def monitor_tor_socket(self):
+        def on_accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            tor_sock = Tor_Socket(
+                reader=reader,
+                writer=writer,
+                source_ip=self.host,
+                on_cell=self.handle_cell,
+                node_id=self.node_id,
+                **get_args(sim_ip=self.sim_ip)
+            )
             asyncio.create_task(tor_sock.start_listen())
 
         self.print(f"[LISTEN] Node {self.name} listening on {self.host}:{self.port}")
-
-        # ★ 传 node_id：选择正确证书&节点级限流；listener_sock 复用已有 socket
-        await accept_tls_connections(self.socket, self.tls_connector, on_accept, node_id=self.node_id, on_server_ready=self.listener_ready.set)
+        await accept_tls_connections(
+            self.socket,
+            self.tls_connector,
+            on_accept,
+            node_id=self.node_id,
+            on_server_ready=self.listener_ready.set
+        )
 
     async def handle_connection(self, addr, tor_sock):
         try:
