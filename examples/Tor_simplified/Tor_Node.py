@@ -1,6 +1,7 @@
 import asyncio
 import requests
 import time, hashlib
+import ipaddress
 
 from tools.Crypt.key_generator import curve25519_setup, ed25519_setup, rsa_setup
 from tools.Crypt.crypt_common import rsa_identity_digest
@@ -111,12 +112,14 @@ class Tor_Node(Tor_base):
             start_time=self.start_time,
         )
         descriptor = desc_build.build()
+        print("descriptor:", descriptor)
         return descriptor
 
     def get_sim_flag(self) -> str:
         sim_flag = "opt sim-flags"
         for flag in self.flags:
             sim_flag += ' ' + flag
+        # print(sim_flag)
         return sim_flag
 
     async def create_circuit(self, create_cell, sock, circuit_id):
@@ -283,23 +286,24 @@ class Tor_Node(Tor_base):
             sid = origin_cell.stream_id
             host = cell.address
             port = cell.port
-            addr = (host, port)
             self._ev("begin_rx", circ_id=cid, stream_id=sid, host=host, port=port)
             try:
-                circuit.streams.set_stream(stream_id=origin_cell.stream_id, target_addr=addr)
-                # self.print("circuit_nodes: ", circuit.circuit_nodes)
-
+                # 1) 先解析一次（内含 ipliteral 快速路径）
                 ip_address = await self.resolve_ipv4_async(host)
+
+                # 2) 把“解析后的 IP + 端口”写到 stream.target_addr
+                addr = (ip_address, port)
+                circuit.streams.set_stream(stream_id=sid, target_addr=addr)
+
+                # 3) CONNECTED 里也用解析后的 IP
                 connected_cell = CellRelayConnected(ip_address, 0, origin_cell.circuit_id)
-
-                relay_cell = circuit.make_relay(inner_cell=connected_cell, relay_type=CellRelay, stream_id=origin_cell.stream_id)
-
+                relay_cell = circuit.make_relay(inner_cell=connected_cell, relay_type=CellRelay, stream_id=sid)
                 await sock.send_cell(relay_cell)
+
                 self._ev("connected_tx", circ_id=cid, stream_id=sid, ip=ip_address)
 
             except Exception as e:
-                # 不要静默，一定回 END，避免上游无限等
-                end = CellRelayEnd(StreamReason(10), origin_cell.circuit_id)  # 10: timeout / unreachable 自行定义
+                end = CellRelayEnd(StreamReason(10), origin_cell.circuit_id)
                 relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=sid)
                 await sock.send_cell(relay)
                 self._ev("begin_fail", circ_id=cid, stream_id=sid, error=str(e))
@@ -348,9 +352,9 @@ class Tor_Node(Tor_base):
         now = loop.time()
 
         # 配置时间控制参数
-        MAX_TOTAL_DURATION = 1.0  # 最长生存时间
-        SOFT_RETRY_WINDOW = 0.8  # 可重试时间
-        EXTRACT_TIMEOUT = 0.2  # 每次提取最长等待时间
+        MAX_TOTAL_DURATION = 2.0  # 最长生存时间
+        SOFT_RETRY_WINDOW = 1.6  # 可重试时间
+        EXTRACT_TIMEOUT = 0.4  # 每次提取最长等待时间
 
         deadline_soft = now + SOFT_RETRY_WINDOW
         deadline_hard = now + MAX_TOTAL_DURATION
@@ -399,10 +403,20 @@ class Tor_Node(Tor_base):
                 await sock.send_cell(rc)
 
     async def resolve_ipv4_async(self, domain: str) -> str:
+        try:
+            ip_obj = ipaddress.ip_address(domain)
+            if isinstance(ip_obj, ipaddress.IPv4Address):
+                ip_str = str(ip_obj)
+                self._ev("dns_bypass_ip_literal", domain=domain, ip=ip_str, ms=0.0)
+                return ip_str
+        except ValueError:
+            # Not an IP literal, fall back to real DNS
+            pass
         t0 = time.perf_counter()
         try:
             ip = await self.dns_solver.resolve_ipv4(domain)
             self._ev("dns_resolve_ok", domain=domain, ip=ip, ms=(time.perf_counter() - t0) * 1000.0)
+            print(f"[DNS] {domain} -> {ip}")
             return ip
         except Exception as e:
             self._ev("dns_resolve_fail", domain=domain,fail_reason=FailReason.UNREACHABLE.value, error=str(e), ms=(time.perf_counter() - t0) * 1000.0)

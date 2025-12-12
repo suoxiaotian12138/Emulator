@@ -125,7 +125,6 @@ class Tor_Client(Tor_base):
         t0_total = time.perf_counter()
         used_fp = set()
         used_fp.add(self.guard.fingerprint_str)
-
         if not getattr(self.guard, "descriptor_str", None):
             desc = await self.consensus.fetch_descriptor(self.guard.fingerprint_str)
             self.guard.set_descriptor(desc)
@@ -139,6 +138,7 @@ class Tor_Client(Tor_base):
         create_cell = circuit.connect_to_guard(guard_hop)
         await socket.send_cell(create_cell)
         await circuit.guard_handsake(wait_time=600)
+        self.print("guard is :", self.guard.ip)
 
         while circuit.nodes_count < hops_count:
             if circuit.nodes_count == hops_count - 1:
@@ -159,6 +159,7 @@ class Tor_Client(Tor_base):
             descriptor_str = await self.consensus.fetch_descriptor(router["fingerprint"])
             extend_node = Tor_Router(router)
             extend_node.set_descriptor(descriptor_str)
+            self.print("hop is :", extend_node.ip)
 
             t_rtt = HopTimer().start()
             try:

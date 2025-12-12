@@ -345,13 +345,8 @@ class Tor_Socket():
         await self.send_cell(net_info_cell)
 
     async def send_cells(self, cells):
-        if not cells:
-            return
-        ba = bytearray()
-        ser = self.protocol.serialize
         for cell in cells:
-            ba.extend(ser(cell))
-        await self.send(bytes(ba))  # send() 内部只 drain 一次（且带注入）
+            await self.send_cell(cell)
 
     async def send_cell(self, cell):
         if self._closing.is_set():

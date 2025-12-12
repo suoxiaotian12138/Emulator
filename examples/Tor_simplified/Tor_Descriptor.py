@@ -119,7 +119,7 @@ class TorDescriptor_build:
         if self.ipv6_policy:
             lines.append(f"ipv6-policy {self.ipv6_policy}")
 
-        lines.append(f"opt sim-flags {self.sim_flag }")
+        lines.append(f"{self.sim_flag }")
 
         # ---------- signatures ----------
         prefix = b"Tor router descriptor signature v1"

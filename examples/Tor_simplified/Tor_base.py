@@ -96,6 +96,7 @@ class Tor_base:
     @staticmethod
     def get_directory_address(default=None):
         addr = os.environ.get('DIRECTORY_ADDR', default)
+        # print("addr is :",addr)
         if not addr:
             return None  # ✅ 改为返回 None 而不是抛错
 

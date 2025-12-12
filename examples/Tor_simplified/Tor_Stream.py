@@ -283,9 +283,11 @@ class Tor_Stream:
                 # 消费头部
                 del buf[:h_end + 4]
                 host_port = (path or "")
-                host, port = host_port.split(":")[0], int(host_port.split(":")[1]) if ":" in host_port else 443
+                parsed_host, parsed_port = host_port.split(":")[0], int(
+                    host_port.split(":")[1]) if ":" in host_port else 443
+                target_host, target_port = self._get_target_host_port_for_http(parsed_host, parsed_port)
 
-                await self._open_remote(host, port)
+                await self._open_remote(target_host, target_port)
                 self._mode = "connect-tunnel"
 
                 # 返回 200，随后走隧道
@@ -295,8 +297,9 @@ class Tor_Stream:
             host_hdr = hdrs.get(b"host")
             if not host_hdr:
                 return b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\n\r\nMissing Host header."
-            target_host = host_hdr.decode("latin-1").strip()
-            target_port = 80
+            parsed_host = host_hdr.decode("latin-1").strip()
+            target_host, target_port = self._get_target_host_port_for_http(parsed_host, 80)
+
 
             cl = _http_content_length(hdrs)
             # 已到达的 body（可能为 0）
@@ -327,11 +330,17 @@ class Tor_Stream:
                 return None
             first_rec = bytes(buf[:total])
             sni = _extract_sni_hostname(first_rec)
-            if not sni:
-                return None  # 继续等待更多握手数据
             del buf[:total]
 
-            await self._open_remote(sni, 443)
+            # 优先使用 BEGIN 的地址；否则 fallback 到 SNI:443
+            if self.target_addr is not None:
+                host, port = self.target_addr
+            else:
+                if not sni:
+                    return None  # 继续等更多数据
+                host, port = sni, 443
+
+            await self._open_remote(host, port)
             self._mode = "tls-tunnel"
 
             self._remote_writer.write(first_rec)
@@ -348,6 +357,20 @@ class Tor_Stream:
                 return msg
 
         return None
+
+    def _get_target_host_port_for_http(self, parsed_host: str, default_port: int) -> tuple[str, int]:
+        """
+        优先使用 BEGIN 里的 target_addr，如果存在的话：
+          - host 用 BEGIN 的 host
+          - port 用 BEGIN 的 port
+        否则 fallback 到解析出来的 host / 默认端口
+        """
+        if self.target_addr is not None:
+            h, p = self.target_addr
+            # 如果 BEGIN 里 host 是 IP，而 HTTP 里的 Host 是域名，这里可以选择谁为主
+            return h, p
+        # 没有 BEGIN 信息（理论上不会），退回解析结果
+        return (parsed_host, default_port)
 
     def _ensure_stream_state(self):
         if not hasattr(self, "_buffer"): self._buffer = bytearray()

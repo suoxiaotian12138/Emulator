@@ -141,13 +141,35 @@ class Tor_Consensus:
 
         return results
 
-    def get_random_router(self, flags=None, has_dir_port=None, exclude=None):
+    def get_random_router(self, flags=None, has_dir_port=None,
+                          exclude=None, exclude_flags=None):
+        """
+        Select a random router:
+        - flags: required flags (all must be present)
+        - exclude: set/list of fingerprints to skip
+        - exclude_flags: flags that must NOT be present
+        """
         exclude = set(exclude or [])
-        routers = self.get_routers(flags, has_dir_port)
-        candidates = [r for r in routers if r["fingerprint"] not in exclude]
+        exclude_flags = set(exclude_flags or [])
 
+        # 先按“需要的 flags / dir_port 条件”过滤一轮
+        routers = self.get_routers(flags, has_dir_port)
+
+        candidates = []
+        for r in routers:
+            if r["fingerprint"] in exclude:
+                continue
+
+            r_flags = set(r.get("flags", []))
+
+            # 如果节点包含任意一个要排除的 flag，则跳过
+            if exclude_flags & r_flags:
+                continue
+
+            candidates.append(r)
         if not candidates:
             raise RuntimeError("No available routers after exclusion")
+
         return random.choice(candidates)
 
     def get_random_guard_node(self, exclude=None):
@@ -155,8 +177,10 @@ class Tor_Consensus:
         return self.get_random_router(flags=flags, exclude=exclude)
 
     def get_random_middle_node(self, exclude=None):
+        # 中间节点：需要 Fast/Running/Valid，且不能有 Guard/Exit 标志
         flags = ['Fast', 'Running', 'Valid']
-        return self.get_random_router(flags=flags, exclude=exclude)
+        exclude_flags = ['Guard', 'Exit']
+        return self.get_random_router(flags=flags, exclude=exclude, exclude_flags=exclude_flags)
 
     def get_random_exit_node(self, exclude=None):
         flags = ['Exit', 'Fast', 'Running', 'Valid']
