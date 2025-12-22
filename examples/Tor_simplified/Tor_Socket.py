@@ -72,7 +72,7 @@ class Tor_Socket():
         self.writer: Optional[asyncio.StreamWriter] = writer
 
         self._q_ctrl = asyncio.Queue()  # 控制面队列（自动优先）
-        self._q_data = asyncio.Queue()  # 数据面队列
+        self._q_data = asyncio.Queue(maxsize=4096)  # 数据面队列
         self._wakeup = asyncio.Event()  # 有新数据时唤醒 writer
         self._writer_task = None
 
@@ -261,7 +261,9 @@ class Tor_Socket():
 
     async def start_listen(self) -> asyncio.Task:
         if self.reader is None or self.writer is None:
-            raise RuntimeError("Streams not set; call setup_socket_async() first or wait for setup completion")
+            self._closing.set()
+            self.listen_started.set()
+            raise RuntimeError("Streams not set ...")
 
         loop = asyncio.get_running_loop()
         self._recv_task = loop.create_task(self._async_recv_loop())
@@ -349,6 +351,7 @@ class Tor_Socket():
             await self.send_cell(cell)
 
     async def send_cell(self, cell):
+        # print("send cell: ", cell)
         if self._closing.is_set():
             self.print(f"[SendDrop] closed: {self.peer_str} {cell}")
             return

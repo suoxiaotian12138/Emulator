@@ -2,7 +2,7 @@ import asyncio
 from queue import Queue
 from typing import Literal
 import time
-
+import contextlib
 from tools.Log.stream_tracker import StreamTracker
 from tools.Log.utils import HopTimer, classify_exception, FailReason
 
@@ -33,15 +33,21 @@ class Tor_Client(Tor_base):
 
         self.sim_ip = sim_ip or "9.9.9.9"
     async def start_protocol(self):
-        self.tasks['listener_task'] = asyncio.create_task(self.monitor_tor_socket())
-        await self.consensus_init()
+        try:
+            self.tasks['listener_task'] = self._spawn_bg_task(self.monitor_tor_socket())
+            await self.consensus_init()
 
-        self._ev("client_start_protocol", ip=self.host, port=self.port)
+            self.tasks['prebuild'] = self._spawn_bg_task(self.circuit_mgr.maintain_prebuild())
+            self.tasks['housekeeping'] = self._spawn_bg_task(self._circuit_housekeeping())
 
-        self.tasks['prebuild'] = asyncio.create_task(self.circuit_mgr.maintain_prebuild())
-        self.tasks['housekeeping'] = asyncio.create_task(self._circuit_housekeeping())
-
-        await asyncio.gather(*self.tasks.values())
+            await asyncio.gather(*self.tasks.values())
+        except asyncio.CancelledError:
+            # 让 stop_protocol 来做最终清理也行，但这里至少不要吞
+            raise
+        finally:
+            # ★确保退出时真正清理
+            with contextlib.suppress(Exception):
+                await self.stop_protocol()
 
     async def _circuit_housekeeping(self):
         while True:
@@ -61,7 +67,7 @@ class Tor_Client(Tor_base):
         await socket.setup_socket(remote_addr=self.guard.addr)
         self._ev("tls_handshake_done", peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}", side="client")
 
-        asyncio.create_task(self.handle_connection(self.guard.addr, socket))
+        self._spawn_bg_task(self.handle_connection(self.guard.addr, socket))
         await socket.listen_started.wait()
         #和guard的tor握手
         await socket.tor_handshake_client()
@@ -98,8 +104,27 @@ class Tor_Client(Tor_base):
             connect_cell = stream.make_connect(addr)
             await socket.send_cell(connect_cell)
             await stream.wait_connect_ack()
-            cells = stream.make_relays(message)
-            await socket.send_cells(cells)
+
+            # -------- stream large payload sending, Tor-like gating --------
+            max_payload = RelayedTorCell.MAX_PAYLOD_SIZE
+            off = 0
+            n = len(message)
+
+            while off < n:
+                # 1) 先拿流级 credit (只影响本 stream)
+                await stream.window.acquire_send(1)
+
+                # 2) 再拿电路级 credit (全局共享, 必须原子)
+                if hasattr(circuit, "circ_window_up"):
+                    await circuit.circ_window_up.acquire_send(1)
+
+                chunk = message[off: off + max_payload]
+                off += len(chunk)
+
+                data_cell = stream.make_relay(CellRelayData(chunk, circuit.id))
+                await socket.send_cell(data_cell)
+
+
 
         except asyncio.TimeoutError:
             self.stream_tracker.set_status(stream_uid, "timeout")
@@ -116,6 +141,74 @@ class Tor_Client(Tor_base):
             rec = self.stream_tracker.end(stream_uid)
             self._stream(**rec) if rec else None
             raise
+
+    async def open_stream(self, addr, hops_count=3, extend_routers=None):
+        await self.ready_to_send.wait()
+
+        socket = self.socket_map.get(self.guard.addr, None)
+        if socket is None:
+            raise RuntimeError("no socket to guard")
+
+        if getattr(self.circuit_mgr, "isolation_enabled", False):
+            iso_key = compute_isolation_key(addr[0], addr[1])
+        else:
+            iso_key = "general"
+
+        circuit = await self.circuit_mgr.get_or_build(
+            iso_key, exit_hint=None,
+            hops_count=hops_count,
+            extend_routers=extend_routers
+        )
+        self.circuit_mgr.mark_used(circuit)
+
+        stream = circuit.create_stream()
+
+        stream_id = stream.id
+        stream_uid = f"{self.name}:{circuit.id}:{stream_id if stream_id is not None else int(time.time() * 1e6)}"
+        dst = f"{addr[0]}:{addr[1]}"
+        self.stream_tracker.start(stream_uid, src=self.name, dst=dst)
+
+        if stream_id is not None:
+            self._sid2uid[stream_id] = stream_uid
+
+        try:
+            connect_cell = stream.make_connect(addr)
+            await socket.send_cell(connect_cell)
+            await stream.wait_connect_ack()
+        except Exception:
+            self.stream_tracker.set_status(stream_uid, "connect_fail")
+            rec = self.stream_tracker.end(stream_uid)
+            self._stream(**rec) if rec else None
+            raise
+
+        return circuit, stream
+
+    async def stream_write(self, circuit, stream, data: bytes):
+        socket = self.socket_map.get(self.guard.addr, None)
+        if socket is None:
+            raise RuntimeError("no socket to guard")
+
+        max_payload = RelayedTorCell.MAX_PAYLOD_SIZE
+        off = 0
+        n = len(data)
+
+        while off < n:
+            try:
+                await asyncio.wait_for(stream.window.acquire_send(1), timeout=5.0)
+            except asyncio.TimeoutError:
+                self.print(f"[BLOCK] stream.window.acquire_send timeout sid={stream.id} circ={circuit.id}")
+                raise
+
+            if hasattr(circuit, "circ_window_up"):
+                try:
+                    await asyncio.wait_for(circuit.circ_window_up.acquire_send(1), timeout=5.0)
+                except asyncio.TimeoutError:
+                    self.print(f"[BLOCK] circ_window_up.acquire_send timeout sid={stream.id} circ={circuit.id}")
+                    raise
+
+            chunk = data[off: off + max_payload]
+            off += len(chunk)
+            await socket.send_cell(stream.make_relay(CellRelayData(chunk, circuit.id)))
 
     async def create_circuit(self, socket, hops_count=3, extend_routers=None):
         # print(f"[create_circuit] begin -> guard {self.guard.addr} hops={hops_count}")
@@ -159,11 +252,13 @@ class Tor_Client(Tor_base):
             descriptor_str = await self.consensus.fetch_descriptor(router["fingerprint"])
             extend_node = Tor_Router(router)
             extend_node.set_descriptor(descriptor_str)
+            extend_hop = extend_node.spawn_circuit_hop()
+
             self.print("hop is :", extend_node.ip)
 
             t_rtt = HopTimer().start()
             try:
-                extend_cell = circuit.connect_to_extend(extend_node)
+                extend_cell = circuit.connect_to_extend(extend_hop)
                 await socket.send_cell(extend_cell)
                 await circuit.extend_handshake(descriptor_str, wait_time=60)
                 self._ev("circuit_extend_success", circ_id=circuit.id, hop=hop, nickname=router['nickname'],
@@ -230,7 +325,21 @@ class Tor_Client(Tor_base):
         elif isinstance(cell, CellRelayEnd):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
             stream.set_end(cell)
-            data = await stream.recv(2048)
+            data = await stream.recv_all_until_end(timeout=5.0)
+
+            # === 结束 stream 并写日志 ===
+            self.circuit_mgr.on_stream_end(circuit)
+            stream_uid = self._sid2uid.pop(origin_cell.stream_id, None)
+            if stream_uid:
+                rec = self.stream_tracker.end(stream_uid)
+                if rec:
+                    self._stream(**rec)
+            if data:
+                # 如果是二进制，建议打印 repr 的前一段，避免控制台爆炸
+                self.print("final data: ", data[:200])
+            else:
+                self.print("final data: <empty>")
+
             # === 新增：结束 stream 并写日志 ===
             self.circuit_mgr.on_stream_end(circuit)
             stream_uid = self._sid2uid.pop(origin_cell.stream_id, None)
@@ -240,35 +349,80 @@ class Tor_Client(Tor_base):
                     self._stream(**rec)  # 写入 streams.jsonl（或 flows.jsonl 兼容别名）
             self.print("final data: ", data)
         elif isinstance(cell, CellRelayData):
-            # self.print("cell data: ", cell.data)
-            stream = circuit.streams.get_by_id(origin_cell.stream_id)
-            stream.append(cell.data)
-            stream.window.deliver_dec()
+            # --- circuit-level recv window (from guard -> client) ---
+            if hasattr(circuit, "circ_window_down"):
+                circuit.circ_window_down.on_recv_data_cell(1)
+                if circuit.circ_window_down.should_send_sendme():
+                    # 电路级 SENDME：stream_id = 0
+                    sendme_inner = CellRelaySendMe(circuit_id=circuit.id)
+                    circ_sendme = circuit.make_relay(inner_cell=sendme_inner, relay_type=CellRelay, stream_id=0)
+                    socket = self.socket_map.get(self.guard.addr, None)
+                    if socket is not None:
+                        await socket.send_cell(circ_sendme)
 
-            # === 新增：记录首包与累计字节 ===
+            # --- 流级逻辑（你已有的，稍微整理一下） ---
+            stream = circuit.streams.get_by_id(origin_cell.stream_id)
+            if stream is None:
+                return
+
+            stream.window.on_recv_data_cell(1)
+            stream.append(cell.data)
+
             stream_uid = self._sid2uid.get(origin_cell.stream_id)
             if stream_uid:
                 self.stream_tracker.on_down_chunk(stream_uid, nbytes=len(cell.data))
 
-            if stream.window.need_sendme():
-                sendme_cell = stream.make_relay(CellRelaySendMe(circuit_id=cell.circuit_id))
+            if stream.window.should_send_sendme():
                 socket = self.socket_map.get(self.guard.addr, None)
-                await socket.send_cell(sendme_cell)
+                if socket is not None:
+                    sendme_cell = stream.make_sendme()
+                    await socket.send_cell(sendme_cell)
         elif isinstance(cell, CellRelaySendMe):
-            stream = circuit.streams.get_by_id(origin_cell.stream_id)
-            stream.window.package_inc()
+            sid = origin_cell.stream_id
+            self.print(f"[RECV] SENDME sid={sid} circ={circuit.id}")
 
-    async def close_stream(self, stream):
+            if sid == 0:
+                # ---- circuit-level SENDME ----
+                if hasattr(circuit, "circ_window_up"):
+                    circuit.circ_window_up.on_recv_sendme()
+            else:
+                # ---- stream-level SENDME ----
+                stream = circuit.streams.get_by_id(sid)
+                if stream is not None:
+                    stream.window.on_recv_sendme()
+
+    async def close_stream(self, circuit, stream, wait_end_s: float = 3.0):
         socket = self.socket_map.get(self.guard.addr, None)
         if not socket:
             raise RuntimeError("socket has closed before stream")
+
         end_cell = stream.make_end()
         await socket.send_cell(end_cell)
-        await asyncio.sleep(0)  # let END go out
-        # optional: also notify manager here if你主动关闭流:
-        self.circuit_mgr.on_stream_end(stream._circuit)
-        await stream.aclose()  # 见下文对 Tor_Stream 的修改
+        await asyncio.sleep(0)
 
+        # 等对端 END（如果对端实现会回 END）
+        if hasattr(stream, "end_event"):
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stream.end_event.wait(), timeout=wait_end_s)
+
+        self.circuit_mgr.on_stream_end(circuit)
+
+        # 对 client 模式，这个 aclose 当前主要清理 server-side 资源，不一定必须
+        if hasattr(stream, "aclose"):
+            await stream.aclose()
+
+    async def close_circuit(self, circuit):
+        socket = self.socket_map.get(self.guard.addr, None)
+        if socket is None:
+            return
+
+        # 按你项目里的真实类名替换，比如 CellDestroy 或 Relay DESTROY
+        try:
+            destroy = CellDestroy(circuit_id=circuit.id, reason=0)
+            await socket.send_cell(destroy)
+            await asyncio.sleep(0)
+        except Exception:
+            pass
 
 
 

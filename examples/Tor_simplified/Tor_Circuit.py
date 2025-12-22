@@ -12,6 +12,7 @@ import logging
 import time, asyncio
 from typing import Dict, Set, Optional
 from examples.Tor_simplified.Tor_Cell import CellDestroy  # 若类名不同，替换为你项目里的 DESTROY cell
+from examples.Tor_simplified.Tor_Window import TorWindow
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,8 @@ IDLE_TIMEOUT_S = 120              # 2min no new streams
 PREBUILD_OPEN = 1                # keep 2 hot OPEN circuits
 BUILD_TIMEOUT_S = 60
 EXTEND_TIMEOUT_S = 30
+CIRC_WINDOW_INIT = 1000   # 电路级窗口初始值
+CIRC_WINDOW_INC  = 100    # 电路级每次 SENDME 增量（这步先只用来初始化）
 
 
 class Tor_CircuitsList:
@@ -79,15 +82,18 @@ class CircuitRoleOps:
 class ClientCircuitOps(CircuitRoleOps):
     def encrypt(self, relay_cell):
         for node in reversed(self.circuit.circuit_nodes):
+            if getattr(node, "_crypto_state", None) is None:
+                continue
             node.encrypt_forward(relay_cell)
 
     def decrypt(self, relay_cell):
         for node in self.circuit.circuit_nodes:
             if not relay_cell.is_encrypted:
                 break
+            if getattr(node, "_crypto_state", None) is None:
+                continue
             node.decrypt_backward(relay_cell)
         return relay_cell.get_decrypted()
-
     def handle_relay(self, cell):
         return self.decrypt(cell)
 
@@ -126,6 +132,10 @@ class TorCircuit:
         self.created_at = time.time()
         self.last_used = self.created_at
         self._n_streams = 0
+
+        self.circ_window_down = TorWindow(start=CIRC_WINDOW_INIT, increment=CIRC_WINDOW_INC)
+        self.circ_window_up   = TorWindow(start=CIRC_WINDOW_INIT, increment=CIRC_WINDOW_INC)
+
 
     def connect_to_guard(self, guard):
         key_agreement_cls = NtorKeyAgreement

@@ -47,11 +47,11 @@ async def main():
     # 多个 guard 配置
     guard_configs = [
         ("guard1", "192.168.66.242", 9001, 'Guard', ["Running", "Valid", "Guard","Fast","Stable"]),
-        ("guard2", "192.168.66.242", 9002, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"]),
+        # ("guard2", "192.168.66.242", 9002, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"]),
         ("Middle1", "192.168.66.243", 9003, 'Middle',["Running", "Valid", "MiddleOnly", "Fast","Stable"]),
-        ("Middle2", "192.168.66.244", 9004, 'Middle',["Running", "Valid", "MiddleOnly", "Fast","Stable"]),
+        # ("Middle2", "192.168.66.244", 9004, 'Middle',["Running", "Valid", "MiddleOnly", "Fast","Stable"]),
         ("Exit1", "192.168.66.243", 9005, 'Exit',["Running", "Valid", "Exit","Fast","Stable"]),
-        ("Exit2", "192.168.66.243", 9006, 'Exit',["Running", "Valid", "Exit","Fast","Stable"]),
+        # ("Exit2", "192.168.66.243", 9006, 'Exit',["Running", "Valid", "Exit","Fast","Stable"]),
 
     ]
 
