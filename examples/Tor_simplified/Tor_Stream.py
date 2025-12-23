@@ -186,9 +186,7 @@ class Tor_Stream:
 
         # Task 2: TCP -> Tor (读取 socket)
         async def pump_to_client():
-            # cw = cw_picker(circuit, out_sock=sock)
-            upstream_sock = circuit.circuit_nodes[0].sock
-            cw = cw_picker(circuit, out_sock=upstream_sock)
+
             try:
                 while not self._closing.is_set():
                     chunk = await self._remote_reader.read(16384)
@@ -196,14 +194,22 @@ class Tor_Stream:
                         # remote EOF
                         if self.mark_end_sent():
                             end = CellRelayEnd(StreamReason.DONE, circuit.id)
-                            await sock.send_cell(circuit.make_relay(end, stream_id=self.id))
+                            circuit.enqueue_relay(
+                                circuit.make_relay(end, stream_id=self.id),
+                                out_sock=sock,
+                                stream=self,
+                                is_data=False,
+                            )
                         break
 
                     for rc in self.make_relays_server(chunk):
-                        if isinstance(rc, CellRelayData):
-                            await self.window.acquire_send(1)
-                            await cw.acquire_send(1)
-                        await sock.send_cell(rc)
+                        is_data = isinstance(rc, CellRelayData)
+                        circuit.enqueue_relay(
+                            rc,
+                            out_sock=sock,
+                            stream=self,
+                            is_data=is_data,
+                        )
             except asyncio.CancelledError:
                 pass
             except Exception:

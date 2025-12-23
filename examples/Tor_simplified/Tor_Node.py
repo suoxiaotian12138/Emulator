@@ -7,14 +7,16 @@ from tools.Crypt.key_generator import curve25519_setup, ed25519_setup, rsa_setup
 from tools.Crypt.crypt_common import rsa_identity_digest
 from tools.Network_Management.DNSResolver import DNSResolver
 from tools.Log.utils import HopTimer, classify_exception, FailReason
-
+from collections import defaultdict
 from examples.Tor_simplified.Tor_Cell import *
 from examples.Tor_simplified.Tor_base import Tor_base
 from examples.Tor_simplified.Tor_Circuit import Tor_CircuitsList
 from examples.Tor_simplified.Tor_Descriptor import TorDescriptor_build
 from examples.Tor_simplified.Tor_Router import Tor_Router_simple
-from examples.Tor_simplified.Tor_Socket import Tor_Socket
 from examples.Tor_simplified.Tor_Crypt import NtorServerKeyAgreement
+from examples.Tor_simplified.Tor_Socket import Tor_Socket
+from examples.Tor_simplified.Tor_Scheduler import CircuitSendScheduler
+
 from cryptography.hazmat.primitives import serialization, hashes
 from tools.Crypt.crypt_common import (
     build_ed25519_cert, build_rsa_to_ed_crosscert,
@@ -23,7 +25,6 @@ from tools.Crypt.crypt_common import (
     debug_build_crosscert
 )
 from examples.Tor_simplified.Tor_Cell import CellCerts
-from collections import defaultdict
 from tools.Network_Management.delay_env import get_args
 
 class Tor_Node(Tor_base):
@@ -56,6 +57,7 @@ class Tor_Node(Tor_base):
         self._relay_agg = {}
         self._relay_flush_task = self._spawn_bg_task(self._flush_relay_agg())
 
+        self._circuit_scheduler = CircuitSendScheduler(self)
 
     async def start_protocol(self):
         self.tasks['routing_task'] = self._spawn_bg_task(self.register_to_dire())
@@ -125,6 +127,7 @@ class Tor_Node(Tor_base):
         """Quickly select several random nodes and freely add nodes, such as exit nodes"""
         t0 = time.perf_counter()
         circuit = await self.circuit_list.create_circuit_server(circuit_id)
+        circuit.scheduler = self._circuit_scheduler
 
         created_cell = circuit.server_connected(self.protocol_version, create_cell, sock)
         self._ev("circuit_server_connected", circ_id=circuit_id, peer=str(sock.socket.getpeername()), ms=(time.perf_counter()-t0)*1000.0)
@@ -190,7 +193,7 @@ class Tor_Node(Tor_base):
         circuit = self.circuit_list.get_by_id(circuit_id)
         cell = circuit.make_relay(inner_cell=extend_cell, relay_type=CellRelay)
         sock = circuit.circuit_nodes[0].sock
-        await sock.send_cell(cell)
+        circuit.enqueue_relay(cell, out_sock=sock, is_data=False)
 
     def _cw_send(self, circuit, out_sock: Tor_Socket):
         """
@@ -222,7 +225,6 @@ class Tor_Node(Tor_base):
         upstream_sock = circuit.circuit_nodes[0].sock
         sending_to_upstream = (out_sock == upstream_sock)
 
-        cw = self._cw_send(circuit, out_sock)
 
         # If this is a RELAY cell, we can peek relay command from serialized payload only if you already parsed it.
         # Here we rely on the already-decoded "inner_cell" if caller has it; otherwise treat as not-data.
@@ -235,10 +237,11 @@ class Tor_Node(Tor_base):
         except Exception:
             is_data = False
 
-        if is_data:
-            await cw.acquire_send(1)
+        stream = None
+        if cell.stream_id:
+            stream = circuit.streams.get_by_id(cell.stream_id)
 
-        await out_sock.send_cell(cell)
+        circuit.enqueue_relay(cell, out_sock=out_sock, stream=stream, is_data=is_data)
 
     async def handle_cell(self, cell, sock: Tor_Socket):
         self.print(f"receive cell from {sock.socket.getpeername()}")
@@ -296,7 +299,7 @@ class Tor_Node(Tor_base):
                             else None,
                         )
                         return
-                    await downstream_sock.send_cell(cell)
+                    circuit.enqueue_relay(cell, out_sock=downstream_sock, is_data=False)
                     return
 
                 # RECOGNIZED: handle inner cell locally
@@ -305,7 +308,7 @@ class Tor_Node(Tor_base):
             # downstream -> upstream: add one layer and forward upstream
             next_node = circuit.circuit_nodes[0]
             next_node.encrypt_forward(cell)
-            await next_node.sock.send_cell(cell)
+            circuit.enqueue_relay(cell, out_sock=next_node.sock, is_data=False)
 
         elif isinstance(cell, Cell_RelayEarly):
             circuit = self.circuit_list.get_by_id(cell.circuit_id)
@@ -466,7 +469,7 @@ class Tor_Node(Tor_base):
                 # circuit-level SENDME: stream_id = 0, send back toward the sender on this link
                 sendme_inner = CellRelaySendMe(circuit_id=cid)
                 circ_sendme = circuit.make_relay(inner_cell=sendme_inner, relay_type=CellRelay, stream_id=0)
-                await sock.send_cell(circ_sendme)
+                circuit.enqueue_relay(circ_sendme, out_sock=sock, is_data=False)
 
                 st = self._relay_agg.get((cid, 0))
                 if not st:
@@ -484,7 +487,7 @@ class Tor_Node(Tor_base):
 
             if stream.window.should_send_sendme():
                 sendme_cell = stream.make_sendme()  # stream_id = sid
-                await sock.send_cell(sendme_cell)
+                circuit.enqueue_relay(sendme_cell, out_sock=sock, stream=stream, is_data=False)
 
                 st = self._relay_agg.get((cid, sid))
                 if not st:
@@ -565,7 +568,7 @@ class Tor_Node(Tor_base):
             )
             connected = CellRelayConnected(address=stream.target_addr[0], ttl=3600, circuit_id=circuit.id)
             relay_conn = circuit.make_relay(inner_cell=connected, relay_type=CellRelay, stream_id=sid)
-            await sock.send_cell(relay_conn)
+            circuit.enqueue_relay(relay_conn, out_sock=sock, stream=stream, is_data=False)
             self._ev("begin_connected_tx", circ_id=circuit.id, stream_id=sid, dst=str(stream.target_addr))
 
             self._ev("exit_tcp_connected", circ_id=circuit.id, stream_id=sid, dst=str(stream.target_addr))
@@ -594,7 +597,7 @@ class Tor_Node(Tor_base):
             return
         end = CellRelayEnd(reason, circuit.id)
         relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=stream_id)
-        await sock.send_cell(relay)
+        circuit.enqueue_relay(relay, out_sock=sock, stream=stream, is_data=False)
 
     async def resolve_ipv4_async(self, domain: str) -> str:
         try:

@@ -8,9 +8,10 @@ from examples.Tor_simplified.Tor_Crypt import NtorKeyAgreement
 # from torpy.keyagreement import NtorKeyAgreement
 from examples.Tor_simplified.Tor_Cell import *
 import logging
-
+from collections import deque
+from dataclasses import dataclass
+from typing import Dict, Set, Optional, Any
 import time, asyncio
-from typing import Dict, Set, Optional
 from examples.Tor_simplified.Tor_Cell import CellDestroy  # 若类名不同，替换为你项目里的 DESTROY cell
 from examples.Tor_simplified.Tor_Window import TorWindow
 
@@ -27,6 +28,13 @@ EXTEND_TIMEOUT_S = 30
 CIRC_WINDOW_INIT = 1000   # 电路级窗口初始值
 CIRC_WINDOW_INC  = 100    # 电路级每次 SENDME 增量（这步先只用来初始化）
 
+@dataclass
+class RelayQueueItem:
+    cell: Any
+    out_sock: Any
+    stream: Any
+    is_data: bool
+    enqueued_at: float
 
 class Tor_CircuitsList:
     LOCK = asyncio.Lock()
@@ -143,6 +151,9 @@ class TorCircuit:
         self.circ_window_up   = TorWindow(start=CIRC_WINDOW_INIT, increment=CIRC_WINDOW_INC)
         self.upstream_sock = None    # towards client
         self.downstream_sock = None  # towards exit
+        self.sendq = {}
+        self.sendq_stats = {"dequeued": 0, "wait_total_s": 0.0, "avg_wait_s": 0.0}
+        self.scheduler = None
 
     def connect_to_guard(self, guard):
         key_agreement_cls = NtorKeyAgreement
@@ -210,6 +221,42 @@ class TorCircuit:
         self.role_ops.encrypt(relay_cell)
         return relay_cell
 
+
+    def enqueue_relay(self, cell, *, out_sock, stream=None, is_data=False):
+        if out_sock is None:
+            raise ValueError("enqueue_relay requires out_sock")
+        item = RelayQueueItem(
+            cell=cell,
+            out_sock=out_sock,
+            stream=stream,
+            is_data=is_data,
+            enqueued_at=time.monotonic(),
+        )
+        self.sendq.setdefault(out_sock, deque()).append(item)
+        if self.scheduler is not None:
+            self.scheduler.notify_enqueue(self, out_sock)
+        return item
+
+    def peek_sendq(self, out_sock):
+        queue = self.sendq.get(out_sock)
+        if queue:
+            return queue[0]
+        return None
+
+    def pop_sendq(self, out_sock):
+        queue = self.sendq.get(out_sock)
+        if not queue:
+            return None
+        item = queue.popleft()
+        if not queue:
+            self.sendq.pop(out_sock, None)
+        return item
+
+    def record_send_dequeue(self, wait_s: float):
+        st = self.sendq_stats
+        st["dequeued"] += 1
+        st["wait_total_s"] += wait_s
+        st["avg_wait_s"] = st["wait_total_s"] / st["dequeued"]
 
     def close_all_streams(self):
         for stream in list(self.streams.values()):
