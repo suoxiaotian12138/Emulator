@@ -357,19 +357,12 @@ class Tor_Node(Tor_base):
                 addr = (ip_address, port)
                 # 先建 stream，并写入 target_addr
                 stream = circuit.streams.set_stream(stream_id=sid, target_addr=addr)
+                # 异步连 TCP 并启动双向转发（成功后再回 CONNECTED）
                 self._spawn_bg_task(self._exit_connect_and_start(circuit, sock, sid), name=f"exit_connect:{cid}:{sid}")
-                # ★关键：立刻回 CONNECTED，避免 client 卡在 wait_connect_ack
-                connected = CellRelayConnected(address=ip_address, ttl=3600, circuit_id=cid)
-                relay_conn = circuit.make_relay(inner_cell=connected, relay_type=CellRelay, stream_id=sid)
-                await sock.send_cell(relay_conn)
-                self._ev("begin_connected_tx", circ_id=cid, stream_id=sid, dst=f"{ip_address}:{port}")
 
-                # ★关键：异步连 TCP 并启动双向转发，但必须被追踪可取消
 
             except Exception as e:
-                end = CellRelayEnd(StreamReason.INTERNAL, cid)
-                relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=sid)
-                await sock.send_cell(relay)
+                await self._send_end_once(circuit, sock, sid, StreamReason.INTERNAL)
                 self._ev("begin_fail", circ_id=cid, stream_id=sid, error=repr(e))
 
         elif isinstance(cell, CellRelayConnected):
@@ -429,9 +422,7 @@ class Tor_Node(Tor_base):
                         stream_id=sid,
                         dst=str(stream.target_addr),
                     )
-                    end = CellRelayEnd(StreamReason.INTERNAL, cid)
-                    relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=sid)
-                    await sock.send_cell(relay)
+                    await stream._to_remote.put(cell.data)
                     return
 
                 if stream is None:
@@ -460,9 +451,7 @@ class Tor_Node(Tor_base):
                     stream_id=sid,
                     dst=str(stream.target_addr),
                 )
-                end = CellRelayEnd(StreamReason.INTERNAL, cid)
-                relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=sid)
-                await sock.send_cell(relay)
+                await self._send_end_once(circuit, sock, sid, StreamReason.INTERNAL)
                 return
 
             # ==========================
@@ -565,6 +554,11 @@ class Tor_Node(Tor_base):
             # 这里会真的 dial TCP
             await stream.open_remote_raw(timeout=5.0)
 
+            connected = CellRelayConnected(address=stream.target_addr[0], ttl=3600, circuit_id=circuit.id)
+            relay_conn = circuit.make_relay(inner_cell=connected, relay_type=CellRelay, stream_id=sid)
+            await sock.send_cell(relay_conn)
+            self._ev("begin_connected_tx", circ_id=circuit.id, stream_id=sid, dst=str(stream.target_addr))
+
             # 启动双向转发
             stream.start_duplex_tasks(
                 circuit=circuit,
@@ -587,12 +581,18 @@ class Tor_Node(Tor_base):
 
             # 失败就发 END，唤醒 client 侧收尾
             with contextlib.suppress(Exception):
-                end = CellRelayEnd(StreamReason.INTERNAL, circuit.id)
-                relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=sid)
-                await sock.send_cell(relay)
+                await self._send_end_once(circuit, sock, sid, StreamReason.INTERNAL)
 
             with contextlib.suppress(Exception):
                 await stream.aclose()
+
+    async def _send_end_once(self, circuit, sock, stream_id: int, reason: StreamReason):
+        stream = circuit.streams.get_by_id(stream_id)
+        if stream is not None and not stream.mark_end_sent():
+            return
+        end = CellRelayEnd(reason, circuit.id)
+        relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=stream_id)
+        await sock.send_cell(relay)
 
     async def resolve_ipv4_async(self, domain: str) -> str:
         try:
