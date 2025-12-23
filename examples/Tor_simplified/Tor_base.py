@@ -16,6 +16,7 @@ from tools.Log.LogPrinter import LogPrinter
 from tools.Log.bus import EventBus, NoOpBus, GlobalBus
 from tools.Packet.packet_TCP import accept_tls_connections, TLSConnector
 from tools.Crypt.key_generator import create_server_context, ed25519_setup, rsa_setup, generate_cert_and_key_from_ed25519, generate_tls_rsa_cert
+from tools.Network_Management.bandwidth_limiter import init_global_limiter_from_env
 
 from examples.Tor_simplified.Tor_Socket import Tor_Socket
 from tools.Network_Management.delay_env import get_args
@@ -72,6 +73,7 @@ class Tor_base:
 
         self.sim_ip = sim_ip
         self._bg_tasks: set[asyncio.Task] = set()
+        self.limiter = init_global_limiter_from_env()
 
     def attach_bus(self, bus: Optional[EventBus]):
         """在启动脚本里调用；忘记传就用全局默认。"""
@@ -130,6 +132,7 @@ class Tor_base:
                 source_ip=self.host,
                 on_cell=self.handle_cell,
                 node_id=self.node_id,
+                limiter=self.limiter,
                 **get_args(sim_ip=self.sim_ip)
             )
 
@@ -272,6 +275,13 @@ class Tor_base:
             with contextlib.suppress(asyncio.CancelledError):
                 await t
 
+        if self.limiter is not None:
+            stats = self.limiter.stats()
+            self.print(
+                f"[LimiterStats] total={stats.total_bytes}B "
+                f"avg={stats.average_rate_bps:.2f}B/s peak={stats.peak_rate_bps:.2f}B/s"
+            )
+            
     def _spawn_bg_task(self, coro,  name: str | None = None):
         t = asyncio.create_task(coro)
         self._bg_tasks.add(t)

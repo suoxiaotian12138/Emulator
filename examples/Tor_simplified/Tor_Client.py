@@ -61,7 +61,13 @@ class Tor_Client(Tor_base):
 
         desc = await self.consensus.fetch_descriptor(self.guard.fingerprint_str)
         self.guard.set_descriptor(desc)
-        socket = Tor_Socket(self.host, on_cell=self.handle_cell, node_id=self.node_id, **get_args(sim_ip=self.sim_ip))
+        socket = Tor_Socket(
+            self.host,
+            on_cell=self.handle_cell,
+            node_id=self.node_id,
+            limiter=self.limiter,
+            **get_args(sim_ip=self.sim_ip)
+        )
 
         #和guard的tls握手记录
         await socket.setup_socket(remote_addr=self.guard.addr)

@@ -32,6 +32,8 @@ DEFAULT_ENV = {
     "START_TIMEOUT_S": "30",
     "INTER_CHUNK_SLEEP_MS": "0",
     "MAX_TLS_THREADS": "128",
+    "GLOBAL_RATE_BPS": "0",
+    "GLOBAL_BURST_BYTES": "0",
 }
 
 for k, v in DEFAULT_ENV.items():

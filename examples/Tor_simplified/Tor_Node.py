@@ -149,7 +149,14 @@ class Tor_Node(Tor_base):
                 if sock is None:
                     t_tls = time.perf_counter()
                     try:
-                        sock = await Tor_Socket.dial(remote_addr=addr, source_ip=self.host, on_cell=self.handle_cell, node_id=self.node_id, **get_args(sim_ip=self.sim_ip))
+                        sock = await Tor_Socket.dial(
+                            remote_addr=addr,
+                            source_ip=self.host,
+                            on_cell=self.handle_cell,
+                            node_id=self.node_id,
+                            limiter=self.limiter,
+                            **get_args(sim_ip=self.sim_ip)
+                        )
                         print("build a new socket from: ", addr)
                         self._spawn_bg_task(self.handle_connection(addr, sock))
                         await sock.listen_started.wait()

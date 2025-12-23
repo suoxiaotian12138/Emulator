@@ -14,6 +14,7 @@ from examples.Tor_simplified.Tor_Cell import TorCell, CellCerts, CellAuthChallen
 from examples.Tor_simplified.Tor_Router import logger
 from tools.Packet.packet_TCP import ByteBuffer
 from tools.Packet.packet_TCP import dial_tls
+from tools.Network_Management.bandwidth_limiter import BandwidthLimiter
 
 # === 延迟注入：已存在的工具（若你已有此模块，直接用；没有也不影响运行，测试脚本会提供兜底方案） ===
 from tools.Network_Management.geo_delay_injector import (
@@ -41,6 +42,7 @@ class Tor_Socket():
         writer: asyncio.StreamWriter = None,
         on_cell=None,
         *,
+        limiter: Optional[BandwidthLimiter] = None,
         enable_delay: bool = False,                     # ★ 一键总开关（默认关）
         sim_ip: Optional[str] = None,                   # ★ 本端仿真IP
         delay_mapping: Optional[MappingCache] = None,   # ★ 指纹/IP -> sim_ip 的映射缓存
@@ -59,6 +61,7 @@ class Tor_Socket():
         self.listen_started = asyncio.Event()
         self._closing = asyncio.Event()
         self.closed = False
+        self._limiter = limiter
 
         # —— 延迟注入配置 ——  # ★
         self.enable_delay = bool(enable_delay)
@@ -73,8 +76,10 @@ class Tor_Socket():
 
         self._q_ctrl = asyncio.Queue()  # 控制面队列（自动优先）
         self._q_data = asyncio.Queue(maxsize=4096)  # 数据面队列
+        self._q_data_backpressure = 3072  # 触发背压阈值
         self._wakeup = asyncio.Event()  # 有新数据时唤醒 writer
         self._writer_task = None
+        self._last_queue_log = 0.0
 
         if self.reader is not None:
             # 被动连接，已经有SSL socket
@@ -152,6 +157,7 @@ class Tor_Socket():
                    ssl_ctx: ssl.SSLContext | None = None,
                    node_id: Optional[str] = None,
                    *,
+                   limiter: Optional[BandwidthLimiter] = None,
                    enable_delay: bool = False,
                    sim_ip: Optional[str] = None,
                    delay_mapping: Optional[MappingCache] = None,
@@ -175,7 +181,8 @@ class Tor_Socket():
             enable_delay=enable_delay,
             sim_ip=sim_ip,
             delay_mapping=delay_mapping,
-            delay_model=delay_model
+            delay_model=delay_model,
+            limiter=limiter,
         )
         self.handshake_initiator = True
 
@@ -199,7 +206,7 @@ class Tor_Socket():
 
 
     async def send(self, buf: bytes):
-        """异步发送数据（直写路径）"""
+        """异步发送数据（入队 + 唤醒 writer loop）"""
         if self._closing.is_set():
             raise ConnectionError("AsyncTor_Socket already closed")
 
@@ -211,12 +218,9 @@ class Tor_Socket():
                 if self.writer is None:
                     raise ConnectionError("Writer not initialized")
 
-                # ★ 若注入器存在，优先走注入器；否则直写
-                if self._inj is not None and hasattr(self._inj, "send"):
-                    await self._inj.send(buf)
-                else:
-                    self.writer.write(buf)
-                    await self.writer.drain()
+                blocked = await self._enqueue_data(buf)
+                self._wakeup.set()
+                return blocked
 
             except Exception as e:
                 self.print(f"[SendErr] {self.peer_str} {e}")
@@ -230,6 +234,13 @@ class Tor_Socket():
 
         self._closing.set()
         self.closed = True
+        self._wakeup.set()
+
+        if self._writer_task and self._writer_task is not asyncio.current_task():
+            self._writer_task.cancel()
+            with contextlib.suppress(Exception):
+                await self._writer_task
+            self._writer_task = None
 
         # ★ 关闭注入器（若支持）
         try:
@@ -354,13 +365,16 @@ class Tor_Socket():
         print("send cell: ", cell)
         if self._closing.is_set():
             self.print(f"[SendDrop] closed: {self.peer_str} {cell}")
-            return
+            return False
         buf = self.protocol.serialize(cell)
         if self._is_control_cell(cell):
-            await self._q_ctrl.put(buf)
+            await self._q_ctrl.put((buf, asyncio.get_running_loop().time()))
+            self._wakeup.set()
+            return False
         else:
-            await self._q_data.put(buf)
-        self._wakeup.set()
+            blocked = await self._enqueue_data(buf)
+            self._wakeup.set()
+            return blocked
 
     def _is_control_cell(self, cell) -> bool:
         from examples.Tor_simplified.Tor_Cell import (
@@ -397,7 +411,9 @@ class Tor_Socket():
                 t0 = loop.time()
                 ctrl_count = 0
                 while not self._q_ctrl.empty():
-                    out.extend(await self._q_ctrl.get())
+                    buf, enqueued_at = await self._q_ctrl.get()
+                    out.extend(buf)
+                    self._maybe_log_queue("ctrl", enqueued_at, self._q_ctrl.qsize())
                     ctrl_count += 1
                     if (loop.time() - t0) > 0.0002 or ctrl_count >= 8:
                         break
@@ -410,13 +426,16 @@ class Tor_Socket():
                 total = 0
                 cells = 0
                 while not self._q_data.empty():
-                    buf = await self._q_data.get()
+                    buf, enqueued_at = await self._q_data.get()
                     out.extend(buf)
                     total += len(buf)
+                    self._maybe_log_queue("data", enqueued_at, self._q_data.qsize())
                     cells += 1
                     if (loop.time() - t0) > 0.002 or total >= 64 * 1024 or cells >= 128:
                         break
                 if out:
+                    if self._limiter is not None:
+                        await self._limiter.consume(len(out))
                     await self._write_once(bytes(out))   # ★ 注入生效点
         except asyncio.CancelledError:
             pass
@@ -439,6 +458,36 @@ class Tor_Socket():
             self.print(f"[WriteErr] {self.peer_str} {e}")
             await self._abort()
 
+    async def _enqueue_data(self, buf: bytes) -> bool:
+        if self._closing.is_set():
+            return False
+        loop = asyncio.get_running_loop()
+        enqueued_at = loop.time()
+        blocked = False
+        if self._q_data.qsize() >= self._q_data_backpressure:
+            blocked = True
+            self.print(
+                f"[Backpressure] {self.peer_str} data_q={self._q_data.qsize()} "
+                f"limit={self._q_data_backpressure}"
+            )
+            await self._q_data.put((buf, enqueued_at))
+        else:
+            try:
+                self._q_data.put_nowait((buf, enqueued_at))
+            except asyncio.QueueFull:
+                blocked = True
+                await self._q_data.put((buf, enqueued_at))
+        return blocked
+
+    def _maybe_log_queue(self, kind: str, enqueued_at: float, qsize: int):
+        now = asyncio.get_running_loop().time()
+        delay = now - enqueued_at
+        if delay < 0.05 and qsize < self._q_data_backpressure:
+            return
+        if (now - self._last_queue_log) < 1.0:
+            return
+        self._last_queue_log = now
+        self.print(f"[QueueStat] {self.peer_str} kind={kind} qsize={qsize} wait={delay:.4f}s")
 
     async def _wait_for_bytes(self, size: int, consume: bool) -> bytes | None:
         if consume:
