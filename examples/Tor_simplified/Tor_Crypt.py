@@ -281,6 +281,21 @@ class _BaseCryptoState:
         return True
 
     def encrypt_forward(self, relay_cell):
+        """
+        IMPORTANT:
+        - If relay_cell is already encrypted (inner_cell=None, has _encrypted),
+          we must NOT call prepare() or touch digest.
+          We only add one AES layer on the existing encrypted payload.
+        - If relay_cell is plaintext (inner_cell exists), we prepare digest once,
+          then encrypt.
+        """
+        if relay_cell.is_encrypted:
+            # add a layer on existing ciphertext, do NOT recompute digest
+            payload = relay_cell._serialize_payload()  # returns current ciphertext
+            relay_cell.set_encrypted(self._encrypting_func(payload))
+            return
+
+        # plaintext relay cell
         if not relay_cell.digest:
             relay_cell.prepare(self._digesting_func)
         relay_cell.encrypt(self._encrypting_func)

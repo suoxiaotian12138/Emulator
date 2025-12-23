@@ -129,8 +129,6 @@ class Tor_Node(Tor_base):
         created_cell = circuit.server_connected(self.protocol_version, create_cell, sock)
         self._ev("circuit_server_connected", circ_id=circuit_id, peer=str(sock.socket.getpeername()), ms=(time.perf_counter()-t0)*1000.0)
         await sock.send_cell(created_cell)
-        simple_node = Tor_Router_simple(sock)
-        # circuit.circuit_nodes.append(simple_node)
         return circuit
 
     async def extend_next_node(self, cell: CellRelayExtend2, circuit_id: int):
@@ -278,14 +276,26 @@ class Tor_Node(Tor_base):
             sock.handshake.recv_authenticate(cell)
         elif isinstance(cell, CellRelay):
             circuit = self.circuit_list.get_by_id(cell.circuit_id)
+
             if sock == circuit.circuit_nodes[0].sock:
-                inner_cell = circuit.handle_relay(cell)
-                await self.handle_cell_relay(inner_cell, circuit, cell, sock)
-            else:
-                # downstream -> upstream forwarding: do NOT decrypt/parse inner here
-                next_node = circuit.circuit_nodes[0]
-                next_node.encrypt_forward(cell)
-                await next_node.sock.send_cell(cell)
+                # upstream -> this hop: peel one layer
+                inner_or_relay = circuit.handle_relay(cell)
+
+                # NOT RECOGNIZED: still encrypted, must be forwarded downstream
+                if isinstance(inner_or_relay, RelayedTorCell) and inner_or_relay.is_encrypted:
+                    out_sock = circuit.circuit_nodes[-1].sock
+                    await out_sock.send_cell(cell)
+                    return
+
+                # RECOGNIZED: handle inner cell locally
+                await self.handle_cell_relay(inner_or_relay, circuit, cell, sock)
+                return
+
+            # downstream -> upstream: add one layer and forward upstream
+            next_node = circuit.circuit_nodes[0]
+            next_node.encrypt_forward(cell)
+            await next_node.sock.send_cell(cell)
+
         elif isinstance(cell, Cell_RelayEarly):
             circuit = self.circuit_list.get_by_id(cell.circuit_id)
             inner_cell = circuit.handle_relay(cell)
@@ -372,19 +382,58 @@ class Tor_Node(Tor_base):
                              direction=k[2], bytes=st["bytes"], cells=st["cells"], interval_ms=None)
 
         elif isinstance(cell, CellRelayData):
-            # --- circuit-level recv window (per direction) ---
+            cid = circuit.id
+            sid = origin_cell.stream_id
+
+            # Determine where to forward if we are not the exit consumer for this stream.
+            if sock == circuit.circuit_nodes[0].sock:
+                out_sock = circuit.circuit_nodes[-1].sock
+                direction = "down"
+            else:
+                out_sock = circuit.circuit_nodes[0].sock
+                direction = "up"
+
+            stream = circuit.streams.get_by_id(sid)
+
+            # We are an exit consumer only if this stream has a live remote TCP endpoint.
+            # Otherwise (no stream, or TCP not connected yet), this node must behave as a relay:
+            # forward the cell and do NOT touch recv windows / do NOT generate SENDME.
+            is_exit_consumer = (
+                    stream is not None and
+                    (stream._remote_writer is not None or stream._remote_reader is not None)
+            )
+
+            if not is_exit_consumer:
+                # Relay behavior: forward original encrypted relay cell.
+                setattr(origin_cell, "_inner", cell)
+                await self._forward_relay_cell(circuit, in_sock=sock, out_sock=out_sock, cell=origin_cell)
+
+                # stats (keep your accounting)
+                key = (cid, sid, direction)
+                st = self._relay_bytes.get(key)
+                if not st:
+                    st = self._relay_bytes[key] = {"bytes": 0, "cells": 0, "t0": time.monotonic_ns()}
+                st["bytes"] += len(cell.data)
+                st["cells"] += 1
+                return
+
+            # ==========================
+            # Exit consumer behavior
+            # ==========================
+
+            # --- circuit-level recv window ---
             cw = self._cw_recv(circuit, sock)
             cw.on_recv_data_cell(1)
 
             if cw.should_send_sendme():
-                sendme_inner = CellRelaySendMe(circuit_id=circuit.id)
+                # circuit-level SENDME: stream_id = 0, send back toward the sender on this link
+                sendme_inner = CellRelaySendMe(circuit_id=cid)
                 circ_sendme = circuit.make_relay(inner_cell=sendme_inner, relay_type=CellRelay, stream_id=0)
                 await sock.send_cell(circ_sendme)
 
-                # 这里不要再调用任何 on_send_sendme()
-                st = self._relay_agg.get((circuit.id, 0))
+                st = self._relay_agg.get((cid, 0))
                 if not st:
-                    st = self._relay_agg[(circuit.id, 0)] = {
+                    st = self._relay_agg[(cid, 0)] = {
                         "up_bytes": 0, "up_cells": 0,
                         "down_bytes": 0, "down_cells": 0,
                         "sendme_sent": 0, "sendme_recv": 0,
@@ -393,50 +442,41 @@ class Tor_Node(Tor_base):
                 st["sendme_sent"] = st.get("sendme_sent", 0) + 1
                 st["last_win"] = cw.send_window
 
-            # --- stream-level recv window & SENDME trigger ---
-            stream = circuit.streams.get_by_id(origin_cell.stream_id)
-            if stream is None:
-                end = CellRelayEnd(StreamReason(10), circuit.id)
-                relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=origin_cell.stream_id)
-                await sock.send_cell(relay)
-                return
-            if stream is not None:
-                # update receiving window (one DATA cell)
-                stream.window.on_recv_data_cell(1)
+            # --- stream-level recv window ---
+            stream.window.on_recv_data_cell(1)
 
-                # simple Tor-like rule: every `increment` (50) DATA -> 1 SENDME
-                if stream.window.should_send_sendme():
-                    sendme_cell = stream.make_sendme()  # will use stream_id=self.id
-                    await sock.send_cell(sendme_cell)
+            if stream.window.should_send_sendme():
+                sendme_cell = stream.make_sendme()  # stream_id = sid
+                await sock.send_cell(sendme_cell)
 
-                    # 统计：记录 SENDME 发出次数（可选）
-                    cid = circuit.id
-                    sid = origin_cell.stream_id
-                    st = self._relay_agg.get((cid, sid))
-                    if not st:
-                        st = self._relay_agg[(cid, sid)] = {
-                            "up_bytes": 0, "up_cells": 0,
-                            "down_bytes": 0, "down_cells": 0,
-                            "sendme_sent": 0, "sendme_recv": 0,
-                            "last_win": None,
-                        }
-                    st["sendme_sent"] = st.get("sendme_sent", 0) + 1
-                    st["last_win"] = stream.window.send_window
+                st = self._relay_agg.get((cid, sid))
+                if not st:
+                    st = self._relay_agg[(cid, sid)] = {
+                        "up_bytes": 0, "up_cells": 0,
+                        "down_bytes": 0, "down_cells": 0,
+                        "sendme_sent": 0, "sendme_recv": 0,
+                        "last_win": None,
+                    }
+                st["sendme_sent"] = st.get("sendme_sent", 0) + 1
+                st["last_win"] = stream.window.send_window
 
+            # deliver to local TCP forwarder
             await stream._to_remote.put(cell.data)
 
-            key = (circuit.id, origin_cell.stream_id, "down" if sock == circuit.circuit_nodes[0].sock else "up")
+            # stats
+            key = (cid, sid, direction)
             st = self._relay_bytes.get(key)
             if not st:
                 st = self._relay_bytes[key] = {"bytes": 0, "cells": 0, "t0": time.monotonic_ns()}
             st["bytes"] += len(cell.data)
             st["cells"] += 1
+
         elif isinstance(cell, CellRelaySendMe):
             cid = circuit.id
             sid = origin_cell.stream_id
 
             if sid == 0:
-                cw = self._cw_send(circuit, sock)
+                cw = self._cw_send(circuit, out_sock=sock)
                 cw.on_recv_sendme()
 
                 st = self._relay_agg.get((cid, sid))

@@ -351,7 +351,7 @@ class Tor_Socket():
             await self.send_cell(cell)
 
     async def send_cell(self, cell):
-        # print("send cell: ", cell)
+        print("send cell: ", cell)
         if self._closing.is_set():
             self.print(f"[SendDrop] closed: {self.peer_str} {cell}")
             return

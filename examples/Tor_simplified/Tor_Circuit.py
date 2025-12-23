@@ -88,12 +88,17 @@ class ClientCircuitOps(CircuitRoleOps):
 
     def decrypt(self, relay_cell):
         for node in self.circuit.circuit_nodes:
-            if not relay_cell.is_encrypted:
-                break
             if getattr(node, "_crypto_state", None) is None:
                 continue
+            if getattr(relay_cell, "_checked", False):
+                break
             node.decrypt_backward(relay_cell)
+
+        if not getattr(relay_cell, "_checked", False):
+            raise ValueError("RELAY decrypt failed: no hop recognized (checked=False)")
+
         return relay_cell.get_decrypted()
+
     def handle_relay(self, cell):
         return self.decrypt(cell)
 
@@ -105,14 +110,15 @@ class ServerCircuitOps(CircuitRoleOps):
     def decrypt(self, relay_cell):
         node = self.circuit.circuit_nodes[0]
         node.decrypt_backward(relay_cell)
+
+        # IMPORTANT:
+        # If not recognized, relay_cell remains encrypted.
+        # Do NOT reconstruct a new object (will lose stream_id/header state).
         if relay_cell.is_encrypted:
-            return type(relay_cell)(
-                inner_cell=None,
-                circuit_id=relay_cell.circuit_id,
-                encrypted=relay_cell.get_encrypted()
-            )
-        else:
-            return relay_cell.get_decrypted()
+            return relay_cell
+
+        # Recognized and decrypted
+        return relay_cell.get_decrypted()
 
     def handle_relay(self, cell):
         return self.decrypt(cell)
@@ -135,7 +141,8 @@ class TorCircuit:
 
         self.circ_window_down = TorWindow(start=CIRC_WINDOW_INIT, increment=CIRC_WINDOW_INC)
         self.circ_window_up   = TorWindow(start=CIRC_WINDOW_INIT, increment=CIRC_WINDOW_INC)
-
+        self.upstream_sock = None    # towards client
+        self.downstream_sock = None  # towards exit
 
     def connect_to_guard(self, guard):
         key_agreement_cls = NtorKeyAgreement
@@ -335,7 +342,13 @@ class CircuitManager:
                         return circ
 
             # 真正建路
-            circ = await self.client.create_circuit(socket, hops_count, extend_routers)
+            try:
+                circ = await self.client.create_circuit(socket, hops_count, extend_routers)
+            except Exception as e:
+                import traceback
+                print(f"[cirmgr] build error: {repr(e)}")
+                print(traceback.format_exc())
+                raise
             async with self._lock:
                 self._register(circ, isolation_key=isolation_key, purpose="general", exit_fp=None)
             return circ
@@ -356,7 +369,8 @@ class CircuitManager:
 
     def _send_destroy(self, circ_id: int):
         sock = self.client.socket_map.get(self.client.guard.addr)
-        if not sock: return
+        if not sock:
+            return
         try:
             # Adjust if your project uses another destroy cell constructor
             destroy = CellDestroy(circuit_id=circ_id)
@@ -407,8 +421,9 @@ class CircuitManager:
                     except TypeError:
                         await self.get_or_build("general", hops_count=3, extend_routers=None)
             except Exception as e:
-                print(f"[prebuild] error: {e}")
-
+                import traceback
+                print(f"[prebuild] error: {repr(e)}")
+                print(traceback.format_exc())
             await asyncio.sleep(2.0)
 
 

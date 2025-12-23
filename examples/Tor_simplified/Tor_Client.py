@@ -310,12 +310,32 @@ class Tor_Client(Tor_base):
             circuit.connect_event.set()
         elif isinstance(cell, CellRelay):
             circuit = self.circuit_list.get_by_id(cell.circuit_id)
-            inner_cell = circuit.handle_relay(cell)
+            if circuit is None:
+                self.print(f"[client] unknown circuit_id={cell.circuit_id} (relay)")
+                return
+
+            try:
+                inner_cell = circuit.handle_relay(cell)
+            except Exception as e:
+                # 关键：别再丢失错误细节，否则你只能看到 prebuild 一直重试
+                try:
+                    enc = cell.get_encrypted() if hasattr(cell, "get_encrypted") else None
+                    self.print(
+                        f"[client] RELAY decrypt failed circ={cell.circuit_id} sid={getattr(cell, 'stream_id', None)} "
+                        f"checked={getattr(cell, '_checked', None)} enc_len={len(enc) if enc else None} err={repr(e)}")
+                except Exception:
+                    self.print(f"[client] RELAY decrypt failed circ={cell.circuit_id} err={repr(e)}")
+                return
+
+            # 到这里说明已成功识别出 inner
+            self.print(
+                f"[client] RELAY decrypted circ={cell.circuit_id} sid={getattr(cell, 'stream_id', None)} inner={type(inner_cell).__name__}")
             await self.handle_cell_relay(inner_cell, circuit, cell)
 
     async def handle_cell_relay(self, cell, circuit, origin_cell):
         # self.print("inner_cell:", cell)
         if isinstance(cell, CellRelayExtended2):
+            self.print(f"[client] EXTENDED2 ok circ={circuit.id} (event set)")
             circuit.extended_cell = cell
             circuit.connect_event.set()
         elif isinstance(cell, CellRelayConnected):
