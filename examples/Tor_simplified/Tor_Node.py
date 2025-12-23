@@ -554,17 +554,19 @@ class Tor_Node(Tor_base):
             # 这里会真的 dial TCP
             await stream.open_remote_raw(timeout=5.0)
 
-            connected = CellRelayConnected(address=stream.target_addr[0], ttl=3600, circuit_id=circuit.id)
-            relay_conn = circuit.make_relay(inner_cell=connected, relay_type=CellRelay, stream_id=sid)
-            await sock.send_cell(relay_conn)
-            self._ev("begin_connected_tx", circ_id=circuit.id, stream_id=sid, dst=str(stream.target_addr))
+
 
             # 启动双向转发
             stream.start_duplex_tasks(
                 circuit=circuit,
                 sock=sock,
-                cw_picker=self._cw_send  # 你原来传的 cw_picker 用什么就填什么
+                cw_picker=self._cw_send,  # 你原来传的 cw_picker 用什么就填什么
+                spawner=self._spawn_bg_task,
             )
+            connected = CellRelayConnected(address=stream.target_addr[0], ttl=3600, circuit_id=circuit.id)
+            relay_conn = circuit.make_relay(inner_cell=connected, relay_type=CellRelay, stream_id=sid)
+            await sock.send_cell(relay_conn)
+            self._ev("begin_connected_tx", circ_id=circuit.id, stream_id=sid, dst=str(stream.target_addr))
 
             self._ev("exit_tcp_connected", circ_id=circuit.id, stream_id=sid, dst=str(stream.target_addr))
 
