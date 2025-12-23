@@ -359,14 +359,6 @@ class Tor_Client(Tor_base):
                 self.print("final data: ", data[:200])
             else:
                 self.print("final data: <empty>")
-
-            # === 新增：结束 stream 并写日志 ===
-            self.circuit_mgr.on_stream_end(circuit)
-            stream_uid = self._sid2uid.pop(origin_cell.stream_id, None)
-            if stream_uid:
-                rec = self.stream_tracker.end(stream_uid)
-                if rec:
-                    self._stream(**rec)  # 写入 streams.jsonl（或 flows.jsonl 兼容别名）
         elif isinstance(cell, CellRelayData):
             # --- circuit-level recv window (from guard -> client) ---
             if hasattr(circuit, "circ_window_down"):
@@ -442,6 +434,5 @@ class Tor_Client(Tor_base):
             await asyncio.sleep(0)
         except Exception:
             pass
-
 
 

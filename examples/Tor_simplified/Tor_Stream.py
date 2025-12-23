@@ -80,6 +80,8 @@ class Tor_Stream:
 
         self.end_event = asyncio.Event()
         self._ended = False
+        self._end_sent = False
+        self._remote_ready = asyncio.Event()
 
     @property
     def id(self):
@@ -114,6 +116,14 @@ class Tor_Stream:
         # wake recv() if it is waiting
         self.data_event.set()
 
+    def mark_end_sent(self):
+        """Server端使用：发送 RelayEnd 前先标记，保证只发一次"""
+        if self._end_sent:
+            return False
+        self._end_sent = True
+        self._closing.set()
+        return True
+
     # ================= Server 模式核心方法 =================
 
     async def open_remote_raw(self, timeout=5.0):
@@ -136,6 +146,7 @@ class Tor_Stream:
             sock = self._remote_writer.get_extra_info("socket")
             if sock:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._remote_ready.set()
 
     def start_duplex_tasks(self, circuit, sock, cw_picker, spawner):
         """Server Exit 模式：启动双向转发"""
@@ -150,7 +161,16 @@ class Tor_Stream:
                     if data is None:
                         break
                     if not self._remote_writer:
-                        break
+                        t_ready = asyncio.create_task(self._remote_ready.wait())
+                        t_closing = asyncio.create_task(self._closing.wait())
+                        done, pending = await asyncio.wait(
+                            {t_ready, t_closing},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        for p in pending:
+                            p.cancel()
+                        if not self._remote_writer:
+                            break
                     self._remote_writer.write(data)
                     await self._remote_writer.drain()
             except asyncio.CancelledError:
@@ -175,8 +195,9 @@ class Tor_Stream:
                     chunk = await self._remote_reader.read(16384)
                     if not chunk:
                         # remote EOF
-                        end = CellRelayEnd(StreamReason.DONE, circuit.id)
-                        await sock.send_cell(circuit.make_relay(end, stream_id=self.id))
+                        if self.mark_end_sent():
+                            end = CellRelayEnd(StreamReason.DONE, circuit.id)
+                            await sock.send_cell(circuit.make_relay(end, stream_id=self.id))
                         break
 
                     for rc in self.make_relays_server(chunk):
