@@ -367,7 +367,6 @@ class Tor_Client(Tor_base):
                 rec = self.stream_tracker.end(stream_uid)
                 if rec:
                     self._stream(**rec)  # 写入 streams.jsonl（或 flows.jsonl 兼容别名）
-            self.print("final data: ", data)
         elif isinstance(cell, CellRelayData):
             # --- circuit-level recv window (from guard -> client) ---
             if hasattr(circuit, "circ_window_down"):

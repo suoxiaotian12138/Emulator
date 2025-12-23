@@ -283,14 +283,25 @@ class Tor_Node(Tor_base):
 
                 # NOT RECOGNIZED: still encrypted, must be forwarded downstream
                 if isinstance(inner_or_relay, RelayedTorCell) and inner_or_relay.is_encrypted:
-                    out_sock = circuit.circuit_nodes[-1].sock
-                    await out_sock.send_cell(cell)
+                    downstream_sock = None
+                    if len(circuit.circuit_nodes) > 1:
+                        downstream_sock = circuit.circuit_nodes[-1].sock
+                    if downstream_sock is None or downstream_sock == sock:
+                        self._ev(
+                            "relay_forward_blocked",
+                            circ_id=cell.circuit_id,
+                            sock=str(sock.socket.getpeername()),
+                            downstream_sock=str(getattr(downstream_sock, "socket", None).getpeername())
+                            if downstream_sock is not None
+                            else None,
+                        )
+                        return
+                    await downstream_sock.send_cell(cell)
                     return
 
                 # RECOGNIZED: handle inner cell locally
                 await self.handle_cell_relay(inner_or_relay, circuit, cell, sock)
                 return
-
             # downstream -> upstream: add one layer and forward upstream
             next_node = circuit.circuit_nodes[0]
             next_node.encrypt_forward(cell)
@@ -398,23 +409,60 @@ class Tor_Node(Tor_base):
             # We are an exit consumer only if this stream has a live remote TCP endpoint.
             # Otherwise (no stream, or TCP not connected yet), this node must behave as a relay:
             # forward the cell and do NOT touch recv windows / do NOT generate SENDME.
-            is_exit_consumer = (
-                    stream is not None and
-                    (stream._remote_writer is not None or stream._remote_reader is not None)
+            tcp_ready = stream is not None and (
+                stream._remote_writer is not None or stream._remote_reader is not None
             )
+            exit_tcp_not_ready = (
+                stream is not None and
+                stream.target_addr is not None and
+                stream._remote_writer is None and
+                stream._remote_reader is None
+            )
+            is_exit_consumer = tcp_ready
 
             if not is_exit_consumer:
                 # Relay behavior: forward original encrypted relay cell.
-                setattr(origin_cell, "_inner", cell)
-                await self._forward_relay_cell(circuit, in_sock=sock, out_sock=out_sock, cell=origin_cell)
+                if exit_tcp_not_ready:
+                    self._ev(
+                        "relay_data_drop_tcp_not_ready",
+                        circ_id=cid,
+                        stream_id=sid,
+                        dst=str(stream.target_addr),
+                    )
+                    end = CellRelayEnd(StreamReason.INTERNAL, cid)
+                    relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=sid)
+                    await sock.send_cell(relay)
+                    return
 
-                # stats (keep your accounting)
-                key = (cid, sid, direction)
-                st = self._relay_bytes.get(key)
-                if not st:
-                    st = self._relay_bytes[key] = {"bytes": 0, "cells": 0, "t0": time.monotonic_ns()}
-                st["bytes"] += len(cell.data)
-                st["cells"] += 1
+                if stream is None:
+                    self._ev(
+                        "relay_data_forward_no_stream",
+                        circ_id=cid,
+                        stream_id=sid,
+                        direction=direction,
+                    )
+                    # Relay behavior: forward original encrypted relay cell.
+                    setattr(origin_cell, "_inner", cell)
+                    await self._forward_relay_cell(circuit, in_sock=sock, out_sock=out_sock, cell=origin_cell)
+
+                    # stats (keep your accounting)
+                    key = (cid, sid, direction)
+                    st = self._relay_bytes.get(key)
+                    if not st:
+                        st = self._relay_bytes[key] = {"bytes": 0, "cells": 0, "t0": time.monotonic_ns()}
+                    st["bytes"] += len(cell.data)
+                    st["cells"] += 1
+                    return
+
+                self._ev(
+                    "relay_data_drop_stream_not_ready",
+                    circ_id=cid,
+                    stream_id=sid,
+                    dst=str(stream.target_addr),
+                )
+                end = CellRelayEnd(StreamReason.INTERNAL, cid)
+                relay = circuit.make_relay(inner_cell=end, relay_type=CellRelay, stream_id=sid)
+                await sock.send_cell(relay)
                 return
 
             # ==========================
