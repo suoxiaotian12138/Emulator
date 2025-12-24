@@ -128,6 +128,11 @@ class Tor_Client(Tor_base):
                 off += len(chunk)
 
                 data_cell = stream.make_relay(CellRelayData(chunk, circuit.id))
+                self._ev(
+                    "cell_trace", circ_id=circuit.id, stream_id=stream.id,
+                    peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}", side="client", dir="send",
+                    cell_cmd="RELAY_DATA"
+                )
                 await socket.send_cell(data_cell)
 
 
@@ -214,6 +219,11 @@ class Tor_Client(Tor_base):
 
             chunk = data[off: off + max_payload]
             off += len(chunk)
+            self._ev(
+                "cell_trace", circ_id=circuit.id, stream_id=stream.id,
+                peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}", side="client", dir="send",
+                cell_cmd="RELAY_DATA"
+            )
             await socket.send_cell(stream.make_relay(CellRelayData(chunk, circuit.id)))
 
     async def create_circuit(self, socket, hops_count=3, extend_routers=None):
@@ -235,6 +245,10 @@ class Tor_Client(Tor_base):
                  fp=guard_hop.fingerprint_str, role="guard",
                  consensus_id=snap["consensus_id"])
         create_cell = circuit.connect_to_guard(guard_hop)
+        self._ev(
+            "cell_trace", circ_id=circuit.id, peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}",
+            side="client", dir="send", cell_cmd="CREATE2"
+        )
         await socket.send_cell(create_cell)
         await circuit.guard_handsake(wait_time=600)
         self.print("guard is :", self.guard.ip)
@@ -265,6 +279,10 @@ class Tor_Client(Tor_base):
             t_rtt = HopTimer().start()
             try:
                 extend_cell = circuit.connect_to_extend(extend_hop)
+                self._ev(
+                    "cell_trace", circ_id=circuit.id, peer=f"{extend_node.ip}:{extend_node.or_port}",
+                    side="client", dir="send", cell_cmd="EXTEND2"
+                )
                 await socket.send_cell(extend_cell)
                 await circuit.extend_handshake(descriptor_str, wait_time=60)
                 self._ev("circuit_extend_success", circ_id=circuit.id, hop=hop, nickname=router['nickname'],
@@ -313,6 +331,10 @@ class Tor_Client(Tor_base):
         elif isinstance(cell, CellCreated2):
             circuit = self.circuit_list.get_by_id(cell.circuit_id)
             circuit.created_cell = cell
+            self._ev(
+                "cell_trace", circ_id=cell.circuit_id, peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}",
+                side="client", dir="recv", cell_cmd="CREATED2"
+            )
             circuit.connect_event.set()
         elif isinstance(cell, CellRelay):
             circuit = self.circuit_list.get_by_id(cell.circuit_id)
@@ -343,13 +365,27 @@ class Tor_Client(Tor_base):
         if isinstance(cell, CellRelayExtended2):
             self.print(f"[client] EXTENDED2 ok circ={circuit.id} (event set)")
             circuit.extended_cell = cell
+            self._ev(
+                "cell_trace", circ_id=circuit.id, peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}",
+                side="client", dir="recv", cell_cmd="EXTENDED2"
+            )
             circuit.connect_event.set()
         elif isinstance(cell, CellRelayConnected):
             # self.print(origin_cell.stream_id)
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
+            self._ev(
+                "cell_trace", circ_id=circuit.id, stream_id=origin_cell.stream_id,
+                peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}", side="client", dir="recv",
+                cell_cmd="RELAY_CONNECTED"
+            )
             stream.connect_event.set()
         elif isinstance(cell, CellRelayEnd):
             stream = circuit.streams.get_by_id(origin_cell.stream_id)
+            self._ev(
+                "cell_trace", circ_id=circuit.id, stream_id=origin_cell.stream_id,
+                peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}", side="client", dir="recv",
+                cell_cmd="RELAY_END"
+            )
             stream.set_end(cell)
             data = await stream.recv_all_until_end(timeout=5.0)
 
@@ -398,7 +434,11 @@ class Tor_Client(Tor_base):
         elif isinstance(cell, CellRelaySendMe):
             sid = origin_cell.stream_id
             self.print(f"[RECV] SENDME sid={sid} circ={circuit.id}")
-
+            self._ev(
+                "cell_trace", circ_id=circuit.id, stream_id=sid,
+                peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}", side="client", dir="recv",
+                cell_cmd="RELAY_SENDME"
+            )
             if sid == 0:
                 # ---- circuit-level SENDME ----
                 if hasattr(circuit, "circ_window_up"):

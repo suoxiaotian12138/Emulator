@@ -5,6 +5,19 @@ from typing import Any, Dict, Optional
 
 # All timestamps use monotonic_ns for ordering, plus optional wall clock for humans
 class Event(BaseModel):
+    """
+    可观测语义事件字段约定：
+
+    * ``cell_cmd``：创建/扩展/销毁等可观测单元的细分指令，使用 CREATE2、CREATED2、EXTEND2、EXTENDED2、SENDME、DESTROY、RELAY 等固定枚举值。
+    * ``dir``：事件方向，限定为 send（向外发出）或 recv（从对端接收）。
+    * ``side``：当前所在角色视角，client/relay/exit 三选一，便于跨节点对齐同一事件。
+    * ``circ_id``：电路标识，记录为字符串以保持与 Tor 字段一致；若无则省略。
+    * ``stream_id``：流标识，字符串形式，可选。
+    * ``hop``：所在跳数（0 基），仅在需要区分路径位置时填写。
+    * ``peer``：对端节点/连接的标识（例如 IP:Port 或 node_id），用于外部可观测的通道确认。
+
+    语义一致性 = 外部可观测行为：实验与分析脚本应只依赖以上可观测字段的取值与顺序，不假设内部实现细节。
+    """
     ts_mono_ns: int
     ts_wall_ns: Optional[int] = None
     node_id: str

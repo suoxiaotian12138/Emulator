@@ -31,7 +31,14 @@ class EventBus:
 
     # 控制面事件
     def ev(self, name: str, **meta: Any):
+        """记录单个控制面事件。
+
+        meta 中涉及可观测语义的字段请遵守 schema.Event 的约定：
+        cell_cmd=CREATE2|CREATED2|EXTEND2|EXTENDED2|SENDME|DESTROY|RELAY,
+        dir=send|recv, side=client|relay|exit，并保持 circ_id/stream_id/hop/peer 等字段名一致。
+        """
         self.emit("events", {"ts_mono_ns": self._t(), "node_id": self.node_id, "role": self.role, "event": name, "meta": meta})
+
 
     # 电路
     def circuit(self, circ_id: str, client: str, guard: str, exit: str, build_ms: float, success: bool, fail_reason: str | None = None, middle: str | None = None):

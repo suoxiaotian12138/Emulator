@@ -128,10 +128,17 @@ class Tor_Node(Tor_base):
         t0 = time.perf_counter()
         circuit = await self.circuit_list.create_circuit_server(circuit_id)
         circuit.scheduler = self._circuit_scheduler
-
+        self._ev(
+            "cell_trace", circ_id=circuit_id, peer=str(sock.socket.getpeername()),
+            side="node", dir="recv", cell_cmd="CREATE2"
+        )
         created_cell = circuit.server_connected(self.protocol_version, create_cell, sock)
         self._ev("circuit_server_connected", circ_id=circuit_id, peer=str(sock.socket.getpeername()), ms=(time.perf_counter()-t0)*1000.0)
         await sock.send_cell(created_cell)
+        self._ev(
+            "cell_trace", circ_id=circuit_id, peer=str(sock.socket.getpeername()),
+            side="node", dir="send", cell_cmd="CREATED2"
+        )
         return circuit
 
     async def extend_next_node(self, cell: CellRelayExtend2, circuit_id: int):
@@ -187,6 +194,10 @@ class Tor_Node(Tor_base):
             await sock.send_cell(create2)
             self._ev("circuit_extend_downstream_sent",
                      circ_id=circuit_id, target=f"{ip}:{port}")
+            self._ev(
+                "cell_trace", circ_id=circuit_id, peer=f"{ip}:{port}",
+                side="node", dir="send", cell_cmd="CREATE2"
+            )
         except Exception as e:
             self._ev("circuit_extend_downstream_fail",
                      circ_id=circuit_id, target=f"{ip}:{port}", error=str(e),
@@ -201,6 +212,10 @@ class Tor_Node(Tor_base):
         cell = circuit.make_relay(inner_cell=extend_cell, relay_type=CellRelay)
         sock = circuit.circuit_nodes[0].sock
         circuit.enqueue_relay(cell, out_sock=sock, is_data=False)
+        self._ev(
+            "cell_trace", circ_id=circuit_id, peer=str(sock.socket.getpeername()),
+            side="node", dir="send", cell_cmd="EXTENDED2"
+        )
 
     def _cw_send(self, circuit, out_sock: Tor_Socket):
         """
@@ -247,6 +262,20 @@ class Tor_Node(Tor_base):
         stream = None
         if cell.stream_id:
             stream = circuit.streams.get_by_id(cell.stream_id)
+
+        inner = getattr(cell, "_inner", None)
+        if isinstance(inner, CellRelaySendMe):
+            self._ev(
+                "cell_trace", circ_id=circuit.id, stream_id=cell.stream_id,
+                peer=str(out_sock.socket.getpeername()), side="node", dir="send",
+                cell_cmd="RELAY_SENDME"
+            )
+        elif isinstance(inner, CellRelayData):
+            self._ev(
+                "cell_trace", circ_id=circuit.id, stream_id=cell.stream_id,
+                peer=str(out_sock.socket.getpeername()), side="node", dir="send",
+                cell_cmd="RELAY_DATA"
+            )
 
         circuit.enqueue_relay(cell, out_sock=out_sock, stream=stream, is_data=is_data)
 
@@ -328,6 +357,10 @@ class Tor_Node(Tor_base):
                 next_hop_sock = circuit.circuit_nodes[-1].sock
             else:
                 next_hop_sock = circuit.circuit_nodes[0].sock
+            self._ev(
+                "cell_trace", circ_id=cell.circuit_id, peer=str(next_hop_sock.socket.getpeername()),
+                side="node", dir="send", cell_cmd="DESTROY"
+            )
             await next_hop_sock.send_cell(cell)
             circuit.close_all_streams()
             circuit.circuit_nodes.clear()

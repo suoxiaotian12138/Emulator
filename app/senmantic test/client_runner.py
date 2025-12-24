@@ -11,6 +11,27 @@ import time
 import contextlib
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+import json
+import random
+from pathlib import Path
+
+from tools.Log.writer import AsyncJsonlWriter
+from tools.Log.bus import EventBus
+
+def ensure_seed() -> int:
+    seed_env = os.environ.get("RANDOM_SEED")
+    if seed_env is None:
+        seed_env = str(int(time.time()))
+        os.environ["RANDOM_SEED"] = seed_env
+    seed = int(seed_env)
+    random.seed(seed)
+    return seed
+
+
+def build_writer(log_dir: str) -> AsyncJsonlWriter:
+    writer = AsyncJsonlWriter(out_dir=log_dir, rotate_mb=50, batch_size=200, flush_every_ms=100)
+    writer.start()
+    return writer
 
 # =========================
 # 0) Embedded "set ..." defaults
@@ -38,6 +59,21 @@ DEFAULT_ENV = {
 
 for k, v in DEFAULT_ENV.items():
     os.environ.setdefault(k, v)
+
+def ensure_seed() -> int:
+    seed_env = os.environ.get("RANDOM_SEED")
+    if seed_env is None:
+        seed_env = str(int(time.time()))
+        os.environ["RANDOM_SEED"] = seed_env
+    seed = int(seed_env)
+    random.seed(seed)
+    return seed
+
+
+def build_writer(log_dir: str) -> AsyncJsonlWriter:
+    writer = AsyncJsonlWriter(out_dir=log_dir, rotate_mb=50, batch_size=200, flush_every_ms=100)
+    writer.start()
+    return writer
 
 def env_int(key: str, default: int) -> int:
     v = os.environ.get(key)
@@ -120,6 +156,24 @@ async def run_one_client(client: Tor_Client, addr, hop: int,
 
 async def main():
     loop = asyncio.get_running_loop()
+    log_dir = env_str("LOG_DIR", "exp/semantic_logs")
+    exp_label = env_str("EXP_LABEL", "Tor")
+    seed = ensure_seed()
+    log_dir_path = Path(log_dir)
+    log_dir_path.mkdir(parents=True, exist_ok=True)
+
+    writer = build_writer(log_dir)
+    meta_path = log_dir_path / "run_meta.json"
+    run_meta = {
+        "started_at": time.time(),
+        "exp_label": exp_label,
+        "random_seed": seed,
+        "log_dir": str(log_dir_path.resolve()),
+    }
+
+    def bus_factory(node_name: str) -> EventBus:
+        return EventBus(writer.emit_nowait, node_id=node_name, role="client")
+
     max_workers = env_int("MAX_TLS_THREADS", 128)
     loop.set_default_executor(
         concurrent.futures.ThreadPoolExecutor(
@@ -170,6 +224,8 @@ async def main():
             port = 9102 + client_index
 
             client = Tor_Client(name=name, host=node_addr, port=port, model="sim")
+            client.attach_bus(bus_factory(name))
+            client.emit = client.event_bus.emit
             clients.append(client)
 
             task = asyncio.create_task(
@@ -189,17 +245,38 @@ async def main():
 
         await asyncio.sleep(delay_between_batches)
 
-    await asyncio.gather(*all_tasks, return_exceptions=True)
+    try:
+        await asyncio.gather(*all_tasks, return_exceptions=True)
+    finally:
+        # ★二次兜底 stop，防止 run_one_client 未执行到 finally
+        for c in clients:
+            try:
+                await c.stop_protocol()
+            except Exception as e:
+                print("[Main] stop_protocol error:", e)
 
-    # ★二次兜底 stop，防止 run_one_client 未执行到 finally
-    for c in clients:
-        try:
-            await c.stop_protocol()
-        except Exception as e:
-            print("[Main] stop_protocol error:", e)
+        run_meta.update({
+            "finished_at": time.time(),
+            "config": {
+                "directory_addr": directory_addr,
+                "node_addr": node_addr,
+                "clients_per_batch": clients_per_batch,
+                "total_batches": total_batches,
+                "hop": hop,
+                "payload_mb": payload_mb,
+                "chunk_kb": chunk_kb,
+                "warmup_kb": warmup_kb,
+                "start_timeout_s": start_timeout_s,
+                "inter_chunk_sleep_ms": inter_chunk_sleep_ms,
+            },
+            "log_files": {k: str(p) for k, p in writer.files.items()},
+        })
 
-    await asyncio.sleep(0)
-    print("[Main] All clients finished. Exiting.")
+        meta_path.write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
+        await writer.stop()
+        print(f"[Main] run metadata written to {meta_path}")
+    return meta_path
+
 
 
 if __name__ == "__main__":
