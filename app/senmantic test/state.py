@@ -1,3 +1,7 @@
+import argparse
+import json
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
@@ -44,15 +48,20 @@ mpl.rcParams.update({
 })
 
 # =====================================================
-# Data
+# Data loading helpers
 # =====================================================
-phases = [
-    {"name": "Handshake", "start": 0, "end": 150, "color": "#DBEAFE"},
-    {"name": "Extend", "start": 150, "end": 400, "color": "#D1FAE5"},
-    {"name": "Data Transfer", "start": 400, "end": 750, "color": "#E9D5FF"},
-    {"name": "Flow Control", "start": 750, "end": 850, "color": "#FEF3C7"},
-    {"name": "Error", "start": 850, "end": 1000, "color": "#FEE2E2"},
-]
+RAW_STAGE_PREFIX = "# RAW_STAGE_JSON "
+
+STATE_MAP = {
+    "CREATE2": "OPENING",
+    "CREATED2": "OPEN",
+    "EXTEND2": "EXTENDING",
+    "EXTENDED2": "OPEN",
+    "RELAY_CONNECTED": "OPEN",
+    "RELAY_DATA": "OPEN",
+    "SENDME": "OPEN",
+    "DESTROY": "ERROR",
+}
 
 states = ["CLOSED", "OPENING", "OPEN", "EXTENDING", "ERROR"]
 state_colors = {
@@ -62,28 +71,90 @@ state_colors = {
     "EXTENDING": "#34D399",
     "ERROR": "#EF4444",
 }
+def _resolve_metrics_file(base: Path, filename: str, round_idx: int | None) -> Path:
+    if base.is_file():
+        return base
 
-tor_events = [
-    (0, "CLOSED", "START"),
-    (50, "OPENING", "CREATE2"),
-    (120, "OPEN", "CREATED2"),
-    (220, "EXTENDING", "EXTEND2"),
-    (300, "OPEN", "EXTENDED2"),
-    (400, "OPEN", "RELAY"),
-    (750, "OPEN", "SENDME"),
-    (870, "ERROR", "CRASH"),
-]
+    if round_idx is not None:
+        candidate = base / f"round_{round_idx:03d}" / filename
+        if candidate.exists():
+            return candidate
 
-torbox_events = [
-    (0, "CLOSED", "START"),
-    (52, "OPENING", "CREATE2"),
-    (122, "OPEN", "CREATED2"),
-    (223, "EXTENDING", "EXTEND2"),
-    (303, "OPEN", "EXTENDED2"),
-    (403, "OPEN", "RELAY"),
-    (753, "OPEN", "SENDME"),
-    (873, "ERROR", "CRASH"),
-]
+    if (base / filename).exists():
+        return base / filename
+
+    rounds = sorted(base.glob("round_*/"))
+    if rounds:
+        candidate = rounds[-1] / filename
+        if candidate.exists():
+            return candidate
+
+    raise FileNotFoundError(f"Unable to locate {filename} under {base}")
+
+
+def _load_stage_metrics(metrics_root: Path, round_idx: int | None) -> dict:
+    path = _resolve_metrics_file(metrics_root, "state_metrics.txt", round_idx)
+    payload_line = next(
+        (line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith(RAW_STAGE_PREFIX)),
+        None,
+    )
+    if not payload_line:
+        raise ValueError(f"Missing RAW stage payload in {path}")
+    return json.loads(payload_line[len(RAW_STAGE_PREFIX) :])
+
+
+def _build_events(label_data: dict):
+    events = []
+    all_times = []
+    for key, info in label_data.items():
+        if key == "DESTROY_TS":
+            continue
+        times = info.get("times", []) if isinstance(info, dict) else []
+        if not times:
+            continue
+        for ts in times:
+            events.append((ts, STATE_MAP.get(key, "OPEN"), key))
+            all_times.append(ts)
+
+    destroy_ts = label_data.get("DESTROY_TS")
+    if destroy_ts is not None:
+        events.append((destroy_ts, STATE_MAP["DESTROY"], "DESTROY"))
+        all_times.append(destroy_ts)
+
+    if not events:
+        return [
+            (0.0, "CLOSED", "START"),
+            (50.0, "ERROR", "NO_DATA"),
+        ]
+
+    base_ts = min(all_times)
+    normalized = [(ts - base_ts) * 1000.0 for ts, st, name in sorted(events, key=lambda x: x[0])]
+    sorted_events = []
+    for (ts, st, name), raw_ts in zip(sorted(events, key=lambda x: x[0]), normalized):
+        sorted_events.append((raw_ts, st, name))
+
+    sorted_events.insert(0, (0.0, "CLOSED", "START"))
+    return sorted_events
+
+
+def _build_phases(tor_events, torbox_events):
+    all_events = tor_events + torbox_events
+    time_lookup = {name: t for t, _, name in all_events if name != "START"}
+
+    handshake_end = time_lookup.get("CREATED2", 150.0)
+    extend_end = max(time_lookup.get("EXTENDED2", handshake_end), handshake_end)
+    data_end = max(time_lookup.get("SENDME", extend_end), extend_end)
+    destroy_val = max(time_lookup.get("DESTROY", data_end), data_end)
+
+    phases = [
+        {"name": "Handshake", "start": 0.0, "end": handshake_end or 0.0, "color": "#DBEAFE"},
+        {"name": "Extend", "start": handshake_end or 0.0, "end": extend_end or handshake_end, "color": "#D1FAE5"},
+        {"name": "Data Transfer", "start": extend_end or handshake_end, "end": data_end or extend_end, "color": "#E9D5FF"},
+        {"name": "Flow Control", "start": data_end or extend_end, "end": destroy_val or data_end, "color": "#FEF3C7"},
+        {"name": "Error", "start": destroy_val or data_end, "end": (destroy_val or data_end) + 100.0, "color": "#FEE2E2"},
+    ]
+
+    return phases
 
 
 # =====================================================
@@ -194,50 +265,70 @@ def add_event_markers(ax, events, state_y, y_offset, color, diff_map=None):
                 )
 
 
-# =====================================================
-# Figure Setup
-# =====================================================
-fig1 = plt.figure(figsize=(10, 7), constrained_layout=True)
-gs = fig1.add_gridspec(2, 1, height_ratios=[1, 1])
+def plot_timeline(tor_events, torbox_events, phases, output_dir: Path) -> None:
+    fig1 = plt.figure(figsize=(10, 7), constrained_layout=True)
+    gs = fig1.add_gridspec(2, 1, height_ratios=[1, 1])
 
-x_min = 0
-x_max = 1050
+    x_min = 0
+    x_max = max(
+        max((t for t, _, _ in tor_events), default=0),
+        max((t for t, _, _ in torbox_events), default=0),
+    ) + 50
 
-# ---- Tor Track ----
-ax_tor = fig1.add_subplot(gs[0])
-ax_tor.set_xlim(x_min, x_max)
-ax_tor.set_ylim(-0.6, len(states) + 0.8)
-ax_tor.set_yticks(range(len(states)))
-ax_tor.set_yticklabels(states)
-ax_tor.set_title("Tor Protocol", loc="left", color=COLORS["tor_blue"], pad=10, weight="bold")
-ax_tor.grid(axis="x", alpha=VIS["grid_alpha"], linestyle="--", linewidth=0.6)
+    # ---- Tor Track ----
+    ax_tor = fig1.add_subplot(gs[0])
+    ax_tor.set_xlim(x_min, x_max)
+    ax_tor.set_ylim(-0.6, len(states) + 0.8)
+    ax_tor.set_yticks(range(len(states)))
+    ax_tor.set_yticklabels(states)
+    ax_tor.set_title("Tor Protocol", loc="left", color=COLORS["tor_blue"], pad=10, weight="bold")
+    ax_tor.grid(axis="x", alpha=VIS["grid_alpha"], linestyle="--", linewidth=0.6)
 
-for ph in phases:
-    ax_tor.axvspan(ph["start"], ph["end"], facecolor=ph["color"], alpha=VIS["phase_alpha"], zorder=0)
+    for ph in phases:
+        ax_tor.axvspan(ph["start"], ph["end"], facecolor=ph["color"], alpha=VIS["phase_alpha"], zorder=0)
 
-state_y_tor = plot_state_timeline(ax_tor, tor_events)
-# Tor: diff_map=None, 显示绝对时间
-add_event_markers(ax_tor, tor_events, state_y_tor, 0.0, color=COLORS["tor_blue"], diff_map=None)
+    state_y_tor = plot_state_timeline(ax_tor, tor_events)
+    # Tor: diff_map=None, 显示绝对时间
+    add_event_markers(ax_tor, tor_events, state_y_tor, 0.0, color=COLORS["tor_blue"], diff_map=None)
 
-# ---- TorBox Track ----
-ax_tb = fig1.add_subplot(gs[1])
-ax_tb.set_xlim(x_min, x_max)
-ax_tb.set_ylim(-0.6, len(states) + 0.8)
-ax_tb.set_yticks(range(len(states)))
-ax_tb.set_yticklabels(states)
-ax_tb.set_xlabel("Time (ms)", fontsize=FONT["title"], weight="bold")
-ax_tb.set_title("TorBox Protocol", loc="left", color=COLORS["torbox_orange"], pad=10, weight="bold")
-ax_tb.grid(axis="x", alpha=VIS["grid_alpha"], linestyle="--", linewidth=0.6)
+    # ---- TorBox Track ----
+    ax_tb = fig1.add_subplot(gs[1])
+    ax_tb.set_xlim(x_min, x_max)
+    ax_tb.set_ylim(-0.6, len(states) + 0.8)
+    ax_tb.set_yticks(range(len(states)))
+    ax_tb.set_yticklabels(states)
+    ax_tb.set_xlabel("Time (ms)", fontsize=FONT["title"], weight="bold")
+    ax_tb.set_title("TorBox Protocol", loc="left", color=COLORS["torbox_orange"], pad=10, weight="bold")
+    ax_tb.grid(axis="x", alpha=VIS["grid_alpha"], linestyle="--", linewidth=0.6)
 
-for ph in phases:
-    ax_tb.axvspan(ph["start"], ph["end"], facecolor=ph["color"], alpha=VIS["phase_alpha"], zorder=0)
+    for ph in phases:
+        ax_tb.axvspan(ph["start"], ph["end"], facecolor=ph["color"], alpha=VIS["phase_alpha"], zorder=0)
 
-diff_mapping = get_diff_map(tor_events, torbox_events)
-state_y_tb = plot_state_timeline(ax_tb, torbox_events)
-# TorBox: 传入 diff_mapping, 触发极简显示逻辑
-add_event_markers(ax_tb, torbox_events, state_y_tb, 0.0, color=COLORS["torbox_orange"], diff_map=diff_mapping)
+    diff_mapping = get_diff_map(tor_events, torbox_events)
+    state_y_tb = plot_state_timeline(ax_tb, torbox_events)
+    # TorBox: 传入 diff_mapping, 触发极简显示逻辑
+    add_event_markers(ax_tb, torbox_events, state_y_tb, 0.0, color=COLORS["torbox_orange"], diff_map=diff_mapping)
 
-# Save
-plt.savefig("protocol_timeline_comparison.pdf", format="pdf", bbox_inches="tight")
-plt.savefig("protocol_timeline_comparison.png", dpi=300, bbox_inches="tight")
-plt.show()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_dir / "protocol_timeline_comparison.pdf", format="pdf", bbox_inches="tight")
+    plt.savefig(output_dir / "protocol_timeline_comparison.png", dpi=300, bbox_inches="tight")
+    plt.show()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Plot protocol states using semantic_log_analysis outputs")
+    parser.add_argument("--metrics", type=Path, default=Path("exp/semantic_logs/semantic_outputs"), help="semantic_log_analysis 输出目录或 state_metrics.txt 路径")
+    parser.add_argument("--round", dest="round_idx", type=int, default=None, help="当目录包含 round_XXX 时选择具体轮次（默认最后一轮）")
+    parser.add_argument("--out", dest="out_dir", type=Path, default=Path("."), help="图表输出目录")
+    args = parser.parse_args()
+
+    stage_payload = _load_stage_metrics(args.metrics, args.round_idx)
+    tor_events = _build_events(stage_payload.get("Tor", {}))
+    torbox_events = _build_events(stage_payload.get("TorBox", {}))
+    phases = _build_phases(tor_events, torbox_events)
+
+    plot_timeline(tor_events, torbox_events, phases, args.out_dir)
+
+
+if __name__ == "__main__":
+    main()

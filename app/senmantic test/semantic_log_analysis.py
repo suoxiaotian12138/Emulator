@@ -33,6 +33,35 @@ STAGE_KEYS = [
     "DESTROY",
 ]
 
+STAGE_ALIASES = {
+    # 建路
+    "CREATE": "CREATE2",
+    "CREATE2": "CREATE2",
+    "RELAY_CREATE": "CREATE2",
+    "RELAY_CREATE2": "CREATE2",
+    "CREATED": "CREATED2",
+    "CREATED2": "CREATED2",
+    "RELAY_CREATED": "CREATED2",
+    "RELAY_CREATED2": "CREATED2",
+    # 扩展
+    "EXTEND": "EXTEND2",
+    "EXTEND2": "EXTEND2",
+    "RELAY_EXTEND": "EXTEND2",
+    "RELAY_EXTEND2": "EXTEND2",
+    "EXTENDED": "EXTENDED2",
+    "EXTENDED2": "EXTENDED2",
+    "RELAY_EXTENDED": "EXTENDED2",
+    "RELAY_EXTENDED2": "EXTENDED2",
+    # 连接/数据
+    "RELAY_CONNECTED": "RELAY_CONNECTED",
+    "CONNECTED": "RELAY_CONNECTED",
+    "RELAY_DATA": "RELAY_DATA",
+    "DATA": "RELAY_DATA",
+    "SENDME": "SENDME",
+    "RELAY_SENDME": "SENDME",
+    "DESTROY": "DESTROY",
+}
+
 @dataclass
 class LogEvent:
     timestamp: float
@@ -101,6 +130,7 @@ class ControlPlaneStats:
     counts: Dict[str, int]
     first_ts: Dict[str, float]
     last_ts: Dict[str, float]
+    occurrences: Dict[str, List[float]]
 
     def start_time(self, name: str) -> float | None:
         return self.first_ts.get(name)
@@ -109,12 +139,15 @@ class ControlPlaneStats:
     def end_time(self, name: str) -> float | None:
         return self.last_ts.get(name)
 
+    def all_times(self, name: str) -> List[float]:
+        return self.occurrences.get(name, [])
 
 @dataclass
 class SendmeStats:
     intervals: np.ndarray
     count: int
     first_ts: float | None
+    timestamps: List[float]
     @property
     def mean(self) -> float:
         return float(np.mean(self.intervals)) if len(self.intervals) else float("nan")
@@ -236,16 +269,29 @@ def control_plane_stats(events: Iterable[LogEvent]) -> ControlPlaneStats:
     first_ts: Dict[str, float] = {}
     last_ts: Dict[str, float] = {}
 
+    occurrences: Dict[str, List[float]] = defaultdict(list)
+
+    def _canonical(name: str) -> str | None:
+        return STAGE_ALIASES.get(name)
+
     for ev in events:
-        name = ev.cell_cmd or ""
+        raw_name = ev.cell_cmd or ""
+        name = _canonical(raw_name)
         if not name:
             continue
         counts[name] += 1
+        occurrences[name].append(ev.timestamp)
         if name not in first_ts:
             first_ts[name] = ev.timestamp
         last_ts[name] = ev.timestamp
 
-    return ControlPlaneStats(counts=dict(counts), first_ts=first_ts, last_ts=last_ts)
+    return ControlPlaneStats(
+        counts=dict(counts),
+        first_ts=first_ts,
+        last_ts=last_ts,
+        occurrences={k: sorted(v) for k, v in occurrences.items()},
+    )
+
 
 def sendme_intervals(events: Iterable[LogEvent]) -> SendmeStats:
     by_stream: Dict[Tuple[str, str], List[LogEvent]] = defaultdict(list)
@@ -256,15 +302,22 @@ def sendme_intervals(events: Iterable[LogEvent]) -> SendmeStats:
     intervals: List[float] = []
     first_ts: float | None = None
     total = 0
+    all_timestamps: List[float] = []
     for stream_events in by_stream.values():
         stream_events.sort(key=lambda e: e.timestamp)
         if stream_events:
             total += len(stream_events)
             first_ts = stream_events[0].timestamp if first_ts is None else min(first_ts, stream_events[0].timestamp)
+            all_timestamps.extend(ev.timestamp for ev in stream_events)
         for first, second in zip(stream_events, stream_events[1:]):
             intervals.append(second.timestamp - first.timestamp)
 
-    return SendmeStats(np.array(intervals, dtype=float), count=total, first_ts=first_ts)
+    return SendmeStats(
+        np.array(intervals, dtype=float),
+        count=total,
+        first_ts=first_ts,
+        timestamps=sorted(all_timestamps),
+    )
 
 def infer_destroy(events: List[LogEvent]) -> float | None:
     """用最后一个数据包作为 DESTROY 的兜底时间。"""
@@ -306,34 +359,54 @@ def _write_stage_summary(report: RoundSummary, output_dir: Path, title: str) -> 
     summary_path = output_dir / "state_metrics.txt"
     with summary_path.open("w", encoding="utf-8") as f:
         f.write(f"# {title} (建路阶段与事件出现)\n")
+        stage_payload = {}
         for label in ("Tor", "TorBox"):
             stats = report.stages[label]
+            stage_payload[label] = {}
             f.write(f"[{label}] 阶段事件统计\n")
             for key in STAGE_KEYS:
                 cnt = stats.counts.get(key, 0)
                 start = _fmt_ts(stats.start_time(key))
                 end = _fmt_ts(stats.end_time(key) if key not in {"SENDME", "RELAY_DATA"} else stats.start_time(key))
-                f.write(f"  {key}: 次数={cnt}, 起始={start}, 结束={end}\n")
+                times = ", ".join(f"{ts:.6f}" for ts in stats.all_times(key)) or "-"
+                f.write(f"  {key}: 次数={cnt}, 起始={start}, 结束={end}, 出现={times}\n")
+                stage_payload[label][key] = {
+                    "count": cnt,
+                    "start": stats.start_time(key),
+                    "end": stats.end_time(key) if key not in {"SENDME", "RELAY_DATA"} else stats.start_time(key),
+                    "times": stats.all_times(key),
+                }
             destroy_val = _fmt_ts(report.destroy_ts.get(label))
             f.write(f"  推测 DESTROY 时间={destroy_val}\n")
+            stage_payload[label]["DESTROY_TS"] = report.destroy_ts.get(label)
+        f.write(f"# RAW_STAGE_JSON {json.dumps(stage_payload, ensure_ascii=False)}\n")
 
 
-def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = output_dir / "sendme_metrics.txt"
-    with summary_path.open("w", encoding="utf-8") as f:
-        f.write(f"# {title} (SENDME 触发)\n")
 
 def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / "sendme_metrics.txt"
     with summary_path.open("w", encoding="utf-8") as f:
         f.write(f"# {title} (SENDME 触发)\n")
+        payload = {}
         for label in ("Tor", "TorBox"):
             s = report.sendme[label]
             f.write(
                 f"[{label}] SENDME: 触发次数={s.count}, 首次时间={_fmt_ts(s.first_ts)}, 间隔样本={len(s.intervals)}, 平均={s.mean:.3f}, 中位数={s.median:.3f}\n"
             )
+            interval_str = ", ".join(f"{v:.6f}" for v in s.intervals) or "-"
+            ts_str = ", ".join(f"{v:.6f}" for v in s.timestamps) or "-"
+            f.write(f"  间隔序列={interval_str}\n")
+            f.write(f"  触发时间序列={ts_str}\n")
+            payload[label] = {
+                "count": s.count,
+                "first_ts": s.first_ts,
+                "intervals": s.intervals.tolist(),
+                "timestamps": s.timestamps,
+                "mean": s.mean,
+                "median": s.median,
+            }
+        f.write(f"# RAW_SENDME_JSON {json.dumps(payload, ensure_ascii=False)}\n")
 
 def main(
     *,
