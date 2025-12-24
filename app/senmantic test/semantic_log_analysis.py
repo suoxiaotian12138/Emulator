@@ -162,7 +162,7 @@ class RoundSummary:
     stages: Dict[str, ControlPlaneStats]
     sendme: Dict[str, SendmeStats]
     destroy_ts: Dict[str, float | None]
-
+    base_ts: Dict[str, float | None]
 
 def load_log(path: Path) -> List[LogEvent]:
     events: List[LogEvent] = []
@@ -345,7 +345,11 @@ def build_report(tor_events: List[LogEvent], torbox_events: List[LogEvent]) -> R
         "TorBox": sendme_intervals(torbox_events),
     }
     destroy_ts = {"Tor": infer_destroy(tor_events), "TorBox": infer_destroy(torbox_events)}
-    return RoundSummary(stages=stages, sendme=sendme, destroy_ts=destroy_ts)
+    base_ts = {
+        "Tor": min((ev.timestamp for ev in tor_events), default=None),
+        "TorBox": min((ev.timestamp for ev in torbox_events), default=None),
+    }
+    return RoundSummary(stages=stages, sendme=sendme, destroy_ts=destroy_ts, base_ts=base_ts)
 
 
 # ---------- output helpers ----------
@@ -365,16 +369,27 @@ def _write_stage_summary(report: RoundSummary, output_dir: Path, title: str) -> 
             stage_payload[label] = {}
             f.write(f"[{label}] 阶段事件统计\n")
             for key in STAGE_KEYS:
-                cnt = stats.counts.get(key, 0)
-                start = _fmt_ts(stats.start_time(key))
-                end = _fmt_ts(stats.end_time(key) if key not in {"SENDME", "RELAY_DATA"} else stats.start_time(key))
-                times = ", ".join(f"{ts:.6f}" for ts in stats.all_times(key)) or "-"
+
+                if key == "SENDME":
+                    first = stats.start_time(key)
+                    cnt = 1 if first is not None else 0
+                    start = _fmt_ts(first)
+                    end = _fmt_ts(first)
+                    times_list = [first] if first is not None else []
+                else:
+                    cnt = stats.counts.get(key, 0)
+                    start_val = stats.start_time(key)
+                    end_val = stats.end_time(key) if key not in {"SENDME", "RELAY_DATA"} else stats.start_time(key)
+                    start = _fmt_ts(start_val)
+                    end = _fmt_ts(end_val)
+                    times_list = stats.all_times(key)
+                times = ", ".join(f"{ts:.6f}" for ts in times_list) or "-"
                 f.write(f"  {key}: 次数={cnt}, 起始={start}, 结束={end}, 出现={times}\n")
                 stage_payload[label][key] = {
                     "count": cnt,
-                    "start": stats.start_time(key),
-                    "end": stats.end_time(key) if key not in {"SENDME", "RELAY_DATA"} else stats.start_time(key),
-                    "times": stats.all_times(key),
+                    "start": times_list[0] if times_list else None,
+                    "end": times_list[-1] if times_list else None,
+                    "times": times_list,
                 }
             destroy_val = _fmt_ts(report.destroy_ts.get(label))
             f.write(f"  推测 DESTROY 时间={destroy_val}\n")
@@ -407,7 +422,6 @@ def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) ->
                 "median": s.median,
             }
         f.write(f"# RAW_SENDME_JSON {json.dumps(payload, ensure_ascii=False)}\n")
-
 def main(
     *,
     tor_input: Path = TOR_INPUT,
@@ -442,6 +456,11 @@ def main(
             arr = [v for v in values if not np.isnan(v)]
             return float(np.mean(arr)) if arr else float("nan")
 
+        def _offset(value: float | None, base: float | None) -> float:
+            if value is None or base is None:
+                return float("nan")
+            return float(value) - float(base)
+
         avg_state_path = output_dir / "avg_state_metrics.txt"
         with avg_state_path.open("w", encoding="utf-8") as f:
             f.write("# 多轮平均 - 事件出现与推测 DESTROY\n")
@@ -449,16 +468,24 @@ def main(
                 f.write(f"[{label}]\n")
                 for key in STAGE_KEYS:
                     mean_count = _nanmean([float(r.stages[label].counts.get(key, 0)) for r in round_reports])
-                    start_mean = _nanmean([r.stages[label].start_time(key) or float("nan") for r in round_reports])
+                    start_mean = _nanmean([
+                        _offset(r.stages[label].start_time(key), r.base_ts.get(label))
+                        for r in round_reports
+                    ])
                     end_mean = _nanmean([
-                        (r.stages[label].end_time(key) if key not in {"SENDME", "RELAY_DATA"} else r.stages[
-                            label].start_time(key))
-                        or float("nan")
+                        _offset(
+                            r.stages[label].end_time(key)
+                            if key not in {"SENDME", "RELAY_DATA"}
+                            else r.stages[label].start_time(key),
+                            r.base_ts.get(label),
+                        )
                         for r in round_reports
                     ])
                     f.write(
                         f"  {key}: 平均次数={mean_count:.2f}, 平均起始={_fmt_ts(start_mean)}, 平均结束={_fmt_ts(end_mean)}\n")
-                destroy_mean = _nanmean([r.destroy_ts.get(label) or float("nan") for r in round_reports])
+                destroy_mean = _nanmean([
+                    _offset(r.destroy_ts.get(label), r.base_ts.get(label)) for r in round_reports
+                ])
                 f.write(f"  平均推测 DESTROY={_fmt_ts(destroy_mean)}\n")
 
         avg_sendme_path = output_dir / "avg_sendme_metrics.txt"
@@ -466,7 +493,9 @@ def main(
             f.write("# 多轮平均 - SENDME 触发\n")
             for label in ("Tor", "TorBox"):
                 mean_count = _nanmean([float(r.sendme[label].count) for r in round_reports])
-                mean_first = _nanmean([r.sendme[label].first_ts or float("nan") for r in round_reports])
+                mean_first = _nanmean([
+                    _offset(r.sendme[label].first_ts, r.base_ts.get(label)) for r in round_reports
+                ])
                 mean_interval_count = _nanmean([float(len(r.sendme[label].intervals)) for r in round_reports])
                 mean_val = _nanmean([r.sendme[label].mean for r in round_reports])
                 median_val = _nanmean([r.sendme[label].median for r in round_reports])
