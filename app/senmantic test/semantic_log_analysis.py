@@ -74,10 +74,26 @@ class LogEvent:
         if ts is None:
             raise ValueError("Log line is missing a timestamp (timestamp/ts/time/t/ts_ms/ts_ns/ts_mono_ns)")
 
-        cell_cmd = str(raw.get("cell_cmd") or raw.get("cmd") or "").upper()
-        direction = str(raw.get("dir") or raw.get("direction") or "?")
-        circ_id = str(raw.get("circ_id") or raw.get("circuit") or "unknown")
-        stream_id = str(raw.get("stream_id") or raw.get("stream") or "none")
+        meta = raw.get("meta") or {}
+
+        cell_cmd = str(
+            raw.get("cell_cmd")
+            or meta.get("cell_cmd")
+            or raw.get("cmd")
+            or meta.get("cmd")
+            or ""
+        ).upper()
+        direction = str(
+            raw.get("dir") or raw.get("direction") or meta.get("dir") or meta.get("direction") or "?"
+        )
+        circ_id = str(
+            raw.get("circ_id")
+            or raw.get("circuit")
+            or meta.get("circ_id")
+            or meta.get("circuit")
+            or "unknown"
+        )
+        stream_id = str(raw.get("stream_id") or raw.get("stream") or meta.get("stream_id") or meta.get("stream") or "none")
 
         return cls(ts, cell_cmd, direction, circ_id, stream_id)
 
@@ -454,25 +470,35 @@ def plot_report(report: SemanticReport, output_dir: Path) -> None:
 
 
 
-def _write_summary(report: SemanticReport, output_dir: Path, title: str) -> None:
+def _write_state_summary(report: SemanticReport, output_dir: Path, title: str) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = output_dir / "metrics.txt"
+    summary_path = output_dir / "state_metrics.txt"
     with summary_path.open("w", encoding="utf-8") as f:
-        f.write(f"# {title}\n")
+        f.write(f"# {title} (控制面与RELAY匹配)\n")
         for label in ("Tor", "TorBox"):
             c = report.control_plane[label]
             s = report.sendme[label]
             f.write(
-                f"[{label}] 控制面: 完整 {c.fully_ordered}/{c.total_circuits}, 部分 {c.partial_ordered}\n"
+                f"[{label}] 控制面: 完整 {c.fully_ordered}/{c.total_circuits}, 部分 {c.partial_ordered}, 完整率={c.full_ratio*100:.2f}%, 部分率={c.partial_ratio*100:.2f}%\n"
             )
             f.write(f"[{label}] SENDME: n={len(s.intervals)}, mean={s.mean:.3f}, median={s.median:.3f}\n")
         relay = report.relay["Tor"]
         f.write(
-            f"[Relay] 匹配={relay.matched}, 缺失={relay.missing}, 顺序不一致={relay.wrong_order}\n"
+            f"[Relay] 匹配={relay.matched}, 缺失={relay.missing}, 顺序不一致={relay.wrong_order}, 匹配率={relay.match_ratio * 100:.2f}%\n"
         )
+
+def _write_sendme_summary(report: SemanticReport, output_dir: Path, title: str) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = output_dir / "sendme_metrics.txt"
+    with summary_path.open("w", encoding="utf-8") as f:
+        f.write(f"# {title} (SENDME 间隔)\n")
+        for label in ("Tor", "TorBox"):
+            s = report.sendme[label]
+            f.write(
+                f"[{label}] SENDME: n={len(s.intervals)}, mean={s.mean:.3f}, median={s.median:.3f}\n"
+            )
         if not np.isnan(report.ks_stat):
             f.write(f"[SENDME] KS 距离={report.ks_stat:.4f}\n")
-    plot_report(report, output_dir)
 
 def main(
     *,
@@ -489,20 +515,60 @@ def main(
 
     all_tor_events: List[LogEvent] = []
     all_torbox_events: List[LogEvent] = []
-
+    round_reports: List[SemanticReport] = []
     for idx, (tor_path, tb_path) in enumerate(zip(tor_inputs, torbox_inputs)):
         tor_events = load_log(tor_path)
         torbox_events = load_log(tb_path)
 
         round_report = build_report(tor_events, torbox_events)
         round_dir = output_dir / f"round_{idx:03d}"
-        _write_summary(round_report, round_dir, title=f"Round {idx:03d}")
-
+        _write_state_summary(round_report, round_dir, title=f"Round {idx:03d}")
+        _write_sendme_summary(round_report, round_dir, title=f"Round {idx:03d}")
         all_tor_events.extend(tor_events)
         all_torbox_events.extend(torbox_events)
+        round_reports.append(round_report)
 
     aggregate_report = build_report(all_tor_events, all_torbox_events)
-    _write_summary(aggregate_report, output_dir, title="Aggregated")
+    plot_report(aggregate_report, output_dir)
+
+    if round_reports:
+        def _nanmean(values: List[float]) -> float:
+            arr = [v for v in values if not np.isnan(v)]
+            return float(np.mean(arr)) if arr else float("nan")
+
+        avg_state_path = output_dir / "avg_state_metrics.txt"
+        with avg_state_path.open("w", encoding="utf-8") as f:
+            f.write("# 多轮平均 - 控制面与RELAY一致性\n")
+            for label in ("Tor", "TorBox"):
+                full_ratio = _nanmean([r.control_plane[label].full_ratio for r in round_reports])
+                partial_ratio = _nanmean([r.control_plane[label].partial_ratio for r in round_reports])
+                fully_ordered = _nanmean([r.control_plane[label].fully_ordered for r in round_reports])
+                partial_ordered = _nanmean([r.control_plane[label].partial_ordered for r in round_reports])
+                total_circuits = _nanmean([r.control_plane[label].total_circuits for r in round_reports])
+                f.write(
+                    f"[{label}] 平均完整 {fully_ordered:.2f}/{total_circuits:.2f}, 平均部分 {partial_ordered:.2f}, 完整率={full_ratio * 100:.2f}%, 部分率={partial_ratio * 100:.2f}%\n"
+                )
+            relay_match = _nanmean([r.relay["Tor"].matched for r in round_reports])
+            relay_missing = _nanmean([r.relay["Tor"].missing for r in round_reports])
+            relay_wrong = _nanmean([r.relay["Tor"].wrong_order for r in round_reports])
+            relay_ratio = _nanmean([r.relay["Tor"].match_ratio for r in round_reports])
+            f.write(
+                f"[Relay] 平均匹配={relay_match:.2f}, 平均缺失={relay_missing:.2f}, 平均顺序不一致={relay_wrong:.2f}, 匹配率={relay_ratio * 100:.2f}%\n"
+            )
+
+        avg_sendme_path = output_dir / "avg_sendme_metrics.txt"
+        with avg_sendme_path.open("w", encoding="utf-8") as f:
+            f.write("# 多轮平均 - SENDME 间隔\n")
+            for label in ("Tor", "TorBox"):
+                counts = _nanmean([len(r.sendme[label].intervals) for r in round_reports])
+                mean_val = _nanmean([r.sendme[label].mean for r in round_reports])
+                median_val = _nanmean([r.sendme[label].median for r in round_reports])
+                f.write(
+                    f"[{label}] 平均n={counts:.2f}, 平均mean={mean_val:.3f}, 平均median={median_val:.3f}\n"
+                )
+            ks_avg = _nanmean([r.ks_stat for r in round_reports])
+            if not np.isnan(ks_avg):
+                f.write(f"[SENDME] 平均KS 距离={ks_avg:.4f}\n")
 
 if __name__ == "__main__":
     main()
