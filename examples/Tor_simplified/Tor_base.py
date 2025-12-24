@@ -239,11 +239,7 @@ class Tor_base:
     async def stop_protocol(self):
         self.running = False
 
-        # A) 先关监听 socket，逼 accept_tls_connections 退出
-        with contextlib.suppress(Exception):
-            self.socket.close()
-
-        # B) cancel 并 await start_protocol 里登记的长期任务
+        # A) cancel 并 await start_protocol 里登记的长期任务
         for t in list(getattr(self, "tasks", {}).values()):
             if t and not t.done():
                 t.cancel()
@@ -251,7 +247,7 @@ class Tor_base:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await t
 
-        # C) cancel 并 await 所有后台任务（包括 handle_connection, stream pumps 等）
+        # B) cancel 并 await 所有后台任务（包括 handle_connection, stream pumps 等）
         bg = list(getattr(self, "_bg_tasks", set()))
         for t in bg:
             if t and not t.done():
@@ -261,12 +257,16 @@ class Tor_base:
         if hasattr(self, "_bg_tasks"):
             self._bg_tasks.clear()
 
-        # D) 关闭所有 Tor_Socket（此时 loop 还活着，安全）
+        # C) 关闭所有 Tor_Socket（此时 loop 还活着，安全）
         for addr, s in list(getattr(self, "socket_map", {}).items()):
             with contextlib.suppress(Exception):
                 await s._abort()
         if hasattr(self, "socket_map"):
             self.socket_map.clear()
+
+        # D) 关闭监听 socket，确保不再向 selector 注册已失效的 fd
+        with contextlib.suppress(Exception):
+            self.socket.close()
 
         # E) 可选：停掉你自己的 flush task
         t = getattr(self, "_relay_flush_task", None)

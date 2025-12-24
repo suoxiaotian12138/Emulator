@@ -114,12 +114,34 @@ def _events_from_meta(meta_path: Path) -> Path:
     events_path = log_files.get("events")
     if not events_path:
         raise ValueError(f"No 'events' entry in {meta_path}")
-    events_path = Path(events_path)
-    if not events_path.is_absolute():
-        events_path = meta_path.parent / events_path
-    if not events_path.exists():
-        raise FileNotFoundError(f"Events log missing: {events_path}")
-    return events_path
+
+    p = Path(events_path)
+
+    # 1) Absolute path: use directly
+    if p.is_absolute():
+        resolved = p
+    else:
+        # 2) If meta contains a project-root relative path like "exp\..."
+        #    resolve it relative to the repository root (two levels up from this file),
+        #    or use current working directory as fallback.
+        parts = [x.lower() for x in p.parts]
+        if parts and parts[0] in ("exp", "."):
+            # Prefer repo root = script directory's parent (adjust if your structure differs)
+            repo_root = Path(__file__).resolve().parents[2]
+            candidate = repo_root / p
+            if candidate.exists():
+                resolved = candidate
+            else:
+                # fallback to CWD
+                resolved = Path.cwd() / p
+        else:
+            # 3) Normal relative path: relative to run_meta.json directory
+            resolved = meta_path.parent / p
+
+    if not resolved.exists():
+        raise FileNotFoundError(f"Events log missing: {resolved}")
+    return resolved
+
 
 
 def _events_from_directory(base: Path) -> Path:
@@ -380,32 +402,54 @@ def plot_report(report: SemanticReport, output_dir: Path) -> None:
     fig.savefig(output_dir / "semantic_overview.pdf")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """
+    - 命令行运行：python script.py <tor_input> <torbox_input> --output-dir ... --rounds ...
+    - IDE 运行：不传参数时自动使用 DEFAULT_* 变量
+    """
+    # ===== IDE default config (edit here) =====
+    DEFAULT_TOR_INPUT = Path("exp/semantic_logs/tor")
+    DEFAULT_TORBOX_INPUT = Path("exp/semantic_logs/torbox")
+    DEFAULT_OUTPUT_DIR = Path("exp/semantic_logs/semantic_outputs")
+    DEFAULT_ROUNDS = 5
+    # ========================================
+
     parser = argparse.ArgumentParser(
         description=(
             "Tor/TorBox 语义一致性日志分析。"
             "支持单次或多轮次输入 (events.jsonl / run_meta.json / round_XXX 目录 / multi_run_manifest.json)。"
         )
     )
-    parser.add_argument("tor_input", type=Path, help="Tor 侧输入：JSONL、run_meta.json、目录或 manifest")
-    parser.add_argument("torbox_input", type=Path, help="TorBox 侧输入：JSONL、run_meta.json、目录或 manifest")
-
+    parser.add_argument(
+        "tor_input",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_TOR_INPUT,
+        help="Tor 侧输入：JSONL、run_meta.json、目录或 manifest",
+    )
+    parser.add_argument(
+        "torbox_input",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_TORBOX_INPUT,
+        help="TorBox 侧输入：JSONL、run_meta.json、目录或 manifest",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("semantic_outputs"),
-        help="指标与图表输出目录 (默认: semantic_outputs)",
+        default=DEFAULT_OUTPUT_DIR,
+        help="指标与图表输出目录",
     )
     parser.add_argument(
         "--rounds",
         type=int,
-        default=1,
-        help=(
-            "轮次数量。>1 时会在输入目录下读取 round_XXX 子目录，"
-            "或根据 multi_run_manifest.json 的 meta_paths 顺序处理。"
-        ),
+        default=DEFAULT_ROUNDS,
+        help="轮次数量。>1 时会读取 round_XXX 子目录或 manifest",
     )
-    return parser.parse_args()
+
+    return parser.parse_args(argv)
+
+
 
 
 def _write_summary(report: SemanticReport, output_dir: Path, title: str) -> None:
@@ -428,16 +472,14 @@ def _write_summary(report: SemanticReport, output_dir: Path, title: str) -> None
             f.write(f"[SENDME] KS 距离={report.ks_stat:.4f}\n")
     plot_report(report, output_dir)
 
-def main() -> None:
-    args = parse_args()
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
 
     tor_inputs = discover_runs(args.tor_input, args.rounds)
     torbox_inputs = discover_runs(args.torbox_input, args.rounds)
 
     if len(tor_inputs) != len(torbox_inputs):
-        raise SystemExit(
-            f"Mismatched run counts: Tor={len(tor_inputs)} TorBox={len(torbox_inputs)}"
-        )
+        raise SystemExit(f"Mismatched run counts: Tor={len(tor_inputs)} TorBox={len(torbox_inputs)}")
 
     all_tor_events: List[LogEvent] = []
     all_torbox_events: List[LogEvent] = []
@@ -455,6 +497,7 @@ def main() -> None:
 
     aggregate_report = build_report(all_tor_events, all_torbox_events)
     _write_summary(aggregate_report, args.output_dir, title="Aggregated")
+
 
 if __name__ == "__main__":
     main()

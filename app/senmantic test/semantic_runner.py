@@ -14,7 +14,7 @@ import client_runner
 
 def _set_defaults():
     os.environ.setdefault("CLIENTS_PER_BATCH", "1")
-    os.environ.setdefault("TOTAL_BATCHES", "5")
+    os.environ.setdefault("TOTAL_BATCHES", "1")
     os.environ.setdefault("BATCH_DELAY", "0")
     os.environ.setdefault("HOPS", "3")
     os.environ.setdefault("PAYLOAD_MB", "10")
@@ -22,14 +22,14 @@ def _set_defaults():
     os.environ.setdefault("WARMUP_KB", "4")
     os.environ.setdefault("START_TIMEOUT_S", "30")
     os.environ.setdefault("INTER_CHUNK_SLEEP_MS", "0")
-    os.environ.setdefault("LOG_DIR", "exp/semantic_logs/torbox")
+    os.environ.setdefault("LOG_DIR", "exp/semantic_logs/torbox/")
     os.environ.setdefault("EXP_LABEL", "torbox")
+    os.environ.setdefault("RUN_ROUNDS", "5")
     # os.environ.setdefault("LOG_DIR", "exp/semantic_logs/tor")
     # os.environ.setdefault("EXP_LABEL", "tor")
 
 
 async def _run_once():
-    _set_defaults()
     meta_path = await client_runner.main()
 
     try:
@@ -45,7 +45,8 @@ async def _run_once():
 
 
 async def _run_multi_rounds():
-    rounds = int(os.environ.get("RUN_ROUNDS", "1"))
+    _set_defaults()
+    rounds = int(os.environ.get("RUN_ROUNDS", "5"))
     base_dir_env = os.environ.get("LOG_DIR", "exp/semantic_logs")
     base_dir = Path(base_dir_env)
 
@@ -79,17 +80,26 @@ async def _run_multi_rounds():
     return meta_paths
 
 async def _drain_pending_tasks():
-    """Cancel and await any pending tasks except the current one."""
+    """Cancel and await any pending tasks except the current one.
 
+    Windows' selector loop is sensitive to closed sockets that remain
+    registered. When semantic_runner exits with background tasks still
+    running, asyncio.run() may try to cancel them while the selector still
+    watches a socket that has already been closed, leading to
+    ``WinError 10038``. To avoid that, keep cancelling/awaiting until no
+    pending tasks remain.
+    """
     current = asyncio.current_task()
-    pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
-    if not pending:
-        return
+    while True:
+        pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+        if not pending:
+            return
+        for task in pending:
+            task.cancel()
 
-    for task in pending:
-        task.cancel()
-
-    await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.gather(*pending, return_exceptions=True)
+        # Give cancellations a tick to unregister any file descriptors
+        await asyncio.sleep(0)
 
 
 
