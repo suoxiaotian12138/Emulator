@@ -60,6 +60,8 @@ async def _run_multi_rounds():
             os.environ["LOG_DIR"] = str(round_dir)
 
         meta_paths.append(await _run_once())
+        # Ensure no background tasks linger between rounds so asyncio.run can close cleanly
+        await _drain_pending_tasks()
 
     manifest = base_dir / "multi_run_manifest.json"
     manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +77,21 @@ async def _run_multi_rounds():
     )
     print(f"[SemanticRunner] manifest written to {manifest}")
     return meta_paths
+
+async def _drain_pending_tasks():
+    """Cancel and await any pending tasks except the current one."""
+
+    current = asyncio.current_task()
+    pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+    if not pending:
+        return
+
+    for task in pending:
+        task.cancel()
+
+    await asyncio.gather(*pending, return_exceptions=True)
+
+
 
 def run():
     return asyncio.run(_run_multi_rounds())
