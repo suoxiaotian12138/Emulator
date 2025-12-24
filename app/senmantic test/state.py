@@ -3,8 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Iterable, List, Tuple
-
+from typing import Iterable, List, Optional, Tuple
 import matplotlib
 
 import matplotlib.pyplot as plt
@@ -37,6 +36,7 @@ COLORS = {
 }
 
 STATE_ORDER = ["CLOSED", "OPENING", "OPEN", "EXTENDING", "ERROR"]
+
 CELL_STATE_MAP = {
     "START": "CLOSED",
     "CREATE2": "OPENING",
@@ -47,6 +47,7 @@ CELL_STATE_MAP = {
     "SENDME": "OPEN",
     "CRASH": "ERROR",
 }
+
 tor_events = [
     (0, "CLOSED", "START"),
     (50, "OPENING", "CREATE2"),
@@ -69,6 +70,61 @@ def _ts_ms(rec: dict) -> float | None:
         return float(rec["ts"]) * 1000.0
     return None
 
+def _events_from_meta(meta_path: Path) -> Path:
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    log_files = meta.get("log_files") or {}
+    events_path = log_files.get("events")
+    if not events_path:
+        raise ValueError(f"No 'events' entry in {meta_path}")
+    events_path = Path(events_path)
+    if not events_path.is_absolute():
+        events_path = meta_path.parent / events_path
+    if not events_path.exists():
+        raise FileNotFoundError(f"Events log missing: {events_path}")
+    return events_path
+
+
+def resolve_events_path(base: Path, round_index: Optional[int] = None) -> Path:
+    """Resolve an events JSONL path from semantic_runner outputs."""
+
+    if not base.exists():
+        raise FileNotFoundError(base)
+
+    if base.is_file():
+        if base.name == "multi_run_manifest.json":
+            manifest = json.loads(base.read_text(encoding="utf-8"))
+            meta_paths = [Path(p) for p in manifest.get("meta_paths", [])]
+            if not meta_paths:
+                raise ValueError(f"Manifest {base} contains no meta paths")
+            idx = round_index if round_index is not None else -1
+            return _events_from_meta(meta_paths[idx])
+
+        if base.name == "run_meta.json":
+            return _events_from_meta(base)
+
+        if base.suffix == ".jsonl":
+            return base
+
+        raise ValueError(f"Unsupported file input: {base}")
+
+    meta_path = base / "run_meta.json"
+    if meta_path.exists():
+        return _events_from_meta(meta_path)
+
+    round_dirs = sorted([p for p in base.iterdir() if p.is_dir() and p.name.startswith("round_")])
+    if round_dirs:
+        idx = round_index if round_index is not None else -1
+        chosen = round_dirs[idx]
+        return resolve_events_path(chosen)
+
+    events_dir = base / "events"
+    if events_dir.exists():
+        candidates = sorted(events_dir.glob("*.jsonl"))
+        if not candidates:
+            raise FileNotFoundError(f"No JSONL logs found under {events_dir}")
+        return candidates[-1]
+
+    raise ValueError(f"Unsupported directory layout for {base}")
 
 def load_cell_events(path: Path) -> List[Tuple[float, str, str]]:
     events: List[Tuple[float, str, str]] = []
@@ -197,75 +253,86 @@ def add_event_markers(ax, events, state_y, y_offset, color, diff_map=None):
         )
         texts.append(txt)
 
-        adjust_text(
-            texts,
-            ax=ax,
-            arrowprops=dict(arrowstyle="-", color=color, alpha=0.65, lw=1.0),
-            expand_points=(1.4, 2.8),
-            force_text=(0.12, 0.8),
-        )
+    adjust_text(
+        texts,
+        ax=ax,
+        arrowprops=dict(arrowstyle="-", color=color, alpha=0.65, lw=1.0),
+        expand_points=(1.4, 2.8),
+        force_text=(0.12, 0.8),
+    )
 
-    def build_parser():
-        parser = argparse.ArgumentParser(description="Render state timelines from JSONL logs.")
-        parser.add_argument("--tor", required=True, type=Path, help="Tor JSONL log containing cell_cmd entries")
-        parser.add_argument("--torbox", required=True, type=Path, help="TorBox JSONL log containing cell_cmd entries")
-        parser.add_argument("--out", type=Path, default=Path.cwd(), help="Output directory for figures")
-        parser.add_argument("--tor-label", default="Tor")
-        parser.add_argument("--torbox-label", default="TorBox")
-        return parser
 
-    def main(args=None):
-        parser = build_parser()
-        ns = parser.parse_args(args=args)
-        ns.out.mkdir(parents=True, exist_ok=True)
+def build_parser():
+    parser = argparse.ArgumentParser(description="Render state timelines from JSONL logs.")
+    parser.add_argument("--tor", required=True, type=Path, help="Tor JSONL log or semantic_runner output (manifest/meta/dir)")
+    parser.add_argument("--tor-round", type=int, default=None, help="Round index to pick when --tor points to a multi-round manifest or directory")
+    parser.add_argument("--torbox", required=True, type=Path, help="TorBox JSONL log or semantic_runner output (manifest/meta/dir)")
+    parser.add_argument("--torbox-round", type=int, default=None, help="Round index to pick when --torbox points to a multi-round manifest or directory")
+    parser.add_argument("--out", type=Path, default=Path.cwd(), help="Output directory for figures")
+    parser.add_argument("--tor-label", default="Tor")
+    parser.add_argument("--torbox-label", default="TorBox")
+    return parser
 
-        tor_events = load_cell_events(ns.tor)
-        torbox_events = load_cell_events(ns.torbox)
 
-        plt.rcParams.update({
-            "font.size": FONT["base"],
-            "axes.titlesize": FONT["title"],
-            "axes.labelsize": FONT["title"],
-        })
+def main(args=None):
+    parser = build_parser()
+    ns = parser.parse_args(args=args)
+    ns.out.mkdir(parents=True, exist_ok=True)
 
-        fig = plt.figure(figsize=(12, 9), constrained_layout=True)
-        gs = fig.add_gridspec(2, 1, height_ratios=[1, 1])
+    tor_path = resolve_events_path(ns.tor, ns.tor_round)
+    torbox_path = resolve_events_path(ns.torbox, ns.torbox_round)
 
-        max_time = max(tor_events[-1][0], torbox_events[-1][0]) * 1.05
-        x_min = 0
-        x_max = max_time
+    tor_events = load_cell_events(tor_path)
+    torbox_events = load_cell_events(torbox_path)
 
-        ax_tor = fig.add_subplot(gs[0])
-        ax_tor.set_xlim(x_min, x_max)
-        ax_tor.set_ylim(-0.6, len(STATE_ORDER) + 0.8)
-        ax_tor.set_yticks(range(len(STATE_ORDER)))
-        ax_tor.set_yticklabels(STATE_ORDER, fontsize=FONT["tick"])
-        ax_tor.tick_params(labelsize=FONT["tick"])
-        ax_tor.set_title(f"{ns.tor_label} Protocol", loc="left", color=COLORS["tor_blue"], pad=10, weight="bold")
-        ax_tor.grid(axis="x", alpha=VIS["grid_alpha"], linestyle="--", linewidth=0.8)
+    print(f"Resolved Tor log: {tor_path}")
+    print(f"Resolved TorBox log: {torbox_path}")
 
-        state_y_tor = plot_state_timeline(ax_tor, tor_events)
-        add_event_markers(ax_tor, tor_events, state_y_tor, 0.0, color=COLORS["tor_blue"], diff_map=None)
+    plt.rcParams.update({
+        "font.size": FONT["base"],
+        "axes.titlesize": FONT["title"],
+        "axes.labelsize": FONT["title"],
+    })
 
-        ax_tb = fig.add_subplot(gs[1])
-        ax_tb.set_xlim(x_min, x_max)
-        ax_tb.set_ylim(-0.6, len(STATE_ORDER) + 0.8)
-        ax_tb.set_yticks(range(len(STATE_ORDER)))
-        ax_tb.set_yticklabels(STATE_ORDER, fontsize=FONT["tick"])
-        ax_tb.set_xlabel("Time (ms)", fontsize=FONT["title"], weight="bold")
-        ax_tb.tick_params(labelsize=FONT["tick"])
-        ax_tb.set_title(f"{ns.torbox_label} Protocol", loc="left", color=COLORS["torbox_orange"], pad=10, weight="bold")
-        ax_tb.grid(axis="x", alpha=VIS["grid_alpha"], linestyle="--", linewidth=0.8)
+    fig = plt.figure(figsize=(12, 9), constrained_layout=True)
+    gs = fig.add_gridspec(2, 1, height_ratios=[1, 1])
 
-        diff_mapping = get_diff_map(tor_events, torbox_events)
-        state_y_tb = plot_state_timeline(ax_tb, torbox_events)
-        add_event_markers(ax_tb, torbox_events, state_y_tb, 0.0, color=COLORS["torbox_orange"], diff_map=diff_mapping)
+    max_time = max(tor_events[-1][0], torbox_events[-1][0]) * 1.05
+    x_min = 0
+    x_max = max_time
 
-        out_pdf = ns.out / "protocol_timeline_comparison.pdf"
-        out_png = ns.out / "protocol_timeline_comparison.png"
-        fig.savefig(out_pdf, format="pdf", bbox_inches="tight")
-        fig.savefig(out_png, dpi=300, bbox_inches="tight")
-        print(f"Saved {out_pdf} and {out_png}")
+    ax_tor = fig.add_subplot(gs[0])
+    ax_tor.set_xlim(x_min, x_max)
+    ax_tor.set_ylim(-0.6, len(STATE_ORDER) + 0.8)
+    ax_tor.set_yticks(range(len(STATE_ORDER)))
+    ax_tor.set_yticklabels(STATE_ORDER, fontsize=FONT["tick"])
+    ax_tor.tick_params(labelsize=FONT["tick"])
+    ax_tor.set_title(f"{ns.tor_label} Protocol", loc="left", color=COLORS["tor_blue"], pad=10, weight="bold")
+    ax_tor.grid(axis="x", alpha=VIS["grid_alpha"], linestyle="--", linewidth=0.8)
 
-    if __name__ == "__main__":
-        main()
+    state_y_tor = plot_state_timeline(ax_tor, tor_events)
+    add_event_markers(ax_tor, tor_events, state_y_tor, 0.0, color=COLORS["tor_blue"], diff_map=None)
+
+    ax_tb = fig.add_subplot(gs[1])
+    ax_tb.set_xlim(x_min, x_max)
+    ax_tb.set_ylim(-0.6, len(STATE_ORDER) + 0.8)
+    ax_tb.set_yticks(range(len(STATE_ORDER)))
+    ax_tb.set_yticklabels(STATE_ORDER, fontsize=FONT["tick"])
+    ax_tb.set_xlabel("Time (ms)", fontsize=FONT["title"], weight="bold")
+    ax_tb.tick_params(labelsize=FONT["tick"])
+    ax_tb.set_title(f"{ns.torbox_label} Protocol", loc="left", color=COLORS["torbox_orange"], pad=10, weight="bold")
+    ax_tb.grid(axis="x", alpha=VIS["grid_alpha"], linestyle="--", linewidth=0.8)
+
+    diff_mapping = get_diff_map(tor_events, torbox_events)
+    state_y_tb = plot_state_timeline(ax_tb, torbox_events)
+    add_event_markers(ax_tb, torbox_events, state_y_tb, 0.0, color=COLORS["torbox_orange"], diff_map=diff_mapping)
+
+    out_pdf = ns.out / "protocol_timeline_comparison.pdf"
+    out_png = ns.out / "protocol_timeline_comparison.png"
+    fig.savefig(out_pdf, format="pdf", bbox_inches="tight")
+    fig.savefig(out_png, dpi=300, bbox_inches="tight")
+    print(f"Saved {out_pdf} and {out_png}")
+
+
+if __name__ == "__main__":
+    main()

@@ -14,7 +14,7 @@ import client_runner
 
 def _set_defaults():
     os.environ.setdefault("CLIENTS_PER_BATCH", "1")
-    os.environ.setdefault("TOTAL_BATCHES", "1")
+    os.environ.setdefault("TOTAL_BATCHES", "5")
     os.environ.setdefault("BATCH_DELAY", "0")
     os.environ.setdefault("HOPS", "3")
     os.environ.setdefault("PAYLOAD_MB", "10")
@@ -22,6 +22,10 @@ def _set_defaults():
     os.environ.setdefault("WARMUP_KB", "4")
     os.environ.setdefault("START_TIMEOUT_S", "30")
     os.environ.setdefault("INTER_CHUNK_SLEEP_MS", "0")
+    os.environ.setdefault("LOG_DIR", "exp/semantic_logs/torbox")
+    os.environ.setdefault("EXP_LABEL", "torbox")
+    # os.environ.setdefault("LOG_DIR", "exp/semantic_logs/tor")
+    # os.environ.setdefault("EXP_LABEL", "tor")
 
 
 async def _run_once():
@@ -41,8 +45,37 @@ async def _run_once():
 
 
 def run():
-    meta_path = asyncio.run(_run_once())
-    return meta_path
+    rounds = int(os.environ.get("RUN_ROUNDS", "1"))
+    base_dir_env = os.environ.get("LOG_DIR", "exp/semantic_logs")
+    base_dir = Path(base_dir_env)
+
+    meta_paths = []
+    for idx in range(rounds):
+        if rounds > 1:
+            round_dir = base_dir / f"round_{idx:03d}"
+            os.environ["LOG_DIR"] = str(round_dir)
+            print(f"[SemanticRunner] round {idx + 1}/{rounds} -> LOG_DIR={round_dir}")
+        else:
+            round_dir = base_dir
+            os.environ["LOG_DIR"] = str(round_dir)
+
+        meta_paths.append(asyncio.run(_run_once()))
+
+    manifest = base_dir / "multi_run_manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "rounds": rounds,
+                "meta_paths": [str(p) for p in meta_paths],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"[SemanticRunner] manifest written to {manifest}")
+    return meta_paths
+
 
 
 if __name__ == "__main__":

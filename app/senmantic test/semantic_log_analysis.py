@@ -5,8 +5,7 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
-
+from typing import Dict, Iterable, List, Sequence, Tuple
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -108,6 +107,76 @@ def load_log(path: Path) -> List[LogEvent]:
             events.append(LogEvent.from_raw(raw))
     events.sort(key=lambda e: e.timestamp)
     return events
+
+def _events_from_meta(meta_path: Path) -> Path:
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    log_files = meta.get("log_files") or {}
+    events_path = log_files.get("events")
+    if not events_path:
+        raise ValueError(f"No 'events' entry in {meta_path}")
+    events_path = Path(events_path)
+    if not events_path.is_absolute():
+        events_path = meta_path.parent / events_path
+    if not events_path.exists():
+        raise FileNotFoundError(f"Events log missing: {events_path}")
+    return events_path
+
+
+def _events_from_directory(base: Path) -> Path:
+    # Prefer run_meta.json if present
+    meta_path = base / "run_meta.json"
+    if meta_path.exists():
+        return _events_from_meta(meta_path)
+
+    events_dir = base / "events"
+    candidates = sorted(events_dir.glob("*.jsonl")) if events_dir.exists() else []
+    if not candidates:
+        raise FileNotFoundError(f"No events log found under {base}")
+    return candidates[-1]
+
+
+def discover_runs(input_path: Path, rounds: int) -> List[Path]:
+    """Return the events-log paths for one or many runs.
+
+    Supported inputs:
+    - events JSONL file path
+    - run_meta.json path
+    - directory containing run_meta.json or events/ subdir
+    - directory containing round_XXX subdirectories when ``rounds > 1``
+    - multi_run_manifest.json produced by ``semantic_runner``
+    """
+
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input not found: {input_path}")
+
+    # Explicit manifest
+    if input_path.name == "multi_run_manifest.json":
+        manifest = json.loads(input_path.read_text(encoding="utf-8"))
+        paths = [Path(p) for p in manifest.get("meta_paths", [])]
+        if not paths:
+            raise ValueError(f"Manifest {input_path} contains no meta paths")
+        return [_events_from_meta(p) for p in paths]
+
+    # Raw JSONL
+    if input_path.is_file() and input_path.suffix == ".jsonl":
+        return [input_path]
+
+    # run_meta.json
+    if input_path.is_file() and input_path.name == "run_meta.json":
+        return [_events_from_meta(input_path)]
+
+    # Directory cases
+    if input_path.is_dir():
+        if rounds > 1:
+            paths: List[Path] = []
+            for idx in range(rounds):
+                round_dir = input_path / f"round_{idx:03d}"
+                paths.append(_events_from_directory(round_dir))
+            return paths
+
+        return [_events_from_directory(input_path)]
+
+    raise ValueError(f"Unsupported input: {input_path}")
 
 
 def control_plane_stats(events: Iterable[LogEvent]) -> ControlPlaneStats:
@@ -312,28 +381,38 @@ def plot_report(report: SemanticReport, output_dir: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Tor/TorBox 语义一致性日志分析")
-    parser.add_argument("tor_log", type=Path, help="Tor JSONL 日志路径")
-    parser.add_argument("torbox_log", type=Path, help="TorBox JSONL 日志路径")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Tor/TorBox 语义一致性日志分析。"
+            "支持单次或多轮次输入 (events.jsonl / run_meta.json / round_XXX 目录 / multi_run_manifest.json)。"
+        )
+    )
+    parser.add_argument("tor_input", type=Path, help="Tor 侧输入：JSONL、run_meta.json、目录或 manifest")
+    parser.add_argument("torbox_input", type=Path, help="TorBox 侧输入：JSONL、run_meta.json、目录或 manifest")
+
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("semantic_outputs"),
         help="指标与图表输出目录 (默认: semantic_outputs)",
     )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=1,
+        help=(
+            "轮次数量。>1 时会在输入目录下读取 round_XXX 子目录，"
+            "或根据 multi_run_manifest.json 的 meta_paths 顺序处理。"
+        ),
+    )
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    tor_events = load_log(args.tor_log)
-    torbox_events = load_log(args.torbox_log)
-
-    report = build_report(tor_events, torbox_events)
-
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = args.output_dir / "metrics.txt"
+def _write_summary(report: SemanticReport, output_dir: Path, title: str) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = output_dir / "metrics.txt"
     with summary_path.open("w", encoding="utf-8") as f:
+        f.write(f"# {title}\n")
         for label in ("Tor", "TorBox"):
             c = report.control_plane[label]
             s = report.sendme[label]
@@ -347,8 +426,35 @@ def main() -> None:
         )
         if not np.isnan(report.ks_stat):
             f.write(f"[SENDME] KS 距离={report.ks_stat:.4f}\n")
-    plot_report(report, args.output_dir)
+    plot_report(report, output_dir)
 
+def main() -> None:
+    args = parse_args()
+
+    tor_inputs = discover_runs(args.tor_input, args.rounds)
+    torbox_inputs = discover_runs(args.torbox_input, args.rounds)
+
+    if len(tor_inputs) != len(torbox_inputs):
+        raise SystemExit(
+            f"Mismatched run counts: Tor={len(tor_inputs)} TorBox={len(torbox_inputs)}"
+        )
+
+    all_tor_events: List[LogEvent] = []
+    all_torbox_events: List[LogEvent] = []
+
+    for idx, (tor_path, tb_path) in enumerate(zip(tor_inputs, torbox_inputs)):
+        tor_events = load_log(tor_path)
+        torbox_events = load_log(tb_path)
+
+        round_report = build_report(tor_events, torbox_events)
+        round_dir = args.output_dir / f"round_{idx:03d}"
+        _write_summary(round_report, round_dir, title=f"Round {idx:03d}")
+
+        all_tor_events.extend(tor_events)
+        all_torbox_events.extend(torbox_events)
+
+    aggregate_report = build_report(all_tor_events, all_torbox_events)
+    _write_summary(aggregate_report, args.output_dir, title="Aggregated")
 
 if __name__ == "__main__":
     main()

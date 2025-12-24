@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import matplotlib
 matplotlib.use("Agg")
 
@@ -31,6 +31,71 @@ def _ts_ms(rec: dict) -> float | None:
     if "ts" in rec:
         return float(rec["ts"]) * 1000.0
     return None
+
+def _events_from_meta(meta_path: Path) -> Path:
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    log_files = meta.get("log_files") or {}
+    events_path = log_files.get("events")
+    if not events_path:
+        raise ValueError(f"No 'events' entry in {meta_path}")
+    events_path = Path(events_path)
+    if not events_path.is_absolute():
+        events_path = meta_path.parent / events_path
+    if not events_path.exists():
+        raise FileNotFoundError(f"Events log missing: {events_path}")
+    return events_path
+
+
+def resolve_events_path(base: Path, round_index: Optional[int] = None) -> Path:
+    """Resolve an events JSONL path from various semantic_runner outputs.
+
+    Supported inputs:
+    - direct events JSONL file
+    - ``run_meta.json``
+    - directory containing ``run_meta.json`` or ``events/``
+    - directory containing ``round_XXX`` subdirectories (selectable via ``round_index``)
+    - ``multi_run_manifest.json`` (selects the last round by default or ``round_index``)
+    """
+
+    if not base.exists():
+        raise FileNotFoundError(base)
+
+    if base.is_file():
+        if base.name == "multi_run_manifest.json":
+            manifest = json.loads(base.read_text(encoding="utf-8"))
+            meta_paths = [Path(p) for p in manifest.get("meta_paths", [])]
+            if not meta_paths:
+                raise ValueError(f"Manifest {base} contains no meta paths")
+            idx = round_index if round_index is not None else -1
+            return _events_from_meta(meta_paths[idx])
+
+        if base.name == "run_meta.json":
+            return _events_from_meta(base)
+
+        if base.suffix == ".jsonl":
+            return base
+
+        raise ValueError(f"Unsupported file input: {base}")
+
+    # Directory inputs
+    meta_path = base / "run_meta.json"
+    if meta_path.exists():
+        return _events_from_meta(meta_path)
+
+    round_dirs = sorted([p for p in base.iterdir() if p.is_dir() and p.name.startswith("round_")])
+    if round_dirs:
+        idx = round_index if round_index is not None else -1
+        chosen = round_dirs[idx]
+        return resolve_events_path(chosen)
+
+    events_dir = base / "events"
+    if events_dir.exists():
+        candidates = sorted(events_dir.glob("*.jsonl"))
+        if not candidates:
+            raise FileNotFoundError(f"No JSONL logs found under {events_dir}")
+        return candidates[-1]
+
+    raise ValueError(f"Unsupported directory layout for {base}")
 
 
 def load_sendme_times(path: Path) -> List[float]:
@@ -73,8 +138,10 @@ def cdf(data: List[float]):
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Render SENDME scatter + CDF from JSONL logs.")
-    parser.add_argument("--tor", required=True, type=Path, help="Tor JSONL log containing SENDME events")
-    parser.add_argument("--torbox", required=True, type=Path, help="TorBox JSONL log containing SENDME events")
+    parser.add_argument("--tor", required=True, type=Path, help="Tor JSONL log or semantic_runner output (manifest/meta/dir)")
+    parser.add_argument("--tor-round", type=int, default=None, help="Round index to pick when --tor points to a multi-round manifest or directory")
+    parser.add_argument("--torbox", required=True, type=Path, help="TorBox JSONL log or semantic_runner output (manifest/meta/dir)")
+    parser.add_argument("--torbox-round", type=int, default=None, help="Round index to pick when --torbox points to a multi-round manifest or directory")
     parser.add_argument("--out", type=Path, default=Path.cwd(), help="Output directory for figures")
     parser.add_argument("--tor-label", default="Tor")
     parser.add_argument("--torbox-label", default="TorBox")
@@ -86,8 +153,11 @@ def main(args=None):
     ns = parser.parse_args(args=args)
     ns.out.mkdir(parents=True, exist_ok=True)
 
-    tor_sendme = load_sendme_times(ns.tor)
-    torbox_sendme = load_sendme_times(ns.torbox)
+    tor_path = resolve_events_path(ns.tor, ns.tor_round)
+    torbox_path = resolve_events_path(ns.torbox, ns.torbox_round)
+
+    tor_sendme = load_sendme_times(tor_path)
+    torbox_sendme = load_sendme_times(torbox_path)
 
     plt.rcParams.update({
         "font.size": FONT["label"],
@@ -129,6 +199,8 @@ def main(args=None):
     out_png = ns.out / "sendme_comparison.png"
     fig.savefig(out_pdf, bbox_inches="tight")
     fig.savefig(out_png, dpi=350, bbox_inches="tight")
+    print(f"Resolved Tor log: {tor_path}")
+    print(f"Resolved TorBox log: {torbox_path}")
     print(f"Saved {out_pdf} and {out_png}")
 
 
