@@ -44,7 +44,7 @@ async def _run_once():
     return meta_path
 
 
-def run():
+async def _run_multi_rounds():
     rounds = int(os.environ.get("RUN_ROUNDS", "1"))
     base_dir_env = os.environ.get("LOG_DIR", "exp/semantic_logs")
     base_dir = Path(base_dir_env)
@@ -59,7 +59,7 @@ def run():
             round_dir = base_dir
             os.environ["LOG_DIR"] = str(round_dir)
 
-        meta_paths.append(asyncio.run(_run_once()))
+        meta_paths.append(await _run_once())
 
     manifest = base_dir / "multi_run_manifest.json"
     manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -76,7 +76,8 @@ def run():
     print(f"[SemanticRunner] manifest written to {manifest}")
     return meta_paths
 
-
+def run():
+    return asyncio.run(_run_multi_rounds())
 
 if __name__ == "__main__":
     run()
