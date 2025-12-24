@@ -21,6 +21,10 @@ FONT = {
     "anno": 14,
 }
 
+DEFAULT_TOR_INPUT = Path("exp/semantic_logs/tor")
+DEFAULT_TORBOX_INPUT = Path("exp/semantic_logs/torbox")
+DEFAULT_OUT_DIR = Path("exp/semantic_logs/semantic_outputs")
+
 def _ts_ms(rec: dict) -> float | None:
     if "ts_mono_ns" in rec:
         return rec["ts_mono_ns"] / 1e6
@@ -137,12 +141,27 @@ def cdf(data: List[float]):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Render SENDME scatter + CDF from JSONL logs.")
-    parser.add_argument("--tor", required=True, type=Path, help="Tor JSONL log or semantic_runner output (manifest/meta/dir)")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Render SENDME scatter + CDF from JSONL logs. If you run this from an IDE without parameters, "
+            "default exp/semantic_logs paths will be used."
+        )
+    )
+    parser.add_argument(
+        "--tor",
+        type=Path,
+        default=DEFAULT_TOR_INPUT,
+        help="Tor JSONL log or semantic_runner output (manifest/meta/dir)",
+    )
+    parser.add_argument(
+        "--torbox",
+        type=Path,
+        default=DEFAULT_TORBOX_INPUT,
+        help="TorBox JSONL log or semantic_runner output (manifest/meta/dir)",
+    )
     parser.add_argument("--tor-round", type=int, default=None, help="Round index to pick when --tor points to a multi-round manifest or directory")
-    parser.add_argument("--torbox", required=True, type=Path, help="TorBox JSONL log or semantic_runner output (manifest/meta/dir)")
     parser.add_argument("--torbox-round", type=int, default=None, help="Round index to pick when --torbox points to a multi-round manifest or directory")
-    parser.add_argument("--out", type=Path, default=Path.cwd(), help="Output directory for figures")
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR, help="Output directory for figures")
     parser.add_argument("--tor-label", default="Tor")
     parser.add_argument("--torbox-label", default="TorBox")
     return parser

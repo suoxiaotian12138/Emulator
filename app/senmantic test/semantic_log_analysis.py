@@ -111,11 +111,22 @@ def load_log(path: Path) -> List[LogEvent]:
 def _events_from_meta(meta_path: Path) -> Path:
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     log_files = meta.get("log_files") or {}
-    events_path = log_files.get("events")
-    if not events_path:
-        raise ValueError(f"No 'events' entry in {meta_path}")
+    candidates = []
+    for key in ("events", "event", "events_log", "event_log"):
+        if key in log_files:
+            candidates.append(log_files[key])
+    if "events" in meta and not candidates:
+        candidates.append(meta["events"])
 
-    p = Path(events_path)
+    # Fallback: discover events.jsonl under the same directory
+    if not candidates:
+        events_dir = meta_path.parent / "events"
+        jsonl_candidates = sorted(events_dir.glob("*.jsonl")) if events_dir.exists() else []
+        if jsonl_candidates:
+            return jsonl_candidates[-1]
+        raise ValueError(f"No 'events' entry in {meta_path} and no events/*.jsonl found")
+
+    p = Path(candidates[0])
 
     # 1) Absolute path: use directly
     if p.is_absolute():
