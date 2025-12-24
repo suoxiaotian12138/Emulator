@@ -13,7 +13,6 @@ from matplotlib import font_manager
 
 matplotlib.use("Agg")
 
-CONTROL_SEQUENCE = ["CREATE2", "CREATED2", "EXTEND2", "EXTENDED2", "DESTROY"]
 SENDME_NAMES = {"RELAY_SENDME", "SENDME"}
 RELAY_DATA_NAMES = {"RELAY_DATA", "DATA"}
 RELAY_END_NAMES = {"RELAY_END", "END"}
@@ -23,28 +22,16 @@ TORBOX_INPUT = Path("exp/semantic_logs/torbox")
 OUTPUT_DIR = Path("exp/semantic_logs/semantic_outputs")
 ROUNDS = 5
 
-def setup_chinese_font() -> None:
-    # Try common Chinese fonts on Windows/macOS/Linux, pick the first available one.
-    candidates = [
-        "Microsoft YaHei",   # Windows
-        "SimHei",            # Windows (黑体)
-        "NSimSun",           # Windows (新宋体)
-        "SimSun",            # Windows (宋体)
-        "PingFang SC",       # macOS
-        "Hiragino Sans GB",  # macOS
-        "Noto Sans CJK SC",  # Linux/Windows if installed
-        "Source Han Sans SC" # Adobe 思源黑体
-    ]
-    available = {f.name for f in font_manager.fontManager.ttflist}
-    for name in candidates:
-        if name in available:
-            matplotlib.rcParams["font.family"] = name
-            break
-
-    # Avoid minus sign showing as a square
-    matplotlib.rcParams["axes.unicode_minus"] = False
-
-setup_chinese_font()
+STAGE_KEYS = [
+    "CREATE2",
+    "CREATED2",
+    "EXTEND2",
+    "EXTENDED2",
+    "RELAY_CONNECTED",
+    "RELAY_DATA",
+    "SENDME",
+    "DESTROY",
+]
 
 @dataclass
 class LogEvent:
@@ -68,12 +55,12 @@ class LogEvent:
         )
         for key, scale in timestamp_keys:
             if key in raw:
-                value = raw[key]
-                ts = float(value) * scale
+                ts = float(raw[key]) * scale
                 break
         if ts is None:
-            raise ValueError("Log line is missing a timestamp (timestamp/ts/time/t/ts_ms/ts_ns/ts_mono_ns)")
-
+            raise ValueError(
+                "Log line is missing a timestamp (timestamp/ts/time/t/ts_ms/ts_ns/ts_mono_ns)"
+            )
         meta = raw.get("meta") or {}
 
         cell_cmd = str(
@@ -81,10 +68,16 @@ class LogEvent:
             or meta.get("cell_cmd")
             or raw.get("cmd")
             or meta.get("cmd")
+            or raw.get("event")
+            or meta.get("event")
             or ""
         ).upper()
         direction = str(
-            raw.get("dir") or raw.get("direction") or meta.get("dir") or meta.get("direction") or "?"
+            raw.get("dir")
+            or raw.get("direction")
+            or meta.get("dir")
+            or meta.get("direction")
+            or "?"
         )
         circ_id = str(
             raw.get("circ_id")
@@ -93,42 +86,35 @@ class LogEvent:
             or meta.get("circuit")
             or "unknown"
         )
-        stream_id = str(raw.get("stream_id") or raw.get("stream") or meta.get("stream_id") or meta.get("stream") or "none")
-
+        stream_id = str(
+            raw.get("stream_id")
+            or raw.get("stream")
+            or meta.get("stream_id")
+            or meta.get("stream")
+            or "none"
+        )
         return cls(ts, cell_cmd, direction, circ_id, stream_id)
 
 
 @dataclass
 class ControlPlaneStats:
-    total_circuits: int
-    fully_ordered: int
-    partial_ordered: int
+    counts: Dict[str, int]
+    first_ts: Dict[str, float]
+    last_ts: Dict[str, float]
 
-    @property
-    def full_ratio(self) -> float:
-        return 0.0 if self.total_circuits == 0 else self.fully_ordered / self.total_circuits
-
-    @property
-    def partial_ratio(self) -> float:
-        return 0.0 if self.total_circuits == 0 else self.partial_ordered / self.total_circuits
+    def start_time(self, name: str) -> float | None:
+        return self.first_ts.get(name)
 
 
-@dataclass
-class RelayConsistency:
-    matched: int
-    missing: int
-    wrong_order: int
-
-    @property
-    def match_ratio(self) -> float:
-        total = self.matched + self.missing + self.wrong_order
-        return 0.0 if total == 0 else self.matched / total
+    def end_time(self, name: str) -> float | None:
+        return self.last_ts.get(name)
 
 
 @dataclass
 class SendmeStats:
     intervals: np.ndarray
-
+    count: int
+    first_ts: float | None
     @property
     def mean(self) -> float:
         return float(np.mean(self.intervals)) if len(self.intervals) else float("nan")
@@ -139,11 +125,10 @@ class SendmeStats:
 
 
 @dataclass
-class SemanticReport:
-    control_plane: Dict[str, ControlPlaneStats]
+class RoundSummary:
+    stages: Dict[str, ControlPlaneStats]
     sendme: Dict[str, SendmeStats]
-    relay: Dict[str, RelayConsistency]
-    ks_stat: float
+    destroy_ts: Dict[str, float | None]
 
 
 def load_log(path: Path) -> List[LogEvent]:
@@ -171,7 +156,6 @@ def _events_from_meta(meta_path: Path) -> Path:
     if "events" in meta and not candidates:
         candidates.append(meta["events"])
 
-    # Fallback: discover events.jsonl under the same directory
     if not candidates:
         events_dir = meta_path.parent / "events"
         jsonl_candidates = sorted(events_dir.glob("*.jsonl")) if events_dir.exists() else []
@@ -182,23 +166,15 @@ def _events_from_meta(meta_path: Path) -> Path:
     p = Path(candidates[0])
 
 
-    # 1) Absolute path: use directly
     if p.is_absolute():
         resolved = p
     else:
-        # 2) If meta contains a project-root relative path like "exp\..."
-        #    resolve it relative to the repository root (two levels up from this file),
-        #    or use current working directory as fallback.
+
         parts = [x.lower() for x in p.parts]
         if parts and parts[0] in ("exp", "."):
-            # Prefer repo root = script directory's parent (adjust if your structure differs)
             repo_root = Path(__file__).resolve().parents[2]
             candidate = repo_root / p
-            if candidate.exists():
-                resolved = candidate
-            else:
-                # fallback to CWD
-                resolved = Path.cwd() / p
+            resolved = candidate if candidate.exists() else Path.cwd() / p
         else:
             # 3) Normal relative path: relative to run_meta.json directory
             resolved = meta_path.parent / p
@@ -223,20 +199,9 @@ def _events_from_directory(base: Path) -> Path:
 
 
 def discover_runs(input_path: Path, rounds: int) -> List[Path]:
-    """Return the events-log paths for one or many runs.
-
-    Supported inputs:
-    - events JSONL file path
-    - run_meta.json path
-    - directory containing run_meta.json or events/ subdir
-    - directory containing round_XXX subdirectories when ``rounds > 1``
-    - multi_run_manifest.json produced by ``semantic_runner``
-    """
-
     if not input_path.exists():
         raise FileNotFoundError(f"Input not found: {input_path}")
 
-    # Explicit manifest
     if input_path.name == "multi_run_manifest.json":
         manifest = json.loads(input_path.read_text(encoding="utf-8"))
         paths = [Path(p) for p in manifest.get("meta_paths", [])]
@@ -244,15 +209,12 @@ def discover_runs(input_path: Path, rounds: int) -> List[Path]:
             raise ValueError(f"Manifest {input_path} contains no meta paths")
         return [_events_from_meta(p) for p in paths]
 
-    # Raw JSONL
     if input_path.is_file() and input_path.suffix == ".jsonl":
         return [input_path]
 
-    # run_meta.json
     if input_path.is_file() and input_path.name == "run_meta.json":
         return [_events_from_meta(input_path)]
 
-    # Directory cases
     if input_path.is_dir():
         if rounds > 1:
             paths: List[Path] = []
@@ -266,33 +228,24 @@ def discover_runs(input_path: Path, rounds: int) -> List[Path]:
     raise ValueError(f"Unsupported input: {input_path}")
 
 
+# ---------- statistics ----------
 def control_plane_stats(events: Iterable[LogEvent]) -> ControlPlaneStats:
-    per_circ: Dict[str, List[LogEvent]] = defaultdict(list)
+    """仅统计各事件的出现次数及起止时间，提供 state.py 使用的阶段信息。"""
+
+    counts: Dict[str, int] = defaultdict(int)
+    first_ts: Dict[str, float] = {}
+    last_ts: Dict[str, float] = {}
+
     for ev in events:
-        if ev.cell_cmd in CONTROL_SEQUENCE:
-            per_circ[ev.circ_id].append(ev)
+        name = ev.cell_cmd or ""
+        if not name:
+            continue
+        counts[name] += 1
+        if name not in first_ts:
+            first_ts[name] = ev.timestamp
+        last_ts[name] = ev.timestamp
 
-    fully_ordered = 0
-    partial_ordered = 0
-    for circ_events in per_circ.values():
-        circ_events.sort(key=lambda e: e.timestamp)
-        last_index = -1
-        seen = set()
-        ordered = True
-        for ev in circ_events:
-            idx = CONTROL_SEQUENCE.index(ev.cell_cmd)
-            if idx < last_index:
-                ordered = False
-                break
-            last_index = idx
-            seen.add(ev.cell_cmd)
-        if ordered and len(seen) == len(CONTROL_SEQUENCE):
-            fully_ordered += 1
-        elif ordered:
-            partial_ordered += 1
-
-    return ControlPlaneStats(total_circuits=len(per_circ), fully_ordered=fully_ordered, partial_ordered=partial_ordered)
-
+    return ControlPlaneStats(counts=dict(counts), first_ts=first_ts, last_ts=last_ts)
 
 def sendme_intervals(events: Iterable[LogEvent]) -> SendmeStats:
     by_stream: Dict[Tuple[str, str], List[LogEvent]] = defaultdict(list)
@@ -301,82 +254,36 @@ def sendme_intervals(events: Iterable[LogEvent]) -> SendmeStats:
             by_stream[(ev.circ_id, ev.stream_id)].append(ev)
 
     intervals: List[float] = []
+    first_ts: float | None = None
+    total = 0
     for stream_events in by_stream.values():
         stream_events.sort(key=lambda e: e.timestamp)
+        if stream_events:
+            total += len(stream_events)
+            first_ts = stream_events[0].timestamp if first_ts is None else min(first_ts, stream_events[0].timestamp)
         for first, second in zip(stream_events, stream_events[1:]):
             intervals.append(second.timestamp - first.timestamp)
 
-    return SendmeStats(np.array(intervals, dtype=float))
+    return SendmeStats(np.array(intervals, dtype=float), count=total, first_ts=first_ts)
 
+def infer_destroy(events: List[LogEvent]) -> float | None:
+    """用最后一个数据包作为 DESTROY 的兜底时间。"""
 
-def ks_2samp(sample1: np.ndarray, sample2: np.ndarray) -> float:
-    if len(sample1) == 0 or len(sample2) == 0:
-        return float("nan")
+    destroy_like = [ev.timestamp for ev in events if ev.cell_cmd == "DESTROY"]
+    if destroy_like:
+        return max(destroy_like)
 
-    data1 = np.sort(sample1)
-    data2 = np.sort(sample2)
+    end_like = [ev.timestamp for ev in events if ev.cell_cmd in RELAY_END_NAMES]
+    if end_like:
+        return max(end_like)
+    data_like = [ev.timestamp for ev in events if ev.cell_cmd in RELAY_DATA_NAMES]
+    if data_like:
+        return max(data_like)
 
-    cdf1 = np.arange(1, len(data1) + 1) / len(data1)
-    cdf2 = np.arange(1, len(data2) + 1) / len(data2)
+    return max((ev.timestamp for ev in events), default=None)
 
-    combined = np.sort(np.unique(np.concatenate([data1, data2])))
-    cdf1_interp = np.searchsorted(data1, combined, side="right") / len(data1)
-    cdf2_interp = np.searchsorted(data2, combined, side="right") / len(data2)
-
-    return float(np.max(np.abs(cdf1_interp - cdf2_interp)))
-
-
-def relay_consistency(tor_events: Iterable[LogEvent], torbox_events: Iterable[LogEvent]) -> Dict[str, RelayConsistency]:
-    def summarize(events: Iterable[LogEvent]) -> Dict[Tuple[str, str], Tuple[bool, bool, bool]]:
-        per_stream: Dict[Tuple[str, str], List[LogEvent]] = defaultdict(list)
-        for ev in events:
-            if ev.cell_cmd in RELAY_DATA_NAMES or ev.cell_cmd in RELAY_END_NAMES:
-                per_stream[(ev.circ_id, ev.stream_id)].append(ev)
-
-        summary: Dict[Tuple[str, str], Tuple[bool, bool, bool]] = {}
-        for key, stream_events in per_stream.items():
-            stream_events.sort(key=lambda e: e.timestamp)
-            has_data = any(ev.cell_cmd in RELAY_DATA_NAMES for ev in stream_events)
-            has_end = any(ev.cell_cmd in RELAY_END_NAMES for ev in stream_events)
-            first_data = next((ev.timestamp for ev in stream_events if ev.cell_cmd in RELAY_DATA_NAMES), None)
-            first_end = next((ev.timestamp for ev in stream_events if ev.cell_cmd in RELAY_END_NAMES), None)
-            order_ok = False
-            if first_data is not None and first_end is not None:
-                order_ok = first_data <= first_end
-            summary[key] = (has_data, has_end, order_ok)
-        return summary
-
-    tor_summary = summarize(tor_events)
-    torbox_summary = summarize(torbox_events)
-    all_keys = set(tor_summary) | set(torbox_summary)
-
-    matched = 0
-    missing = 0
-    wrong_order = 0
-
-    for key in all_keys:
-        tor_info = tor_summary.get(key)
-        tb_info = torbox_summary.get(key)
-        if tor_info == tb_info:
-            matched += 1
-        else:
-            missing_case = tor_info is None or tb_info is None
-            if missing_case:
-                missing += 1
-            else:
-                if tor_info[2] != tb_info[2]:
-                    wrong_order += 1
-                else:
-                    missing += 1
-
-    return {
-        "Tor": RelayConsistency(matched=matched, missing=missing, wrong_order=wrong_order),
-        "TorBox": RelayConsistency(matched=matched, missing=missing, wrong_order=wrong_order),
-    }
-
-
-def build_report(tor_events: List[LogEvent], torbox_events: List[LogEvent]) -> SemanticReport:
-    control = {
+def build_report(tor_events: List[LogEvent], torbox_events: List[LogEvent]) -> RoundSummary:
+    stages = {
         "Tor": control_plane_stats(tor_events),
         "TorBox": control_plane_stats(torbox_events),
     }
@@ -384,121 +291,49 @@ def build_report(tor_events: List[LogEvent], torbox_events: List[LogEvent]) -> S
         "Tor": sendme_intervals(tor_events),
         "TorBox": sendme_intervals(torbox_events),
     }
-    ks_stat = ks_2samp(sendme["Tor"].intervals, sendme["TorBox"].intervals)
-    relay = relay_consistency(tor_events, torbox_events)
-    return SemanticReport(control_plane=control, sendme=sendme, relay=relay, ks_stat=ks_stat)
+    destroy_ts = {"Tor": infer_destroy(tor_events), "TorBox": infer_destroy(torbox_events)}
+    return RoundSummary(stages=stages, sendme=sendme, destroy_ts=destroy_ts)
 
 
-def plot_report(report: SemanticReport, output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
+# ---------- output helpers ----------
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    ax_control = axes[0, 0]
-    ax_sendme_hist = axes[0, 1]
-    ax_sendme_cdf = axes[1, 1]
-    ax_relay = axes[1, 0]
-
-    # Control plane
-    systems = ["Tor", "TorBox"]
-    full = [report.control_plane[s].full_ratio * 100 for s in systems]
-    partial = [report.control_plane[s].partial_ratio * 100 for s in systems]
-
-    x = np.arange(len(systems))
-    width = 0.35
-    ax_control.bar(x - width / 2, full, width, label="完整序列", color="#1E40AF")
-    ax_control.bar(x + width / 2, partial, width, label="部分有序", color="#60A5FA")
-
-    ax_control.set_xticks(x)
-    ax_control.set_xticklabels(systems)
-    ax_control.set_ylabel("电路序列一致率 (%)")
-    ax_control.set_title("控制面序列 (CREATE2 → CREATED2 → EXTEND2 → EXTENDED2 → DESTROY)")
-    ax_control.legend()
-    ax_control.grid(alpha=0.2, axis="y")
-
-    # SENDME histogram
-    bins = 20
-    for label, color in [("Tor", "#1E3A8A"), ("TorBox", "#EA580C")]:
-        data = report.sendme[label].intervals
-        if len(data):
-            ax_sendme_hist.hist(data, bins=bins, alpha=0.55, label=label, color=color)
-    ax_sendme_hist.set_title("SENDME 间隔分布")
-    ax_sendme_hist.set_xlabel("间隔 (时间单位)")
-    ax_sendme_hist.set_ylabel("计数")
-    ax_sendme_hist.grid(alpha=0.25)
-    ax_sendme_hist.legend()
-
-    # SENDME CDF + KS
-    for label, color in [("Tor", "#1E3A8A"), ("TorBox", "#EA580C")]:
-        data = np.sort(report.sendme[label].intervals)
-        if len(data):
-            y = np.arange(1, len(data) + 1) / len(data)
-            ax_sendme_cdf.step(data, y, where="post", label=f"{label} (n={len(data)})", color=color)
-    if not np.isnan(report.ks_stat):
-        ax_sendme_cdf.text(
-            0.02,
-            0.95,
-            f"KS 距离 = {report.ks_stat:.3f}",
-            transform=ax_sendme_cdf.transAxes,
-            ha="left",
-            va="top",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.9),
-        )
-    ax_sendme_cdf.set_title("SENDME 间隔 CDF")
-    ax_sendme_cdf.set_xlabel("间隔 (时间单位)")
-    ax_sendme_cdf.set_ylabel("CDF")
-    ax_sendme_cdf.set_ylim(0, 1.05)
-    ax_sendme_cdf.grid(alpha=0.25)
-    ax_sendme_cdf.legend()
-
-    # Relay consistency
-    relay_values = report.relay["Tor"]
-    labels = ["匹配", "缺失", "顺序不一致"]
-    values = [relay_values.matched, relay_values.missing, relay_values.wrong_order]
-    colors = ["#16A34A", "#E5E7EB", "#EF4444"]
-    ax_relay.bar(labels, values, color=colors)
-    ax_relay.set_title("RELAY_DATA / RELAY_END 可观测一致性")
-    ax_relay.set_ylabel("流数量")
-    for x_pos, val in zip(labels, values):
-        ax_relay.text(x_pos, val, str(val), ha="center", va="bottom", fontweight="bold")
-    ax_relay.grid(alpha=0.2, axis="y")
-
-    fig.tight_layout()
-    fig.savefig(output_dir / "semantic_overview.png", dpi=300)
-    fig.savefig(output_dir / "semantic_overview.pdf")
+def _fmt_ts(ts: float | None) -> str:
+    return "-" if ts is None else f"{ts:.6f}"
 
 
-
-
-
-def _write_state_summary(report: SemanticReport, output_dir: Path, title: str) -> None:
+def _write_stage_summary(report: RoundSummary, output_dir: Path, title: str) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / "state_metrics.txt"
     with summary_path.open("w", encoding="utf-8") as f:
-        f.write(f"# {title} (控制面与RELAY匹配)\n")
+        f.write(f"# {title} (建路阶段与事件出现)\n")
         for label in ("Tor", "TorBox"):
-            c = report.control_plane[label]
-            s = report.sendme[label]
-            f.write(
-                f"[{label}] 控制面: 完整 {c.fully_ordered}/{c.total_circuits}, 部分 {c.partial_ordered}, 完整率={c.full_ratio*100:.2f}%, 部分率={c.partial_ratio*100:.2f}%\n"
-            )
-            f.write(f"[{label}] SENDME: n={len(s.intervals)}, mean={s.mean:.3f}, median={s.median:.3f}\n")
-        relay = report.relay["Tor"]
-        f.write(
-            f"[Relay] 匹配={relay.matched}, 缺失={relay.missing}, 顺序不一致={relay.wrong_order}, 匹配率={relay.match_ratio * 100:.2f}%\n"
-        )
+            stats = report.stages[label]
+            f.write(f"[{label}] 阶段事件统计\n")
+            for key in STAGE_KEYS:
+                cnt = stats.counts.get(key, 0)
+                start = _fmt_ts(stats.start_time(key))
+                end = _fmt_ts(stats.end_time(key) if key not in {"SENDME", "RELAY_DATA"} else stats.start_time(key))
+                f.write(f"  {key}: 次数={cnt}, 起始={start}, 结束={end}\n")
+            destroy_val = _fmt_ts(report.destroy_ts.get(label))
+            f.write(f"  推测 DESTROY 时间={destroy_val}\n")
 
-def _write_sendme_summary(report: SemanticReport, output_dir: Path, title: str) -> None:
+
+def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / "sendme_metrics.txt"
     with summary_path.open("w", encoding="utf-8") as f:
-        f.write(f"# {title} (SENDME 间隔)\n")
+        f.write(f"# {title} (SENDME 触发)\n")
+
+def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = output_dir / "sendme_metrics.txt"
+    with summary_path.open("w", encoding="utf-8") as f:
+        f.write(f"# {title} (SENDME 触发)\n")
         for label in ("Tor", "TorBox"):
             s = report.sendme[label]
             f.write(
-                f"[{label}] SENDME: n={len(s.intervals)}, mean={s.mean:.3f}, median={s.median:.3f}\n"
+                f"[{label}] SENDME: 触发次数={s.count}, 首次时间={_fmt_ts(s.first_ts)}, 间隔样本={len(s.intervals)}, 平均={s.mean:.3f}, 中位数={s.median:.3f}\n"
             )
-        if not np.isnan(report.ks_stat):
-            f.write(f"[SENDME] KS 距离={report.ks_stat:.4f}\n")
 
 def main(
     *,
@@ -515,22 +350,20 @@ def main(
 
     all_tor_events: List[LogEvent] = []
     all_torbox_events: List[LogEvent] = []
-    round_reports: List[SemanticReport] = []
+    round_reports: List[RoundSummary] = []
     for idx, (tor_path, tb_path) in enumerate(zip(tor_inputs, torbox_inputs)):
         tor_events = load_log(tor_path)
         torbox_events = load_log(tb_path)
 
         round_report = build_report(tor_events, torbox_events)
         round_dir = output_dir / f"round_{idx:03d}"
-        _write_state_summary(round_report, round_dir, title=f"Round {idx:03d}")
+        _write_stage_summary(round_report, round_dir, title=f"Round {idx:03d}")
         _write_sendme_summary(round_report, round_dir, title=f"Round {idx:03d}")
         all_tor_events.extend(tor_events)
         all_torbox_events.extend(torbox_events)
         round_reports.append(round_report)
 
-    aggregate_report = build_report(all_tor_events, all_torbox_events)
-    plot_report(aggregate_report, output_dir)
-
+    # 汇总平均: 对不同轮次的统计值取算术平均，便于 send_me.py/state.py 使用统一入口
     if round_reports:
         def _nanmean(values: List[float]) -> float:
             arr = [v for v in values if not np.isnan(v)]
@@ -538,37 +371,42 @@ def main(
 
         avg_state_path = output_dir / "avg_state_metrics.txt"
         with avg_state_path.open("w", encoding="utf-8") as f:
-            f.write("# 多轮平均 - 控制面与RELAY一致性\n")
+            f.write("# 多轮平均 - 事件出现与推测 DESTROY\n")
             for label in ("Tor", "TorBox"):
-                full_ratio = _nanmean([r.control_plane[label].full_ratio for r in round_reports])
-                partial_ratio = _nanmean([r.control_plane[label].partial_ratio for r in round_reports])
-                fully_ordered = _nanmean([r.control_plane[label].fully_ordered for r in round_reports])
-                partial_ordered = _nanmean([r.control_plane[label].partial_ordered for r in round_reports])
-                total_circuits = _nanmean([r.control_plane[label].total_circuits for r in round_reports])
-                f.write(
-                    f"[{label}] 平均完整 {fully_ordered:.2f}/{total_circuits:.2f}, 平均部分 {partial_ordered:.2f}, 完整率={full_ratio * 100:.2f}%, 部分率={partial_ratio * 100:.2f}%\n"
-                )
-            relay_match = _nanmean([r.relay["Tor"].matched for r in round_reports])
-            relay_missing = _nanmean([r.relay["Tor"].missing for r in round_reports])
-            relay_wrong = _nanmean([r.relay["Tor"].wrong_order for r in round_reports])
-            relay_ratio = _nanmean([r.relay["Tor"].match_ratio for r in round_reports])
-            f.write(
-                f"[Relay] 平均匹配={relay_match:.2f}, 平均缺失={relay_missing:.2f}, 平均顺序不一致={relay_wrong:.2f}, 匹配率={relay_ratio * 100:.2f}%\n"
-            )
+                f.write(f"[{label}]\n")
+                for key in STAGE_KEYS:
+                    mean_count = _nanmean([float(r.stages[label].counts.get(key, 0)) for r in round_reports])
+                    start_mean = _nanmean([r.stages[label].start_time(key) or float("nan") for r in round_reports])
+                    end_mean = _nanmean([
+                        (r.stages[label].end_time(key) if key not in {"SENDME", "RELAY_DATA"} else r.stages[
+                            label].start_time(key))
+                        or float("nan")
+                        for r in round_reports
+                    ])
+                    f.write(
+                        f"  {key}: 平均次数={mean_count:.2f}, 平均起始={_fmt_ts(start_mean)}, 平均结束={_fmt_ts(end_mean)}\n")
+                destroy_mean = _nanmean([r.destroy_ts.get(label) or float("nan") for r in round_reports])
+                f.write(f"  平均推测 DESTROY={_fmt_ts(destroy_mean)}\n")
 
         avg_sendme_path = output_dir / "avg_sendme_metrics.txt"
         with avg_sendme_path.open("w", encoding="utf-8") as f:
-            f.write("# 多轮平均 - SENDME 间隔\n")
+            f.write("# 多轮平均 - SENDME 触发\n")
             for label in ("Tor", "TorBox"):
-                counts = _nanmean([len(r.sendme[label].intervals) for r in round_reports])
+                mean_count = _nanmean([float(r.sendme[label].count) for r in round_reports])
+                mean_first = _nanmean([r.sendme[label].first_ts or float("nan") for r in round_reports])
+                mean_interval_count = _nanmean([float(len(r.sendme[label].intervals)) for r in round_reports])
                 mean_val = _nanmean([r.sendme[label].mean for r in round_reports])
                 median_val = _nanmean([r.sendme[label].median for r in round_reports])
                 f.write(
-                    f"[{label}] 平均n={counts:.2f}, 平均mean={mean_val:.3f}, 平均median={median_val:.3f}\n"
+                    f"[{label}] 平均触发次数={mean_count:.2f}, 平均首次时间={_fmt_ts(mean_first)}, 平均间隔样本={mean_interval_count:.2f}, 平均mean={mean_val:.3f}, 平均median={median_val:.3f}\n"
                 )
-            ks_avg = _nanmean([r.ks_stat for r in round_reports])
-            if not np.isnan(ks_avg):
-                f.write(f"[SENDME] 平均KS 距离={ks_avg:.4f}\n")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="统计 Tor/TorBox 语义日志，用于 state.py 与 send_me.py")
+    parser.add_argument("--tor", type=Path, default=TOR_INPUT)
+    parser.add_argument("--torbox", type=Path, default=TORBOX_INPUT)
+    parser.add_argument("--out", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--rounds", type=int, default=ROUNDS, help="当输入目录包含 round_xxx 子目录时使用")
+    args = parser.parse_args()
+
+    main(tor_input=args.tor, torbox_input=args.torbox, output_dir=args.out, rounds=args.rounds)
