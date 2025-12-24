@@ -35,6 +35,10 @@ COLORS = {
     "text_box_bg": "#FFFFFF",
 }
 
+TOR_INPUT = Path("exp/semantic_logs/tor")
+TORBOX_INPUT = Path("exp/semantic_logs/torbox")
+OUT_DIR = Path("exp/semantic_logs/semantic_outputs")
+
 STATE_ORDER = ["CLOSED", "OPENING", "OPEN", "EXTENDING", "ERROR"]
 
 CELL_STATE_MAP = {
@@ -261,26 +265,20 @@ def add_event_markers(ax, events, state_y, y_offset, color, diff_map=None):
         force_text=(0.12, 0.8),
     )
 
+def main(
+        *,
+        tor: Path = TOR_INPUT,
+        tor_round: int | None = None,
+        torbox: Path = TORBOX_INPUT,
+        torbox_round: int | None = None,
+        out: Path = OUT_DIR,
+        tor_label: str = "Tor",
+        torbox_label: str = "TorBox",
+):
+    out.mkdir(parents=True, exist_ok=True)
 
-def build_parser():
-    parser = argparse.ArgumentParser(description="Render state timelines from JSONL logs.")
-    parser.add_argument("--tor", required=True, type=Path, help="Tor JSONL log or semantic_runner output (manifest/meta/dir)")
-    parser.add_argument("--tor-round", type=int, default=None, help="Round index to pick when --tor points to a multi-round manifest or directory")
-    parser.add_argument("--torbox", required=True, type=Path, help="TorBox JSONL log or semantic_runner output (manifest/meta/dir)")
-    parser.add_argument("--torbox-round", type=int, default=None, help="Round index to pick when --torbox points to a multi-round manifest or directory")
-    parser.add_argument("--out", type=Path, default=Path.cwd(), help="Output directory for figures")
-    parser.add_argument("--tor-label", default="Tor")
-    parser.add_argument("--torbox-label", default="TorBox")
-    return parser
-
-
-def main(args=None):
-    parser = build_parser()
-    ns = parser.parse_args(args=args)
-    ns.out.mkdir(parents=True, exist_ok=True)
-
-    tor_path = resolve_events_path(ns.tor, ns.tor_round)
-    torbox_path = resolve_events_path(ns.torbox, ns.torbox_round)
+    tor_path = resolve_events_path(tor, tor_round)
+    torbox_path = resolve_events_path(torbox, torbox_round)
 
     tor_events = load_cell_events(tor_path)
     torbox_events = load_cell_events(torbox_path)
@@ -307,7 +305,7 @@ def main(args=None):
     ax_tor.set_yticks(range(len(STATE_ORDER)))
     ax_tor.set_yticklabels(STATE_ORDER, fontsize=FONT["tick"])
     ax_tor.tick_params(labelsize=FONT["tick"])
-    ax_tor.set_title(f"{ns.tor_label} Protocol", loc="left", color=COLORS["tor_blue"], pad=10, weight="bold")
+    ax_tor.set_title(f"{tor_label} Protocol", loc="left", color=COLORS["tor_blue"], pad=10, weight="bold")
     ax_tor.grid(axis="x", alpha=VIS["grid_alpha"], linestyle="--", linewidth=0.8)
 
     state_y_tor = plot_state_timeline(ax_tor, tor_events)
@@ -320,15 +318,15 @@ def main(args=None):
     ax_tb.set_yticklabels(STATE_ORDER, fontsize=FONT["tick"])
     ax_tb.set_xlabel("Time (ms)", fontsize=FONT["title"], weight="bold")
     ax_tb.tick_params(labelsize=FONT["tick"])
-    ax_tb.set_title(f"{ns.torbox_label} Protocol", loc="left", color=COLORS["torbox_orange"], pad=10, weight="bold")
+    ax_tb.set_title(f"{torbox_label} Protocol", loc="left", color=COLORS["torbox_orange"], pad=10, weight="bold")
     ax_tb.grid(axis="x", alpha=VIS["grid_alpha"], linestyle="--", linewidth=0.8)
 
     diff_mapping = get_diff_map(tor_events, torbox_events)
     state_y_tb = plot_state_timeline(ax_tb, torbox_events)
     add_event_markers(ax_tb, torbox_events, state_y_tb, 0.0, color=COLORS["torbox_orange"], diff_map=diff_mapping)
 
-    out_pdf = ns.out / "protocol_timeline_comparison.pdf"
-    out_png = ns.out / "protocol_timeline_comparison.png"
+    out_pdf = out / "protocol_timeline_comparison.pdf"
+    out_png = out / "protocol_timeline_comparison.png"
     fig.savefig(out_pdf, format="pdf", bbox_inches="tight")
     fig.savefig(out_png, dpi=300, bbox_inches="tight")
     print(f"Saved {out_pdf} and {out_png}")

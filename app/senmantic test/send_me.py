@@ -21,9 +21,10 @@ FONT = {
     "anno": 14,
 }
 
-DEFAULT_TOR_INPUT = Path("exp/semantic_logs/tor")
-DEFAULT_TORBOX_INPUT = Path("exp/semantic_logs/torbox")
-DEFAULT_OUT_DIR = Path("exp/semantic_logs/semantic_outputs")
+
+TOR_INPUT = Path("exp/semantic_logs/tor")
+TORBOX_INPUT = Path("exp/semantic_logs/torbox")
+OUT_DIR = Path("exp/semantic_logs/semantic_outputs")
 
 def _ts_ms(rec: dict) -> float | None:
     if "ts_mono_ns" in rec:
@@ -140,40 +141,21 @@ def cdf(data: List[float]):
     return x, y
 
 
-def build_parser():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Render SENDME scatter + CDF from JSONL logs. If you run this from an IDE without parameters, "
-            "default exp/semantic_logs paths will be used."
-        )
-    )
-    parser.add_argument(
-        "--tor",
-        type=Path,
-        default=DEFAULT_TOR_INPUT,
-        help="Tor JSONL log or semantic_runner output (manifest/meta/dir)",
-    )
-    parser.add_argument(
-        "--torbox",
-        type=Path,
-        default=DEFAULT_TORBOX_INPUT,
-        help="TorBox JSONL log or semantic_runner output (manifest/meta/dir)",
-    )
-    parser.add_argument("--tor-round", type=int, default=None, help="Round index to pick when --tor points to a multi-round manifest or directory")
-    parser.add_argument("--torbox-round", type=int, default=None, help="Round index to pick when --torbox points to a multi-round manifest or directory")
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR, help="Output directory for figures")
-    parser.add_argument("--tor-label", default="Tor")
-    parser.add_argument("--torbox-label", default="TorBox")
-    return parser
 
+def main(
+    *,
+    tor: Path = TOR_INPUT,
+    tor_round: int | None = None,
+    torbox: Path = TORBOX_INPUT,
+    torbox_round: int | None = None,
+    out: Path = OUT_DIR,
+    tor_label: str = "Tor",
+    torbox_label: str = "TorBox",
+):
+    out.mkdir(parents=True, exist_ok=True)
 
-def main(args=None):
-    parser = build_parser()
-    ns = parser.parse_args(args=args)
-    ns.out.mkdir(parents=True, exist_ok=True)
-
-    tor_path = resolve_events_path(ns.tor, ns.tor_round)
-    torbox_path = resolve_events_path(ns.torbox, ns.torbox_round)
+    tor_path = resolve_events_path(tor, tor_round)
+    torbox_path = resolve_events_path(torbox, torbox_round)
 
     tor_sendme = load_sendme_times(tor_path)
     torbox_sendme = load_sendme_times(torbox_path)
@@ -189,21 +171,22 @@ def main(args=None):
     ax_scatter = fig.add_subplot(gs[0])
     ax_cdf = fig.add_subplot(gs[1])
 
-    ax_scatter.scatter(tor_sendme, np.zeros_like(tor_sendme) + 1, label=f"{ns.tor_label} SENDME", s=75)
-    ax_scatter.scatter(torbox_sendme, np.zeros_like(torbox_sendme) + 0, label=f"{ns.torbox_label} SENDME", s=75)
+    ax_scatter.scatter(tor_sendme, np.zeros_like(tor_sendme) + 1, label=f"{tor_label} SENDME", s=75)
+    ax_scatter.scatter(torbox_sendme, np.zeros_like(torbox_sendme) + 0, label=f"{torbox_label} SENDME", s=75)
     ax_scatter.set_title("SENDME timeline", fontsize=FONT["title"])
     ax_scatter.set_ylabel("Trace", fontsize=FONT["label"], labelpad=6)
     ax_scatter.set_yticks([0, 1])
-    ax_scatter.set_yticklabels([ns.torbox_label, ns.tor_label], fontsize=FONT["tick"])
+    ax_scatter.set_yticklabels([torbox_label, tor_label], fontsize=FONT["tick"])
     ax_scatter.grid(alpha=0.3, linestyle="--", linewidth=1.0)
 
     tor_x, tor_y = cdf(np.diff(tor_sendme)) if len(tor_sendme) > 1 else (np.array([]), np.array([]))
     tb_x, tb_y = cdf(np.diff(torbox_sendme)) if len(torbox_sendme) > 1 else (np.array([]), np.array([]))
 
     if tor_x.size:
-        ax_cdf.plot(tor_x, tor_y, linewidth=2.6, label=f"{ns.tor_label} interval CDF")
+        ax_cdf.plot(tor_x, tor_y, linewidth=2.6, label=f"{tor_label} interval CDF")
     if tb_x.size:
-        ax_cdf.plot(tb_x, tb_y, linewidth=2.6, linestyle="--", label=f"{ns.torbox_label} interval CDF")
+        ax_cdf.plot(tb_x, tb_y, linewidth=2.6, linestyle="--", label=f"{torbox_label} interval CDF")
+
 
     ax_cdf.set_title("SENDME interval distribution", fontsize=FONT["title"])
     ax_cdf.set_xlabel("Interval (ms)", fontsize=FONT["label"])
@@ -214,8 +197,8 @@ def main(args=None):
     for ax in (ax_scatter, ax_cdf):
         ax.tick_params(labelsize=FONT["tick"])
 
-    out_pdf = ns.out / "sendme_comparison.pdf"
-    out_png = ns.out / "sendme_comparison.png"
+    out_pdf = out / "sendme_comparison.pdf"
+    out_png = out / "sendme_comparison.png"
     fig.savefig(out_pdf, bbox_inches="tight")
     fig.savefig(out_png, dpi=350, bbox_inches="tight")
     print(f"Resolved Tor log: {tor_path}")

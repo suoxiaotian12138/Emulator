@@ -5,10 +5,11 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Tuple
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib import font_manager
 
 matplotlib.use("Agg")
 
@@ -17,6 +18,33 @@ SENDME_NAMES = {"RELAY_SENDME", "SENDME"}
 RELAY_DATA_NAMES = {"RELAY_DATA", "DATA"}
 RELAY_END_NAMES = {"RELAY_END", "END"}
 
+TOR_INPUT = Path("exp/semantic_logs/tor")
+TORBOX_INPUT = Path("exp/semantic_logs/torbox")
+OUTPUT_DIR = Path("exp/semantic_logs/semantic_outputs")
+ROUNDS = 5
+
+def setup_chinese_font() -> None:
+    # Try common Chinese fonts on Windows/macOS/Linux, pick the first available one.
+    candidates = [
+        "Microsoft YaHei",   # Windows
+        "SimHei",            # Windows (黑体)
+        "NSimSun",           # Windows (新宋体)
+        "SimSun",            # Windows (宋体)
+        "PingFang SC",       # macOS
+        "Hiragino Sans GB",  # macOS
+        "Noto Sans CJK SC",  # Linux/Windows if installed
+        "Source Han Sans SC" # Adobe 思源黑体
+    ]
+    available = {f.name for f in font_manager.fontManager.ttflist}
+    for name in candidates:
+        if name in available:
+            matplotlib.rcParams["font.family"] = name
+            break
+
+    # Avoid minus sign showing as a square
+    matplotlib.rcParams["axes.unicode_minus"] = False
+
+setup_chinese_font()
 
 @dataclass
 class LogEvent:
@@ -29,13 +57,22 @@ class LogEvent:
     @classmethod
     def from_raw(cls, raw: Dict[str, object]) -> "LogEvent":
         ts = None
-        for key in ("timestamp", "ts", "time", "t"):
+        timestamp_keys = (
+            ("timestamp", 1.0),
+            ("ts", 1.0),
+            ("time", 1.0),
+            ("t", 1.0),
+            ("ts_ms", 1e-3),
+            ("ts_ns", 1e-9),
+            ("ts_mono_ns", 1e-9),
+        )
+        for key, scale in timestamp_keys:
             if key in raw:
                 value = raw[key]
-                ts = float(value)
+                ts = float(value) * scale
                 break
         if ts is None:
-            raise ValueError("Log line is missing a timestamp (timestamp/ts/time/t)")
+            raise ValueError("Log line is missing a timestamp (timestamp/ts/time/t/ts_ms/ts_ns/ts_mono_ns)")
 
         cell_cmd = str(raw.get("cell_cmd") or raw.get("cmd") or "").upper()
         direction = str(raw.get("dir") or raw.get("direction") or "?")
@@ -127,6 +164,7 @@ def _events_from_meta(meta_path: Path) -> Path:
         raise ValueError(f"No 'events' entry in {meta_path} and no events/*.jsonl found")
 
     p = Path(candidates[0])
+
 
     # 1) Absolute path: use directly
     if p.is_absolute():
@@ -413,53 +451,6 @@ def plot_report(report: SemanticReport, output_dir: Path) -> None:
     fig.savefig(output_dir / "semantic_overview.pdf")
 
 
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """
-    - 命令行运行：python script.py <tor_input> <torbox_input> --output-dir ... --rounds ...
-    - IDE 运行：不传参数时自动使用 DEFAULT_* 变量
-    """
-    # ===== IDE default config (edit here) =====
-    DEFAULT_TOR_INPUT = Path("exp/semantic_logs/tor")
-    DEFAULT_TORBOX_INPUT = Path("exp/semantic_logs/torbox")
-    DEFAULT_OUTPUT_DIR = Path("exp/semantic_logs/semantic_outputs")
-    DEFAULT_ROUNDS = 5
-    # ========================================
-
-    parser = argparse.ArgumentParser(
-        description=(
-            "Tor/TorBox 语义一致性日志分析。"
-            "支持单次或多轮次输入 (events.jsonl / run_meta.json / round_XXX 目录 / multi_run_manifest.json)。"
-        )
-    )
-    parser.add_argument(
-        "tor_input",
-        type=Path,
-        nargs="?",
-        default=DEFAULT_TOR_INPUT,
-        help="Tor 侧输入：JSONL、run_meta.json、目录或 manifest",
-    )
-    parser.add_argument(
-        "torbox_input",
-        type=Path,
-        nargs="?",
-        default=DEFAULT_TORBOX_INPUT,
-        help="TorBox 侧输入：JSONL、run_meta.json、目录或 manifest",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help="指标与图表输出目录",
-    )
-    parser.add_argument(
-        "--rounds",
-        type=int,
-        default=DEFAULT_ROUNDS,
-        help="轮次数量。>1 时会读取 round_XXX 子目录或 manifest",
-    )
-
-    return parser.parse_args(argv)
-
 
 
 
@@ -483,11 +474,15 @@ def _write_summary(report: SemanticReport, output_dir: Path, title: str) -> None
             f.write(f"[SENDME] KS 距离={report.ks_stat:.4f}\n")
     plot_report(report, output_dir)
 
-def main(argv: Sequence[str] | None = None) -> None:
-    args = parse_args(argv)
-
-    tor_inputs = discover_runs(args.tor_input, args.rounds)
-    torbox_inputs = discover_runs(args.torbox_input, args.rounds)
+def main(
+    *,
+    tor_input: Path = TOR_INPUT,
+    torbox_input: Path = TORBOX_INPUT,
+    output_dir: Path = OUTPUT_DIR,
+    rounds: int = ROUNDS,
+) -> None:
+    tor_inputs = discover_runs(tor_input, rounds)
+    torbox_inputs = discover_runs(torbox_input, rounds)
 
     if len(tor_inputs) != len(torbox_inputs):
         raise SystemExit(f"Mismatched run counts: Tor={len(tor_inputs)} TorBox={len(torbox_inputs)}")
@@ -500,15 +495,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         torbox_events = load_log(tb_path)
 
         round_report = build_report(tor_events, torbox_events)
-        round_dir = args.output_dir / f"round_{idx:03d}"
+        round_dir = output_dir / f"round_{idx:03d}"
         _write_summary(round_report, round_dir, title=f"Round {idx:03d}")
 
         all_tor_events.extend(tor_events)
         all_torbox_events.extend(torbox_events)
 
     aggregate_report = build_report(all_tor_events, all_torbox_events)
-    _write_summary(aggregate_report, args.output_dir, title="Aggregated")
-
+    _write_summary(aggregate_report, output_dir, title="Aggregated")
 
 if __name__ == "__main__":
     main()
