@@ -26,8 +26,16 @@ class EventBus:
         self.emit = emitter
         self.node_id = node_id
         self.role = role
+        self._last_ts = 0
 
-    def _t(self): return time.monotonic_ns()
+
+    def _t(self):
+        now = time.perf_counter_ns()
+        if now <= self._last_ts:
+            now = self._last_ts + 1
+        self._last_ts = now
+        return now
+
 
     # 控制面事件
     def ev(self, name: str, **meta: Any):
