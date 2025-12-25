@@ -548,6 +548,7 @@ def main(
         with avg_sendme_path.open("w", encoding="utf-8") as f:
             f.write("# 多轮平均 - SENDME 触发\n")
 
+            aggregated_payload: dict[str, dict[str, object]] = {}
             for label in ("Tor", "TorBox"):
                 mean_count = _nanmean([float(r.sendme[label].count) for r in round_reports])
                 mean_first = _nanmean([
@@ -565,6 +566,23 @@ def main(
                 mean_interval_seq = _mean_per_occurrence(per_round_intervals)
                 seq_str = ", ".join(_fmt_ts(v) for v in mean_interval_seq) if mean_interval_seq else "-"
                 f.write(f"  平均间隔序列(按第k个间隔)={seq_str}\n")
+
+                per_round_timestamps = [
+                    [t - (r.base_ts.get(label) or 0.0) for t in r.sendme[label].timestamps]
+                    for r in round_reports
+                ]
+                mean_timestamp_seq = _mean_per_occurrence(per_round_timestamps)
+
+                aggregated_payload[label] = {
+                    "count": _clean(mean_count),
+                    "first_ts": _clean(mean_first),
+                    "intervals": [_clean(v) for v in mean_interval_seq if not np.isnan(v)],
+                    "timestamps": [_clean(v) for v in mean_timestamp_seq if not np.isnan(v)],
+                    "mean": _clean(mean_val),
+                    "median": _clean(median_val),
+                }
+
+            f.write(f"# RAW_SENDME_JSON {json.dumps(aggregated_payload, ensure_ascii=False)}\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="统计 Tor/TorBox 语义日志，用于 state.py 与 send_me.py")

@@ -8,6 +8,8 @@ import matplotlib as mpl
 import matplotlib
 matplotlib.use("TkAgg")
 
+TOP_WINDOW_MS = 1000
+
 # ===================== global style =====================
 FONT = {
     "title": 20,
@@ -48,11 +50,18 @@ mpl.rcParams.update({
 
 # ===================== data =====================
 RAW_SENDME_PREFIX = "# RAW_SENDME_JSON "
+AVG_SENDME_FILENAME = "avg_sendme_metrics.txt"
+ROUND_SENDME_FILENAME = "sendme_metrics.txt"
 
 
-def _resolve_metrics_file(base: Path, filename: str, round_idx: int | None) -> Path:
+def _resolve_metrics_file(base: Path, filename: str, round_idx: int | None, prefer_avg: bool = True) -> Path:
     if base.is_file():
         return base
+
+    if prefer_avg:
+        avg_candidate = base / AVG_SENDME_FILENAME
+        if avg_candidate.exists():
+            return avg_candidate
 
     if round_idx is not None:
         candidate = base / f"round_{round_idx:03d}" / filename
@@ -72,7 +81,7 @@ def _resolve_metrics_file(base: Path, filename: str, round_idx: int | None) -> P
 
 
 def _load_sendme_metrics(metrics_root: Path, round_idx: int | None) -> dict:
-    path = _resolve_metrics_file(metrics_root, "sendme_metrics.txt", round_idx)
+    path = _resolve_metrics_file(metrics_root, ROUND_SENDME_FILENAME, round_idx)
     payload_line = next(
         (line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith(RAW_SENDME_PREFIX)),
         None,
@@ -107,10 +116,14 @@ def _cdf_from_intervals(intervals_ms):
     cdf = np.linspace(0, 1, len(arr), endpoint=True)
     return arr, cdf
 
-def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path) -> None:
+def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path, top_window_ms: float | None = None) -> None:
+    top_window_ms = TOP_WINDOW_MS
     payload = _load_sendme_metrics(metrics_root, round_idx)
     tor_data = payload.get("Tor", {})
     tb_data = payload.get("TorBox", {})
+
+    def _nan_if_none(value):
+        return float("nan") if value is None else float(value)
 
     base_ts_candidates = []
     if tor_data.get("timestamps"):
@@ -127,8 +140,35 @@ def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path) -> No
 
     t_max = max(tor_ts + tb_ts, default=0.0) + 10
 
+    tor_mean = _nan_if_none(tor_data.get("mean", float("nan")))
+    tb_mean = _nan_if_none(tb_data.get("mean", float("nan")))
+    tor_median = _nan_if_none(tor_data.get("median", float("nan")))
+    tb_median = _nan_if_none(tb_data.get("median", float("nan")))
+
     t, tor_window = _window_curve(tor_intervals_ms, t_max)
     _, torbox_window = _window_curve(tb_intervals_ms, t_max)
+
+    # ===================== crop top panel by time window =====================
+    if top_window_ms is not None and top_window_ms > 0:
+        # slice window curves
+        mask = t <= top_window_ms
+        t_plot = t[mask]
+        tor_window_plot = tor_window[mask]
+        torbox_window_plot = torbox_window[mask]
+
+        # slice SENDME markers
+        tor_ts_plot = [x for x in tor_ts if x <= top_window_ms]
+        tb_ts_plot = [x for x in tb_ts if x <= top_window_ms]
+
+        t_max_plot = float(top_window_ms)
+    else:
+        t_plot = t
+        tor_window_plot = tor_window
+        torbox_window_plot = torbox_window
+        tor_ts_plot = tor_ts
+        tb_ts_plot = tb_ts
+        t_max_plot = float(max(t_max, 1.0))
+
 
     x_tor, cdf_tor = _cdf_from_intervals(tor_intervals_ms)
     x_tb, cdf_tb = _cdf_from_intervals(tb_intervals_ms)
@@ -142,8 +182,8 @@ def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path) -> No
     ax2 = fig.add_subplot(gs[1])
 
     # ---- top panel ----
-    l1, = ax1.plot(t, tor_window, linewidth=2.8, label="Tor pkg_window", zorder=3)
-    l2, = ax1.plot(t, torbox_window, linestyle="--", linewidth=2.8, label="TorBox pkg_window", zorder=3)
+    l1, = ax1.plot(t_plot, tor_window_plot, linewidth=2.8, label="Tor pkg_window", zorder=3)
+    l2, = ax1.plot(t_plot, torbox_window_plot, linestyle="--", linewidth=2.8, label="TorBox pkg_window", zorder=3)
 
     ax1.axhline(thr, linewidth=2.0, linestyle=(0, (5, 3)), zorder=1)
 
@@ -156,23 +196,32 @@ def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path) -> No
         zorder=10
     )
 
-    s1 = ax1.scatter(tor_ts, np.ones_like(tor_ts) * (thr + 20), s=90, label="Tor SENDME",
-                     edgecolor="black", linewidth=1.0, zorder=4)
-    s2 = ax1.scatter(tb_ts, np.ones_like(tb_ts) * (thr - 20), s=90, label="TorBox SENDME",
-                     edgecolor="black", linewidth=1.0, zorder=4)
+    s1 = ax1.scatter(
+        tor_ts_plot, [thr + 20] * len(tor_ts_plot),
+        s=90, label="Tor SENDME",
+        edgecolor="black", linewidth=1.0, zorder=4
+    )
+    s2 = ax1.scatter(
+        tb_ts_plot, [thr - 20] * len(tb_ts_plot),
+        s=90, label="TorBox SENDME",
+        edgecolor="black", linewidth=1.0, zorder=4
+    )
 
     ax1.set_title("Flow Control Window Dynamics", pad=12)
     ax1.set_ylabel("Window Size")
-    ax1.set_xlim(0, max(t_max, 1))
-    ax1.set_ylim(0, max(tor_window.max() if len(tor_window) else thr, torbox_window.max() if len(torbox_window) else thr) + 50)
+    ax1.set_xlim(0, t_max_plot)
+    y_max = max((tor_window_plot.max() if len(tor_window_plot) else thr),
+                (torbox_window_plot.max() if len(torbox_window_plot) else thr),
+                thr) + 50
+    ax1.set_ylim(0, y_max)
     ax1.grid(alpha=0.25, linestyle="--", linewidth=0.8)
     ax1.spines["top"].set_visible(False)
     ax1.spines["right"].set_visible(False)
     ax1.set_xlabel("")
 
     # ---- bottom panel ----
-    c1, = ax2.plot(x_tor, cdf_tor, linewidth=3.0, label=f"Tor (mean = {tor_data.get('mean', float('nan')):.3f}s)", zorder=3)
-    c2, = ax2.plot(x_tb, cdf_tb, linestyle="--", linewidth=3.0, label=f"TorBox (mean = {tb_data.get('mean', float('nan')):.3f}s)", zorder=3)
+    c1, = ax2.plot(x_tor, cdf_tor, linewidth=3.0, label=f"Tor (mean = {tor_mean:.3f}s)", zorder=3)
+    c2, = ax2.plot(x_tb, cdf_tb, linestyle="--", linewidth=3.0, label=f"TorBox (mean = {tb_mean:.3f}s)", zorder=3)
     fb = ax2.fill_between(
         np.concatenate([x_tor, x_tb]),
         np.concatenate([cdf_tor, cdf_tb]),
@@ -212,9 +261,9 @@ def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path) -> No
     stats_text = (
         "Statistical Analysis\n"
         "────────────────────────────\n"
-        f"Mean difference: {(tb_data.get('mean', 0.0) - tor_data.get('mean', 0.0)) * 1000:.3f} ms\n"
-        f"Tor mean: {tor_data.get('mean', float('nan')):.6f} s, median: {tor_data.get('median', float('nan')):.6f} s\n"
-        f"TorBox mean: {tb_data.get('mean', float('nan')):.6f} s, median: {tb_data.get('median', float('nan')):.6f} s\n"
+        f"Mean difference: {(tb_mean - tor_mean) * 1000:.3f} ms\n"
+        f"Tor mean: {tor_mean:.6f} s, median: {tor_median:.6f} s\n"
+        f"TorBox mean: {tb_mean:.6f} s, median: {tb_median:.6f} s\n"
         "────────────────────────────\n"
         "Use semantic_log_analysis for detailed stats"
     )
@@ -246,12 +295,15 @@ def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path) -> No
 
 def main():
     parser = argparse.ArgumentParser(description="Plot SENDME stats using semantic_log_analysis outputs")
-    parser.add_argument("--metrics", type=Path, default=Path("exp/semantic_logs/semantic_outputs"), help="semantic_log_analysis 输出目录或 sendme_metrics.txt 路径")
-    parser.add_argument("--round", dest="round_idx", type=int, default=None, help="当目录包含 round_XXX 时选择轮次（默认最后一轮）")
+    parser.add_argument("--metrics", type=Path, default=Path("exp/semantic_logs/semantic_outputs"), help="semantic_log_analysis 输出目录或 sendme_metrics.txt 路径（优先使用多轮平均）")
+    parser.add_argument("--round", dest="round_idx", type=int, default=None, help="当目录包含 round_XXX 时选择轮次（若未找到多轮平均时使用）")
     parser.add_argument("--out", dest="out_dir", type=Path, default=Path("."), help="图表输出目录")
+    parser.add_argument("--twin", type=float, default=None,
+                        help="Top panel time window in ms, e.g., 500 or 1000. If None, use full.")
     args = parser.parse_args()
 
-    plot_figures(args.metrics, args.round_idx, args.out_dir)
+    plot_figures(args.metrics, args.round_idx, args.out_dir, top_window_ms=args.twin)
+
 
 if __name__ == "__main__":
     main()
