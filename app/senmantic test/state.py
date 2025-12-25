@@ -93,7 +93,7 @@ def _resolve_metrics_file(base: Path, filename: str, round_idx: int | None) -> P
 
 
 def _load_stage_metrics(metrics_root: Path, round_idx: int | None) -> dict:
-    path = _resolve_metrics_file(metrics_root, "state_metrics.txt", round_idx)
+    path = _resolve_metrics_file(metrics_root, "avg_state_metrics.txt", round_idx)
     payload_line = next(
         (line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith(RAW_STAGE_PREFIX)),
         None,
@@ -316,11 +316,14 @@ def plot_timeline(tor_events, torbox_events, phases, output_dir: Path) -> None:
 
 
 def main():
+    import os
+    print("CWD =", os.getcwd())
     parser = argparse.ArgumentParser(description="Plot protocol states using semantic_log_analysis outputs")
     parser.add_argument("--metrics", type=Path, default=Path("exp/semantic_logs/semantic_outputs"), help="semantic_log_analysis 输出目录或 state_metrics.txt 路径")
     parser.add_argument("--round", dest="round_idx", type=int, default=None, help="当目录包含 round_XXX 时选择具体轮次（默认最后一轮）")
     parser.add_argument("--out", dest="out_dir", type=Path, default=Path("."), help="图表输出目录")
     args = parser.parse_args()
+    print("metrics =", args.metrics, "round =", args.round_idx, "out =", args.out_dir)
 
     stage_payload = _load_stage_metrics(args.metrics, args.round_idx)
     tor_events = _build_events(stage_payload.get("Tor", {}))

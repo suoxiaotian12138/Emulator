@@ -410,9 +410,12 @@ def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) ->
                 f"[{label}] SENDME: 触发次数={s.count}, 首次时间={_fmt_ts(s.first_ts)}, 间隔样本={len(s.intervals)}, 平均={s.mean:.3f}, 中位数={s.median:.3f}\n"
             )
             interval_str = ", ".join(f"{v:.6f}" for v in s.intervals) or "-"
-            ts_str = ", ".join(f"{v:.6f}" for v in s.timestamps) or "-"
-            f.write(f"  间隔序列={interval_str}\n")
-            f.write(f"  触发时间序列={ts_str}\n")
+            if s.first_ts is None:
+                delta_str = "-"
+            else:
+                deltas = [t - s.first_ts for t in s.timestamps]
+                delta_str = ", ".join(f"{v:.6f}" for v in deltas) or "-"
+            f.write(f"  触发时间差序列(相对首次SENDME)={delta_str}\n")
             payload[label] = {
                 "count": s.count,
                 "first_ts": s.first_ts,
@@ -461,6 +464,35 @@ def main(
                 return float("nan")
             return float(value) - float(base)
 
+        def _mean_per_occurrence(
+            series_per_round: List[List[float]]
+        ) -> List[float]:
+            """
+            series_per_round: 每一轮的某个事件的 occurrence 时间(已做 offset)列表
+            返回: 对齐后的每一次 occurrence 的均值列表
+            """
+            max_len = max((len(x) for x in series_per_round), default=0)
+            out: List[float] = []
+            for i in range(max_len):
+                vals = []
+                for seq in series_per_round:
+                    if i < len(seq):
+                        v = seq[i]
+                        if not np.isnan(v):
+                            vals.append(v)
+                out.append(float(np.mean(vals)) if vals else float("nan"))
+            return out
+
+        def _occurrence_offsets(
+            r: RoundSummary, label: str, key: str
+        ) -> List[float]:
+            base = r.base_ts.get(label)
+            times = r.stages[label].all_times(key)
+            return [
+                _offset(t, base) for t in times if (t is not None and base is not None)
+            ]
+
+
         avg_state_path = output_dir / "avg_state_metrics.txt"
         with avg_state_path.open("w", encoding="utf-8") as f:
             f.write("# 多轮平均 - 事件出现与推测 DESTROY\n")
@@ -486,6 +518,15 @@ def main(
                 destroy_mean = _nanmean([
                     _offset(r.destroy_ts.get(label), r.base_ts.get(label)) for r in round_reports
                 ])
+                # 额外输出: 每一次 occurrence 的平均触发时间(对 EXTEND2/EXTENDED2 很关键)
+                if key in {"EXTEND2", "EXTENDED2"}:
+                    per_round = [
+                        _occurrence_offsets(r, label, key) for r in round_reports
+                    ]
+                    mean_seq = _mean_per_occurrence(per_round)
+                    seq_str = ", ".join(_fmt_ts(v) for v in mean_seq) if mean_seq else "-"
+                    f.write(f"    {key}: 平均出现序列(按第k次)={seq_str}\n")
+
                 f.write(f"  平均推测 DESTROY={_fmt_ts(destroy_mean)}\n")
 
         avg_sendme_path = output_dir / "avg_sendme_metrics.txt"
@@ -502,6 +543,12 @@ def main(
                 f.write(
                     f"[{label}] 平均触发次数={mean_count:.2f}, 平均首次时间={_fmt_ts(mean_first)}, 平均间隔样本={mean_interval_count:.2f}, 平均mean={mean_val:.3f}, 平均median={median_val:.3f}\n"
                 )
+                # 额外输出: 每一次 SENDME 触发间隔(第k个间隔)的多轮平均
+                per_round_intervals = [r.sendme[label].intervals.tolist() for r in round_reports]
+                mean_interval_seq = _mean_per_occurrence(per_round_intervals)
+                seq_str = ", ".join(_fmt_ts(v) for v in mean_interval_seq) if mean_interval_seq else "-"
+                f.write(f"  平均间隔序列(按第k个间隔)={seq_str}\n")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="统计 Tor/TorBox 语义日志，用于 state.py 与 send_me.py")
