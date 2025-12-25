@@ -71,29 +71,27 @@ state_colors = {
     "EXTENDING": "#34D399",
     "ERROR": "#EF4444",
 }
-def _resolve_metrics_file(base: Path, filename: str, round_idx: int | None) -> Path:
+
+def _resolve_metrics_file(base: Path, filename: str) -> Path:
+    """Locate the aggregated metrics file.
+
+    Only the average metrics file is supported now. If the provided path is a
+    file, it is returned directly; otherwise, the function expects the file to
+    exist directly under the given directory.
+    """
+
     if base.is_file():
         return base
-
-    if round_idx is not None:
-        candidate = base / f"round_{round_idx:03d}" / filename
-        if candidate.exists():
-            return candidate
 
     if (base / filename).exists():
         return base / filename
 
-    rounds = sorted(base.glob("round_*/"))
-    if rounds:
-        candidate = rounds[-1] / filename
-        if candidate.exists():
-            return candidate
 
     raise FileNotFoundError(f"Unable to locate {filename} under {base}")
 
 
-def _load_stage_metrics(metrics_root: Path, round_idx: int | None) -> dict:
-    path = _resolve_metrics_file(metrics_root, "avg_state_metrics.txt", round_idx)
+def _load_stage_metrics(metrics_root: Path) -> dict:
+    path = _resolve_metrics_file(metrics_root, "avg_state_metrics.txt")
     payload_line = next(
         (line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith(RAW_STAGE_PREFIX)),
         None,
@@ -319,13 +317,11 @@ def main():
     import os
     print("CWD =", os.getcwd())
     parser = argparse.ArgumentParser(description="Plot protocol states using semantic_log_analysis outputs")
-    parser.add_argument("--metrics", type=Path, default=Path("exp/semantic_logs/semantic_outputs"), help="semantic_log_analysis 输出目录或 state_metrics.txt 路径")
-    parser.add_argument("--round", dest="round_idx", type=int, default=None, help="当目录包含 round_XXX 时选择具体轮次（默认最后一轮）")
+    parser.add_argument("--metrics", type=Path, default=Path("exp/semantic_logs/semantic_outputs"), help="semantic_log_analysis 输出目录或 avg_state_metrics.txt 路径")
     parser.add_argument("--out", dest="out_dir", type=Path, default=Path("."), help="图表输出目录")
     args = parser.parse_args()
-    print("metrics =", args.metrics, "round =", args.round_idx, "out =", args.out_dir)
-
-    stage_payload = _load_stage_metrics(args.metrics, args.round_idx)
+    print("metrics =", args.metrics, "out =", args.out_dir)
+    stage_payload = _load_stage_metrics(args.metrics)
     tor_events = _build_events(stage_payload.get("Tor", {}))
     torbox_events = _build_events(stage_payload.get("TorBox", {}))
     phases = _build_phases(tor_events, torbox_events)

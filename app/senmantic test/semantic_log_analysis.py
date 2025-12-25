@@ -459,6 +459,11 @@ def main(
             arr = [v for v in values if not np.isnan(v)]
             return float(np.mean(arr)) if arr else float("nan")
 
+        def _clean(value: float | None) -> float | None:
+            if value is None or np.isnan(value):
+                return None
+            return float(value)
+
         def _offset(value: float | None, base: float | None) -> float:
             if value is None or base is None:
                 return float("nan")
@@ -496,8 +501,10 @@ def main(
         avg_state_path = output_dir / "avg_state_metrics.txt"
         with avg_state_path.open("w", encoding="utf-8") as f:
             f.write("# 多轮平均 - 事件出现与推测 DESTROY\n")
+            aggregated_payload = {}
             for label in ("Tor", "TorBox"):
                 f.write(f"[{label}]\n")
+                aggregated_payload[label] = {}
                 for key in STAGE_KEYS:
                     mean_count = _nanmean([float(r.stages[label].counts.get(key, 0)) for r in round_reports])
                     start_mean = _nanmean([
@@ -515,19 +522,30 @@ def main(
                     ])
                     f.write(
                         f"  {key}: 平均次数={mean_count:.2f}, 平均起始={_fmt_ts(start_mean)}, 平均结束={_fmt_ts(end_mean)}\n")
-                destroy_mean = _nanmean([
-                    _offset(r.destroy_ts.get(label), r.base_ts.get(label)) for r in round_reports
-                ])
-                # 额外输出: 每一次 occurrence 的平均触发时间(对 EXTEND2/EXTENDED2 很关键)
-                if key in {"EXTEND2", "EXTENDED2"}:
+
                     per_round = [
                         _occurrence_offsets(r, label, key) for r in round_reports
                     ]
-                    mean_seq = _mean_per_occurrence(per_round)
-                    seq_str = ", ".join(_fmt_ts(v) for v in mean_seq) if mean_seq else "-"
-                    f.write(f"    {key}: 平均出现序列(按第k次)={seq_str}\n")
+                    mean_seq = [_clean(v) for v in _mean_per_occurrence(per_round)]
+                    if key in {"EXTEND2", "EXTENDED2"}:
+                        seq_str = ", ".join(_fmt_ts(v) for v in mean_seq if v is not None) if mean_seq else "-"
+                        f.write(f"    {key}: 平均出现序列(按第k次)={seq_str}\n")
+
+                    aggregated_payload[label][key] = {
+                        "count": mean_count,
+                        "start": _clean(mean_seq[0]) if mean_seq else _clean(start_mean),
+                        "end": _clean(mean_seq[-1]) if mean_seq else _clean(end_mean),
+                        "times": [v for v in mean_seq if v is not None],
+                    }
+
+                destroy_mean = _nanmean([
+                    _offset(r.destroy_ts.get(label), r.base_ts.get(label)) for r in round_reports
+                ])
 
                 f.write(f"  平均推测 DESTROY={_fmt_ts(destroy_mean)}\n")
+                aggregated_payload[label]["DESTROY_TS"] = _clean(destroy_mean)
+
+            f.write(f"# RAW_STAGE_JSON {json.dumps(aggregated_payload, ensure_ascii=False)}\n")
 
         avg_sendme_path = output_dir / "avg_sendme_metrics.txt"
         with avg_sendme_path.open("w", encoding="utf-8") as f:
