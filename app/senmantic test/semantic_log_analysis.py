@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -60,6 +61,9 @@ STAGE_ALIASES = {
     "SENDME": "SENDME",
     "RELAY_SENDME": "SENDME",
     "DESTROY": "DESTROY",
+    # 可选的常见变体, 你日志里如果出现就能识别
+    "RELAY_DESTROY": "DESTROY",
+    "CELL_DESTROY": "DESTROY",
 }
 
 @dataclass
@@ -90,8 +94,8 @@ class LogEvent:
             raise ValueError(
                 "Log line is missing a timestamp (timestamp/ts/time/t/ts_ms/ts_ns/ts_mono_ns)"
             )
-        meta = raw.get("meta") or {}
 
+        meta = raw.get("meta") or {}
         cell_cmd = str(
             raw.get("cell_cmd")
             or meta.get("cell_cmd")
@@ -124,7 +128,6 @@ class LogEvent:
         )
         return cls(ts, cell_cmd, direction, circ_id, stream_id)
 
-
 @dataclass
 class ControlPlaneStats:
     counts: Dict[str, int]
@@ -134,7 +137,6 @@ class ControlPlaneStats:
 
     def start_time(self, name: str) -> float | None:
         return self.first_ts.get(name)
-
 
     def end_time(self, name: str) -> float | None:
         return self.last_ts.get(name)
@@ -148,6 +150,7 @@ class SendmeStats:
     count: int
     first_ts: float | None
     timestamps: List[float]
+
     @property
     def mean(self) -> float:
         return float(np.mean(self.intervals)) if len(self.intervals) else float("nan")
@@ -155,7 +158,6 @@ class SendmeStats:
     @property
     def median(self) -> float:
         return float(np.median(self.intervals)) if len(self.intervals) else float("nan")
-
 
 @dataclass
 class RoundSummary:
@@ -197,29 +199,22 @@ def _events_from_meta(meta_path: Path) -> Path:
         raise ValueError(f"No 'events' entry in {meta_path} and no events/*.jsonl found")
 
     p = Path(candidates[0])
-
-
     if p.is_absolute():
         resolved = p
     else:
-
         parts = [x.lower() for x in p.parts]
         if parts and parts[0] in ("exp", "."):
             repo_root = Path(__file__).resolve().parents[2]
             candidate = repo_root / p
             resolved = candidate if candidate.exists() else Path.cwd() / p
         else:
-            # 3) Normal relative path: relative to run_meta.json directory
             resolved = meta_path.parent / p
 
     if not resolved.exists():
         raise FileNotFoundError(f"Events log missing: {resolved}")
     return resolved
 
-
-
 def _events_from_directory(base: Path) -> Path:
-    # Prefer run_meta.json if present
     meta_path = base / "run_meta.json"
     if meta_path.exists():
         return _events_from_meta(meta_path)
@@ -229,7 +224,6 @@ def _events_from_directory(base: Path) -> Path:
     if not candidates:
         raise FileNotFoundError(f"No events log found under {base}")
     return candidates[-1]
-
 
 def discover_runs(input_path: Path, rounds: int) -> List[Path]:
     if not input_path.exists():
@@ -255,20 +249,14 @@ def discover_runs(input_path: Path, rounds: int) -> List[Path]:
                 round_dir = input_path / f"round_{idx:03d}"
                 paths.append(_events_from_directory(round_dir))
             return paths
-
         return [_events_from_directory(input_path)]
 
     raise ValueError(f"Unsupported input: {input_path}")
 
-
-# ---------- statistics ----------
 def control_plane_stats(events: Iterable[LogEvent]) -> ControlPlaneStats:
-    """仅统计各事件的出现次数及起止时间，提供 state.py 使用的阶段信息。"""
-
     counts: Dict[str, int] = defaultdict(int)
     first_ts: Dict[str, float] = {}
     last_ts: Dict[str, float] = {}
-
     occurrences: Dict[str, List[float]] = defaultdict(list)
 
     def _canonical(name: str) -> str | None:
@@ -292,7 +280,6 @@ def control_plane_stats(events: Iterable[LogEvent]) -> ControlPlaneStats:
         occurrences={k: sorted(v) for k, v in occurrences.items()},
     )
 
-
 def sendme_intervals(events: Iterable[LogEvent]) -> SendmeStats:
     by_stream: Dict[Tuple[str, str], List[LogEvent]] = defaultdict(list)
     for ev in events:
@@ -303,12 +290,17 @@ def sendme_intervals(events: Iterable[LogEvent]) -> SendmeStats:
     first_ts: float | None = None
     total = 0
     all_timestamps: List[float] = []
+
     for stream_events in by_stream.values():
         stream_events.sort(key=lambda e: e.timestamp)
         if stream_events:
             total += len(stream_events)
-            first_ts = stream_events[0].timestamp if first_ts is None else min(first_ts, stream_events[0].timestamp)
+            if first_ts is None:
+                first_ts = stream_events[0].timestamp
+            else:
+                first_ts = min(first_ts, stream_events[0].timestamp)
             all_timestamps.extend(ev.timestamp for ev in stream_events)
+
         for first, second in zip(stream_events, stream_events[1:]):
             intervals.append(second.timestamp - first.timestamp)
 
@@ -320,20 +312,23 @@ def sendme_intervals(events: Iterable[LogEvent]) -> SendmeStats:
     )
 
 def infer_destroy(events: List[LogEvent]) -> float | None:
-    """用最后一个数据包作为 DESTROY 的兜底时间。"""
+    """
+    Final end time rule:
+    1) If any explicit DESTROY exists (after alias canonicalization), use the latest DESTROY.
+    2) Otherwise use the latest timestamp among all events.
+       This guarantees DESTROY_TS is always >= end of SENDME/RELAY_DATA/etc.
+    """
+    if not events:
+        return None
 
-    destroy_like = [ev.timestamp for ev in events if ev.cell_cmd == "DESTROY"]
+    def _canonical(cmd: str) -> str | None:
+        return STAGE_ALIASES.get(cmd)
+
+    destroy_like = [ev.timestamp for ev in events if _canonical(ev.cell_cmd) == "DESTROY"]
     if destroy_like:
         return max(destroy_like)
 
-    end_like = [ev.timestamp for ev in events if ev.cell_cmd in RELAY_END_NAMES]
-    if end_like:
-        return max(end_like)
-    data_like = [ev.timestamp for ev in events if ev.cell_cmd in RELAY_DATA_NAMES]
-    if data_like:
-        return max(data_like)
-
-    return max((ev.timestamp for ev in events), default=None)
+    return max(ev.timestamp for ev in events)
 
 def build_report(tor_events: List[LogEvent], torbox_events: List[LogEvent]) -> RoundSummary:
     stages = {
@@ -344,19 +339,18 @@ def build_report(tor_events: List[LogEvent], torbox_events: List[LogEvent]) -> R
         "Tor": sendme_intervals(tor_events),
         "TorBox": sendme_intervals(torbox_events),
     }
-    destroy_ts = {"Tor": infer_destroy(tor_events), "TorBox": infer_destroy(torbox_events)}
+    destroy_ts = {
+        "Tor": infer_destroy(tor_events),
+        "TorBox": infer_destroy(torbox_events),
+    }
     base_ts = {
         "Tor": min((ev.timestamp for ev in tor_events), default=None),
         "TorBox": min((ev.timestamp for ev in torbox_events), default=None),
     }
     return RoundSummary(stages=stages, sendme=sendme, destroy_ts=destroy_ts, base_ts=base_ts)
 
-
-# ---------- output helpers ----------
-
 def _fmt_ts(ts: float | None) -> str:
     return "-" if ts is None else f"{ts:.6f}"
-
 
 def _write_stage_summary(report: RoundSummary, output_dir: Path, title: str) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -368,35 +362,42 @@ def _write_stage_summary(report: RoundSummary, output_dir: Path, title: str) -> 
             stats = report.stages[label]
             stage_payload[label] = {}
             f.write(f"[{label}] 阶段事件统计\n")
-            for key in STAGE_KEYS:
 
-                if key == "SENDME":
-                    first = stats.start_time(key)
-                    cnt = 1 if first is not None else 0
-                    start = _fmt_ts(first)
-                    end = _fmt_ts(first)
-                    times_list = [first] if first is not None else []
-                else:
-                    cnt = stats.counts.get(key, 0)
-                    start_val = stats.start_time(key)
-                    end_val = stats.end_time(key) if key not in {"SENDME", "RELAY_DATA"} else stats.start_time(key)
-                    start = _fmt_ts(start_val)
-                    end = _fmt_ts(end_val)
-                    times_list = stats.all_times(key)
+            for key in STAGE_KEYS:
+                cnt = stats.counts.get(key, 0)
+                start_val = stats.start_time(key)
+                end_val = stats.end_time(key)
+                times_list = stats.all_times(key)
+
+                if key in {"SENDME", "RELAY_DATA"}:
+                    if times_list:
+                        trimmed = [times_list[0]]
+                        if len(times_list) > 1:
+                            trimmed.append(times_list[-1])
+                        times_list = trimmed
+                        end_val = times_list[-1]
+
+                # Critical: force DESTROY end to be the inferred final end time
+                if key == "DESTROY":
+                    end_val = report.destroy_ts.get(label)
+
+                start = _fmt_ts(start_val)
+                end = _fmt_ts(end_val)
                 times = ", ".join(f"{ts:.6f}" for ts in times_list) or "-"
                 f.write(f"  {key}: 次数={cnt}, 起始={start}, 结束={end}, 出现={times}\n")
+
                 stage_payload[label][key] = {
                     "count": cnt,
                     "start": times_list[0] if times_list else None,
-                    "end": times_list[-1] if times_list else None,
+                    "end": end_val,
                     "times": times_list,
                 }
+
             destroy_val = _fmt_ts(report.destroy_ts.get(label))
             f.write(f"  推测 DESTROY 时间={destroy_val}\n")
             stage_payload[label]["DESTROY_TS"] = report.destroy_ts.get(label)
+
         f.write(f"# RAW_STAGE_JSON {json.dumps(stage_payload, ensure_ascii=False)}\n")
-
-
 
 def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -409,13 +410,13 @@ def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) ->
             f.write(
                 f"[{label}] SENDME: 触发次数={s.count}, 首次时间={_fmt_ts(s.first_ts)}, 间隔样本={len(s.intervals)}, 平均={s.mean:.3f}, 中位数={s.median:.3f}\n"
             )
-            interval_str = ", ".join(f"{v:.6f}" for v in s.intervals) or "-"
             if s.first_ts is None:
                 delta_str = "-"
             else:
                 deltas = [t - s.first_ts for t in s.timestamps]
                 delta_str = ", ".join(f"{v:.6f}" for v in deltas) or "-"
             f.write(f"  触发时间差序列(相对首次SENDME)={delta_str}\n")
+
             payload[label] = {
                 "count": s.count,
                 "first_ts": s.first_ts,
@@ -425,6 +426,7 @@ def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) ->
                 "median": s.median,
             }
         f.write(f"# RAW_SENDME_JSON {json.dumps(payload, ensure_ascii=False)}\n")
+
 def main(
     *,
     tor_input: Path = TOR_INPUT,
@@ -438,8 +440,6 @@ def main(
     if len(tor_inputs) != len(torbox_inputs):
         raise SystemExit(f"Mismatched run counts: Tor={len(tor_inputs)} TorBox={len(torbox_inputs)}")
 
-    all_tor_events: List[LogEvent] = []
-    all_torbox_events: List[LogEvent] = []
     round_reports: List[RoundSummary] = []
     for idx, (tor_path, tb_path) in enumerate(zip(tor_inputs, torbox_inputs)):
         tor_events = load_log(tor_path)
@@ -449,11 +449,8 @@ def main(
         round_dir = output_dir / f"round_{idx:03d}"
         _write_stage_summary(round_report, round_dir, title=f"Round {idx:03d}")
         _write_sendme_summary(round_report, round_dir, title=f"Round {idx:03d}")
-        all_tor_events.extend(tor_events)
-        all_torbox_events.extend(torbox_events)
         round_reports.append(round_report)
 
-    # 汇总平均: 对不同轮次的统计值取算术平均，便于 send_me.py/state.py 使用统一入口
     if round_reports:
         def _nanmean(values: List[float]) -> float:
             arr = [v for v in values if not np.isnan(v)]
@@ -469,13 +466,7 @@ def main(
                 return float("nan")
             return float(value) - float(base)
 
-        def _mean_per_occurrence(
-            series_per_round: List[List[float]]
-        ) -> List[float]:
-            """
-            series_per_round: 每一轮的某个事件的 occurrence 时间(已做 offset)列表
-            返回: 对齐后的每一次 occurrence 的均值列表
-            """
+        def _mean_per_occurrence(series_per_round: List[List[float]]) -> List[float]:
             max_len = max((len(x) for x in series_per_round), default=0)
             out: List[float] = []
             for i in range(max_len):
@@ -488,59 +479,65 @@ def main(
                 out.append(float(np.mean(vals)) if vals else float("nan"))
             return out
 
-        def _occurrence_offsets(
-            r: RoundSummary, label: str, key: str
-        ) -> List[float]:
+        def _occurrence_offsets(r: RoundSummary, label: str, key: str) -> List[float]:
             base = r.base_ts.get(label)
             times = r.stages[label].all_times(key)
-            return [
-                _offset(t, base) for t in times if (t is not None and base is not None)
-            ]
-
+            return [_offset(t, base) for t in times if (t is not None and base is not None)]
 
         avg_state_path = output_dir / "avg_state_metrics.txt"
         with avg_state_path.open("w", encoding="utf-8") as f:
             f.write("# 多轮平均 - 事件出现与推测 DESTROY\n")
             aggregated_payload = {}
+
             for label in ("Tor", "TorBox"):
                 f.write(f"[{label}]\n")
                 aggregated_payload[label] = {}
+
+                # Precompute destroy_mean per label, used to override DESTROY end
+                destroy_mean = _nanmean([
+                    _offset(r.destroy_ts.get(label), r.base_ts.get(label)) for r in round_reports
+                ])
+
                 for key in STAGE_KEYS:
                     mean_count = _nanmean([float(r.stages[label].counts.get(key, 0)) for r in round_reports])
+
                     start_mean = _nanmean([
                         _offset(r.stages[label].start_time(key), r.base_ts.get(label))
                         for r in round_reports
                     ])
+
                     end_mean = _nanmean([
-                        _offset(
-                            r.stages[label].end_time(key)
-                            if key not in {"SENDME", "RELAY_DATA"}
-                            else r.stages[label].start_time(key),
-                            r.base_ts.get(label),
-                        )
+                        _offset(r.stages[label].end_time(key), r.base_ts.get(label))
                         for r in round_reports
                     ])
-                    f.write(
-                        f"  {key}: 平均次数={mean_count:.2f}, 平均起始={_fmt_ts(start_mean)}, 平均结束={_fmt_ts(end_mean)}\n")
 
-                    per_round = [
-                        _occurrence_offsets(r, label, key) for r in round_reports
-                    ]
+                    # Critical: force DESTROY end to inferred global end (destroy_mean)
+                    if key == "DESTROY":
+                        end_mean = destroy_mean
+
+                    f.write(
+                        f"  {key}: 平均次数={mean_count:.2f}, 平均起始={_fmt_ts(start_mean)}, 平均结束={_fmt_ts(end_mean)}\n"
+                    )
+
+                    per_round = [_occurrence_offsets(r, label, key) for r in round_reports]
                     mean_seq = [_clean(v) for v in _mean_per_occurrence(per_round)]
+
                     if key in {"EXTEND2", "EXTENDED2"}:
                         seq_str = ", ".join(_fmt_ts(v) for v in mean_seq if v is not None) if mean_seq else "-"
                         f.write(f"    {key}: 平均出现序列(按第k次)={seq_str}\n")
 
+                    trimmed_seq = mean_seq
+                    if key in {"SENDME", "RELAY_DATA"} and mean_seq:
+                        trimmed_seq = [mean_seq[0]]
+                        if len(mean_seq) > 1 and mean_seq[-1] is not None:
+                            trimmed_seq.append(mean_seq[-1])
+
                     aggregated_payload[label][key] = {
                         "count": mean_count,
-                        "start": _clean(mean_seq[0]) if mean_seq else _clean(start_mean),
-                        "end": _clean(mean_seq[-1]) if mean_seq else _clean(end_mean),
-                        "times": [v for v in mean_seq if v is not None],
+                        "start": _clean(trimmed_seq[0]) if trimmed_seq else _clean(start_mean),
+                        "end": _clean(end_mean),
+                        "times": [v for v in trimmed_seq if v is not None],
                     }
-
-                destroy_mean = _nanmean([
-                    _offset(r.destroy_ts.get(label), r.base_ts.get(label)) for r in round_reports
-                ])
 
                 f.write(f"  平均推测 DESTROY={_fmt_ts(destroy_mean)}\n")
                 aggregated_payload[label]["DESTROY_TS"] = _clean(destroy_mean)
@@ -550,6 +547,7 @@ def main(
         avg_sendme_path = output_dir / "avg_sendme_metrics.txt"
         with avg_sendme_path.open("w", encoding="utf-8") as f:
             f.write("# 多轮平均 - SENDME 触发\n")
+
             for label in ("Tor", "TorBox"):
                 mean_count = _nanmean([float(r.sendme[label].count) for r in round_reports])
                 mean_first = _nanmean([
@@ -558,15 +556,15 @@ def main(
                 mean_interval_count = _nanmean([float(len(r.sendme[label].intervals)) for r in round_reports])
                 mean_val = _nanmean([r.sendme[label].mean for r in round_reports])
                 median_val = _nanmean([r.sendme[label].median for r in round_reports])
+
                 f.write(
                     f"[{label}] 平均触发次数={mean_count:.2f}, 平均首次时间={_fmt_ts(mean_first)}, 平均间隔样本={mean_interval_count:.2f}, 平均mean={mean_val:.3f}, 平均median={median_val:.3f}\n"
                 )
-                # 额外输出: 每一次 SENDME 触发间隔(第k个间隔)的多轮平均
+
                 per_round_intervals = [r.sendme[label].intervals.tolist() for r in round_reports]
                 mean_interval_seq = _mean_per_occurrence(per_round_intervals)
                 seq_str = ", ".join(_fmt_ts(v) for v in mean_interval_seq) if mean_interval_seq else "-"
                 f.write(f"  平均间隔序列(按第k个间隔)={seq_str}\n")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="统计 Tor/TorBox 语义日志，用于 state.py 与 send_me.py")
