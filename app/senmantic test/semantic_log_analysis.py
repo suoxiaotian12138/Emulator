@@ -155,6 +155,7 @@ class ControlPlaneStats:
 @dataclass
 class SendmeStats:
     intervals: np.ndarray
+    stream_intervals: np.ndarray
     count: int
     first_ts: float | None
     timestamps: List[float]
@@ -351,8 +352,21 @@ def sendme_intervals(events: Iterable[LogEvent], *, base_ts: float | None = None
         data_dec=PKG_WINDOW_DATA_DEC,
     )
 
+    # STREAM-level SENDME intervals (dir=recv, stream_id != 0)
+    stream_sendmes: Dict[str, List[LogEvent]] = defaultdict(list)
+    for ev in circ_events:
+        if ev.cell_cmd in SENDME_NAMES and (ev.direction or "").lower() == "recv" and str(ev.stream_id) != "0":
+            stream_sendmes[str(ev.stream_id)].append(ev)
+
+    stream_intervals: List[float] = []
+    for stream_evs in stream_sendmes.values():
+        stream_evs.sort(key=lambda e: e.timestamp)
+        for a, b in zip(stream_evs, stream_evs[1:]):
+            stream_intervals.append(b.timestamp - a.timestamp)
+
     return SendmeStats(
         intervals=np.array(intervals, dtype=float),
+        stream_intervals=np.array(stream_intervals, dtype=float),
         count=len(sendmes),
         first_ts=first_ts,
         timestamps=sorted(timestamps),
@@ -620,6 +634,7 @@ def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) ->
                 "count": s.count,
                 "first_ts": s.first_ts,
                 "intervals": s.intervals.tolist(),
+                "stream_intervals": s.stream_intervals.tolist(),
                 "timestamps": s.timestamps,
                 "mean": s.mean,
                 "median": s.median,
@@ -784,6 +799,7 @@ def main(
                     "count": _clean(mean_count),
                     "first_ts": _clean(mean_first),
                     "intervals": [_clean(v) for v in mean_interval_seq if not np.isnan(v)],
+                    "stream_intervals": rep_round.sendme[label].stream_intervals.tolist(),
                     "timestamps": [_clean(v) for v in mean_timestamp_seq if not np.isnan(v)],
                     "mean": _clean(mean_val),
                     "median": _clean(median_val),
