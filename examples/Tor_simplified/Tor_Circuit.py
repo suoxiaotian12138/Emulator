@@ -47,60 +47,30 @@ class Tor_CircuitsList:
     def values(self):
         return self._circuits_map.items()
 
-    async def _get_next_circuit_id(self, initiator: Optional[bool] = None):
-        """Allocate a new circ_id following tor's MSB parity rule.
-
-        initiator=True  -> set MSB to 1 (we opened the OR connection)
-        initiator=False -> set MSB to 0 (peer opened the OR connection)
-        initiator=None  -> fall back to self.msb (constructor role)
-        """
+    async def _get_next_circuit_id(self):
         async with Tor_CircuitsList.LOCK:
             Tor_CircuitsList.GLOBAL_CIRCUIT_ID += 1
             circuit_id = Tor_CircuitsList.GLOBAL_CIRCUIT_ID
-        use_msb = self.msb if initiator is None else initiator
-        if use_msb:
+        if self.msb:
             circuit_id |= 0x80000000
-        else:
-            circuit_id &= 0x7FFFFFFF
         return circuit_id
 
-    async def allocate_circuit_id(self, initiator: Optional[bool] = None) -> int:
-        return await self._get_next_circuit_id(initiator)
-
-    def _register(self, circuit_id: int, circuit: "TorCircuit"):
-        self._circuits_map[circuit_id] = circuit
-        if hasattr(circuit, "alias_ids"):
-            circuit.alias_ids.add(circuit_id)
-
-
-    async def create_new_client(self, circuit_id: int | None = None):
-        if circuit_id is None:
-            circuit_id = await self._get_next_circuit_id(initiator=True)
+    async def create_new_client(self):
+        circuit_id = await self._get_next_circuit_id()
         circuit = TorCircuit(circuit_id, role="client")
-        self._register(circuit.id, circuit)
+        self._circuits_map[circuit.id] = circuit
         return circuit
 
     async def create_circuit_server(self, circuit_id):
         circuit = TorCircuit(circuit_id, role="server")
-        self._register(circuit.id, circuit)
+        self._circuits_map[circuit.id] = circuit
         return circuit
-
-    def add_alias(self, circuit: "TorCircuit", circuit_id: int):
-        self._register(circuit_id, circuit)
 
     def get_by_id(self, circuit_id):
         return self._circuits_map.get(circuit_id, None)
 
     def remove(self, circuit_id):
-        circuit = self._circuits_map.pop(circuit_id, None)
-        if not circuit:
-            return None
-
-        for alias_id in list(getattr(circuit, "alias_ids", [])):
-            self._circuits_map.pop(alias_id, None)
-        if hasattr(circuit, "alias_ids"):
-            circuit.alias_ids.clear()
-        return circuit
+        return self._circuits_map.pop(circuit_id, None)
 
 
 class CircuitRoleOps:
@@ -165,8 +135,6 @@ class ServerCircuitOps(CircuitRoleOps):
 class TorCircuit:
     def __init__(self, circuit_id, role: str):
         self._id = circuit_id
-        self.alias_ids: set[int] = set()
-        self.link_circ_ids: dict[Any, int] = {}
         self.streams = StreamsList(self)
         self.buffer = Queue()
         self._relay_send_lock = asyncio.Lock()
@@ -257,9 +225,6 @@ class TorCircuit:
     def enqueue_relay(self, cell, *, out_sock, stream=None, is_data=False):
         if out_sock is None:
             raise ValueError("enqueue_relay requires out_sock")
-        out_circ_id = self.link_circ_ids.get(out_sock)
-        if out_circ_id is not None:
-            cell.circuit_id = out_circ_id
         item = RelayQueueItem(
             cell=cell,
             out_sock=out_sock,
