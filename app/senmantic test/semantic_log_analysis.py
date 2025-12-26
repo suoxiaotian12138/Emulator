@@ -14,8 +14,9 @@ from matplotlib import font_manager
 
 matplotlib.use("Agg")
 
-PKG_WINDOW_INIT = 1000   # 例子: 你需要替换成真实常量
-PKG_WINDOW_SENDME_INC = 100
+PKG_WINDOW_INIT = 1000
+# Tor/TorBox both use the standard circuit packaging window increment of 1000 cells.
+PKG_WINDOW_SENDME_INC = 1000
 PKG_WINDOW_DATA_DEC = 1
 
 
@@ -158,6 +159,8 @@ class SendmeStats:
     first_ts: float | None
     timestamps: List[float]
     window_trace_ms: Dict[str, List[float]]
+    base_ts: float | None
+    circ_id: str | None
 
     @property
     def mean(self) -> float:
@@ -288,12 +291,42 @@ def control_plane_stats(events: Iterable[LogEvent]) -> ControlPlaneStats:
         occurrences={k: sorted(v) for k, v in occurrences.items()},
     )
 
+
+def _select_circuit(events: List[LogEvent]) -> tuple[str | None, List[LogEvent]]:
+    """Choose a representative circuit (most circuit-level SENDMEs, then DATA)."""
+    if not events:
+        return None, []
+
+    by_circ: Dict[str, List[LogEvent]] = defaultdict(list)
+    for ev in events:
+        by_circ[str(ev.circ_id)].append(ev)
+
+    def _score(items: List[LogEvent]) -> tuple[int, int, float]:
+        sendme_cnt = sum(
+            1
+            for ev in items
+            if ev.cell_cmd in SENDME_NAMES
+            and (ev.direction or "").lower() == "recv"
+            and str(ev.stream_id) == "0"
+        )
+        data_cnt = sum(
+            1 for ev in items if ev.cell_cmd in RELAY_DATA_NAMES and (ev.direction or "").lower() == "send"
+        )
+        first_ts = min(ev.timestamp for ev in items)
+        # Prefer more SENDMEs, then more DATA, then earliest start (negative for max)
+        return (sendme_cnt, data_cnt, -first_ts)
+
+    circ_id, circ_events = max(by_circ.items(), key=lambda kv: _score(kv[1]))
+    return circ_id, circ_events
+
 def sendme_intervals(events: Iterable[LogEvent], *, base_ts: float | None = None) -> SendmeStats:
     evs = list(events)
+    circ_id, circ_events = _select_circuit(evs)
 
     # 1) ONLY circuit-level SENDME: stream_id == 0
     sendmes = [
-        ev for ev in evs
+        ev
+        for ev in circ_events
         if (ev.cell_cmd in SENDME_NAMES)
         and (str(ev.stream_id) == "0")
         and ((ev.direction or "").lower() == "recv")
@@ -309,9 +342,10 @@ def sendme_intervals(events: Iterable[LogEvent], *, base_ts: float | None = None
     first_ts = timestamps[0] if timestamps else None
 
     # 3) REAL pkg_window trace: replay RELAY_DATA(send) and circuit SENDME(recv, sid=0)
+    circuit_base_ts = base_ts if base_ts is not None else (min(ev.timestamp for ev in circ_events) if circ_events else None)
     window_trace_ms = compute_circuit_pkg_window_trace_ms(
-        evs,
-        base_ts=base_ts,
+        circ_events,
+        base_ts=circuit_base_ts,
         init_window=PKG_WINDOW_INIT,
         sendme_inc=PKG_WINDOW_SENDME_INC,
         data_dec=PKG_WINDOW_DATA_DEC,
@@ -323,6 +357,8 @@ def sendme_intervals(events: Iterable[LogEvent], *, base_ts: float | None = None
         first_ts=first_ts,
         timestamps=sorted(timestamps),
         window_trace_ms=window_trace_ms,
+        base_ts=circuit_base_ts,
+        circ_id=circ_id,
     )
 
 
@@ -501,8 +537,8 @@ def build_report(tor_events: List[LogEvent], torbox_events: List[LogEvent]) -> R
         "TorBox": control_plane_stats(torbox_events),
     }
     sendme = {
-        "Tor": sendme_intervals(tor_events, base_ts=base_ts.get("Tor")),
-        "TorBox": sendme_intervals(torbox_events, base_ts=base_ts.get("TorBox")),
+        "Tor": sendme_intervals(tor_events),
+        "TorBox": sendme_intervals(torbox_events),
     }
     destroy_ts = {
         "Tor": infer_destroy(tor_events),
@@ -570,7 +606,8 @@ def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) ->
         for label in ("Tor", "TorBox"):
             s = report.sendme[label]
             f.write(
-                f"[{label}] SENDME: 触发次数={s.count}, 首次时间={_fmt_ts(s.first_ts)}, 间隔样本={len(s.intervals)}, 平均={s.mean:.3f}, 中位数={s.median:.3f}\n"
+                f"[{label}] SENDME: 触发次数={s.count}, 首次时间={_fmt_ts(s.first_ts)}, 间隔样本={len(s.intervals)}, 平均={s.mean:.3f}, 中位数={s.median:.3f}"
+                f", circ_id={s.circ_id or '-'}\n"
             )
             if s.first_ts is None:
                 delta_str = "-"
@@ -587,7 +624,8 @@ def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) ->
                 "mean": s.mean,
                 "median": s.median,
                 "window_trace_ms": s.window_trace_ms,
-                "base_ts": report.base_ts.get(label),
+                "base_ts": s.base_ts,
+                "circ_id": s.circ_id,
 
             }
         f.write(f"# RAW_SENDME_JSON {json.dumps(payload, ensure_ascii=False)}\n")
@@ -718,10 +756,10 @@ def main(
                 # Representative (not averaged) window trace for plotting in avg file
                 rep_round = round_reports[0]
                 rep_window_trace = rep_round.sendme[label].window_trace_ms
-                rep_base_ts = rep_round.base_ts.get(label)
+                rep_base_ts = rep_round.sendme[label].base_ts
                 mean_count = _nanmean([float(r.sendme[label].count) for r in round_reports])
                 mean_first = _nanmean([
-                    _offset(r.sendme[label].first_ts, r.base_ts.get(label)) for r in round_reports
+                    _offset(r.sendme[label].first_ts, r.sendme[label].base_ts) for r in round_reports
                 ])
                 mean_interval_count = _nanmean([float(len(r.sendme[label].intervals)) for r in round_reports])
                 mean_val = _nanmean([r.sendme[label].mean for r in round_reports])
@@ -737,7 +775,7 @@ def main(
                 f.write(f"  平均间隔序列(按第k个间隔)={seq_str}\n")
 
                 per_round_timestamps = [
-                    [t - (r.base_ts.get(label) or 0.0) for t in r.sendme[label].timestamps]
+                    [t - (r.sendme[label].base_ts or 0.0) for t in r.sendme[label].timestamps]
                     for r in round_reports
                 ]
                 mean_timestamp_seq = _mean_per_occurrence(per_round_timestamps)
@@ -751,6 +789,7 @@ def main(
                     "median": _clean(median_val),
                     "window_trace_ms": rep_window_trace,
                     "base_ts": rep_base_ts,
+                    "circ_id": rep_round.sendme[label].circ_id,
                 }
 
             f.write(f"# RAW_SENDME_JSON {json.dumps(aggregated_payload, ensure_ascii=False)}\n")
