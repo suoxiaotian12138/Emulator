@@ -58,6 +58,8 @@ class Tor_Node(Tor_base):
         self._relay_flush_task = self._spawn_bg_task(self._flush_relay_agg())
 
         self._circuit_scheduler = CircuitSendScheduler(self)
+        self._circid_map = {}
+        self._circid_map_rev = {}
 
     async def start_protocol(self):
         self.tasks['routing_task'] = self._spawn_bg_task(self.register_to_dire())
@@ -126,6 +128,7 @@ class Tor_Node(Tor_base):
     async def create_circuit(self, create_cell, sock, circuit_id):
         """Quickly select several random nodes and freely add nodes, such as exit nodes"""
         t0 = time.perf_counter()
+        sock.register_circid(circuit_id)
         circuit = await self.circuit_list.create_circuit_server(circuit_id)
         circuit.scheduler = self._circuit_scheduler
         circuit.link_circ_ids[sock] = circuit_id
@@ -142,7 +145,7 @@ class Tor_Node(Tor_base):
         )
         return circuit
 
-    async def extend_next_node(self, cell: CellRelayExtend2, circuit_id: int):
+    async def extend_next_node(self, cell: CellRelayExtend2, circuit_id: int, up_sock: Tor_Socket):
         ip = cell.ip
         port = cell.port
         addr = (ip, port)
@@ -185,12 +188,24 @@ class Tor_Node(Tor_base):
         await sock.handshake_done.wait()
 
         circuit = self.circuit_list.get_by_id(circuit_id)
+        if up_sock is None:
+            up_sock = circuit.circuit_nodes[0].sock
         simple_node = Tor_Router_simple(sock)
         circuit.circuit_nodes.append(simple_node)
 
-        downstream_circ_id = await self.circuit_list.allocate_circuit_id(initiator=True)
+        downstream_circ_id = sock.alloc_circid_even()
+        sock.register_circid(downstream_circ_id)
+        up_desc = getattr(up_sock, "peer_str", str(up_sock.socket.getpeername()))
+        down_desc = getattr(sock, "peer_str", str(sock.socket.getpeername()))
+        self.print(
+            f"ALLOC down_circid={downstream_circ_id} for down_orconn={down_desc} when extending up_circid={circuit_id}")
         circuit.link_circ_ids[sock] = downstream_circ_id
         self.circuit_list.add_alias(circuit, downstream_circ_id)
+
+        self._circid_map[(up_sock, circuit_id)] = (sock, downstream_circ_id)
+        self._circid_map_rev[(sock, downstream_circ_id)] = (up_sock, circuit_id)
+        self.print(f"MAP ({up_desc}, {circuit_id}) <-> ({down_desc}, {downstream_circ_id})")
+
 
         # 发送下游 CREATE2，计时并记录是否成功（下游会回 EXTENDED2）
         create2 = Cell_Create2(handshake_type=handshake_type, onion_skin=skin, circuit_id=downstream_circ_id)
@@ -221,6 +236,16 @@ class Tor_Node(Tor_base):
             "cell_trace", circ_id=circuit_id, peer=str(sock.socket.getpeername()),
             side="node", dir="send", cell_cmd="EXTENDED2"
         )
+
+    def _translate_circid(self, in_sock: Tor_Socket, out_sock: Tor_Socket, circid: int) -> int:
+        """Translate circuit_id between OR connections using the extension mapping."""
+        down = self._circid_map.get((in_sock, circid))
+        if down and down[0] == out_sock:
+            return down[1]
+        up = self._circid_map_rev.get((in_sock, circid))
+        if up and up[0] == out_sock:
+            return up[1]
+        return circid
 
     def _cw_send(self, circuit, out_sock: Tor_Socket):
         """
@@ -340,6 +365,7 @@ class Tor_Node(Tor_base):
                             else None,
                         )
                         return
+                    cell.circuit_id = self._translate_circid(sock, downstream_sock, cell.circuit_id)
                     circuit.enqueue_relay(cell, out_sock=downstream_sock, is_data=False)
                     return
 
@@ -349,6 +375,7 @@ class Tor_Node(Tor_base):
             # downstream -> upstream: add one layer and forward upstream
             next_node = circuit.circuit_nodes[0]
             next_node.encrypt_forward(cell)
+            cell.circuit_id = self._translate_circid(sock, next_node.sock, cell.circuit_id)
             circuit.enqueue_relay(cell, out_sock=next_node.sock, is_data=False)
 
         elif isinstance(cell, Cell_RelayEarly):
@@ -362,6 +389,7 @@ class Tor_Node(Tor_base):
                 next_hop_sock = circuit.circuit_nodes[-1].sock
             else:
                 next_hop_sock = circuit.circuit_nodes[0].sock
+            cell.circuit_id = self._translate_circid(sock, next_hop_sock, cell.circuit_id)
             self._ev(
                 "cell_trace", circ_id=cell.circuit_id, peer=str(next_hop_sock.socket.getpeername()),
                 side="node", dir="send", cell_cmd="DESTROY"
@@ -375,7 +403,7 @@ class Tor_Node(Tor_base):
     async def handle_cell_relay(self, cell, circuit, origin_cell, sock):
         self.print("inner_cell:", cell)
         if isinstance(cell, CellRelayExtend2):
-            await self.extend_next_node(cell, circuit.id)
+            await self.extend_next_node(cell, circuit.id, sock)
         elif isinstance(cell, Cell_RelayEarly):
             if sock == circuit.circuit_nodes[0].sock:
                 out_sock = circuit.circuit_nodes[-1].sock

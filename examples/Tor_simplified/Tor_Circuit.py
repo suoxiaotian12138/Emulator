@@ -73,8 +73,9 @@ class Tor_CircuitsList:
             circuit.alias_ids.add(circuit_id)
 
 
-    async def create_new_client(self):
-        circuit_id = await self._get_next_circuit_id(initiator=True)
+    async def create_new_client(self, circuit_id: int | None = None):
+        if circuit_id is None:
+            circuit_id = await self._get_next_circuit_id(initiator=True)
         circuit = TorCircuit(circuit_id, role="client")
         self._register(circuit.id, circuit)
         return circuit

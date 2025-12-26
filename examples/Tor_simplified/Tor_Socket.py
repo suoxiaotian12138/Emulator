@@ -81,6 +81,10 @@ class Tor_Socket():
         self._writer_task = None
         self._last_queue_log = 0.0
 
+        # Circuit ID allocation (per-ORConn, even-parity for initiator)
+        self._next_circid_even = 2
+        self._used_circids: set[int] = set()
+
         if self.reader is not None:
             # 被动连接，已经有SSL socket
             try:
@@ -226,6 +230,19 @@ class Tor_Socket():
                 self.print(f"[SendErr] {self.peer_str} {e}")
                 await self._abort()
                 raise
+
+    def alloc_circid_even(self) -> int:
+        """Allocate an even circuit_id for circuits initiated on this ORConn."""
+        while True:
+            circid = self._next_circid_even
+            self._next_circid_even += 2
+            if circid not in self._used_circids:
+                self._used_circids.add(circid)
+                return circid
+
+    def register_circid(self, circid: int) -> None:
+        """Record a circuit_id already in use on this ORConn to avoid collisions."""
+        self._used_circids.add(circid)
 
     async def _abort(self):
         """正确关闭连接"""
