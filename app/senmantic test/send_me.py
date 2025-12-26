@@ -2,10 +2,11 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-import matplotlib
+import numpy as np
+
 matplotlib.use("TkAgg")
 
 TOP_WINDOW_MS = 1000
@@ -167,7 +168,8 @@ def _cdf_from_intervals(intervals_ms):
     return norm, cdf
 
 def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path, top_window_ms: float | None = None) -> None:
-    top_window_ms = TOP_WINDOW_MS
+    if top_window_ms is None:
+        top_window_ms = TOP_WINDOW_MS
     payload = _load_sendme_metrics(metrics_root, round_idx)
     tor_data = payload.get("Tor", {})
     tb_data = payload.get("TorBox", {})
@@ -183,8 +185,14 @@ def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path, top_w
     tb_ts = _to_ms(tb_data.get("timestamps", []), tb_base_ts) if (tb_data and tb_base_ts is not None) else []
 
 
-    tor_intervals_ms = [v * 1000.0 for v in tor_data.get("intervals", [])]
-    tb_intervals_ms = [v * 1000.0 for v in tb_data.get("intervals", [])]
+    tor_stream_intervals = tor_data.get("stream_intervals")
+    tb_stream_intervals = tb_data.get("stream_intervals")
+
+    tor_raw_intervals = tor_stream_intervals if tor_stream_intervals is not None else tor_data.get("intervals", [])
+    tb_raw_intervals = tb_stream_intervals if tb_stream_intervals is not None else tb_data.get("intervals", [])
+
+    tor_intervals_ms = [v * 1000.0 for v in tor_raw_intervals]
+    tb_intervals_ms = [v * 1000.0 for v in tb_raw_intervals]
 
     tor_trace = tor_data.get("window_trace_ms")
     tb_trace = tb_data.get("window_trace_ms")
@@ -202,27 +210,36 @@ def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path, top_w
         max(tb_trace.get("time_ms", []) or [0.0]),
     ) + 10.0
 
+    def _first_change_time(trace):
+        times = trace.get("time_ms", []) if trace else []
+        return times[1] if len(times) >= 2 else 0.0
+
+    start_candidates = [v for v in (_first_change_time(tor_trace), _first_change_time(tb_trace)) if v is not None]
+    start_ms = max(0.0, min(start_candidates) - 20.0) if start_candidates else 0.0
+
     tor_mean = _nan_if_none(tor_data.get("mean", float("nan")))
     tb_mean = _nan_if_none(tb_data.get("mean", float("nan")))
     tor_median = _nan_if_none(tor_data.get("median", float("nan")))
     tb_median = _nan_if_none(tb_data.get("median", float("nan")))
 
-    t, tor_window = _window_curve(tor_trace, t_max, step=True)
-    _, torbox_window = _window_curve(tb_trace, t_max, step=True)
+    t, tor_window = _window_curve(tor_trace, t_max, step=False)
+    _, torbox_window = _window_curve(tb_trace, t_max, step=False)
 
     # ===================== crop top panel by time window =====================
     if top_window_ms is not None and top_window_ms > 0:
+        end_ms = start_ms + top_window_ms
+
         # slice window curves
-        mask = t <= top_window_ms
+        mask = (t >= start_ms) & (t <= end_ms)
         t_plot = t[mask]
         tor_window_plot = tor_window[mask]
         torbox_window_plot = torbox_window[mask]
 
-        # slice SENDME markers
-        tor_ts_plot = [x for x in tor_ts if x <= top_window_ms]
-        tb_ts_plot = [x for x in tb_ts if x <= top_window_ms]
+        # slice SENDME markers within the same window
+        tor_ts_plot = [x for x in tor_ts if start_ms <= x <= end_ms]
+        tb_ts_plot = [x for x in tb_ts if start_ms <= x <= end_ms]
 
-        t_max_plot = float(top_window_ms)
+        t_max_plot = float(end_ms)
     else:
         t_plot = t
         tor_window_plot = tor_window
@@ -244,9 +261,8 @@ def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path, top_w
     ax2 = fig.add_subplot(gs[1])
 
     # ---- top panel ----
-    l1, = ax1.plot(t_plot, tor_window_plot, linewidth=2.8, label="Tor pkg_window", zorder=3, drawstyle="steps-post")
-    l2, = ax1.plot(t_plot, torbox_window_plot, linestyle="--", linewidth=2.8, label="TorBox pkg_window", zorder=3,
-                   drawstyle="steps-post")
+    l1, = ax1.plot(t_plot, tor_window_plot, linewidth=2.8, label="Tor pkg_window", zorder=3)
+    l2, = ax1.plot(t_plot, torbox_window_plot, linestyle="--", linewidth=2.8, label="TorBox pkg_window", zorder=3)
 
     ax1.axhline(thr, linewidth=2.0, linestyle=(0, (5, 3)), zorder=1)
 
@@ -272,7 +288,7 @@ def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path, top_w
 
     ax1.set_title("Flow Control Window Dynamics", pad=12)
     ax1.set_ylabel("Window Size")
-    ax1.set_xlim(0, t_max_plot)
+    ax1.set_xlim(start_ms if top_window_ms else 0, t_max_plot)
     y_max = max((tor_window_plot.max() if len(tor_window_plot) else thr),
                 (torbox_window_plot.max() if len(torbox_window_plot) else thr),
                 thr) + 50
