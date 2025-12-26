@@ -229,6 +229,7 @@ class Tor_Client(Tor_base):
     async def create_circuit(self, socket, hops_count=3, extend_routers=None):
         # print(f"[create_circuit] begin -> guard {self.guard.addr} hops={hops_count}")
         circuit = await self.circuit_list.create_new_client()
+        circuit.link_circ_ids[socket] = circuit.id
         #guard选择记录
         snap = self.consensus.get_consensus_snapshot()
         t0_total = time.perf_counter()

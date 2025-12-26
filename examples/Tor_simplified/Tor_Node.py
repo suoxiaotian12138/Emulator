@@ -41,7 +41,7 @@ class Tor_Node(Tor_base):
         self.rsa_onion_sk, _ = rsa_setup()
         self.tls_cert_der = rsa_id_x509_der(self.cert_file)
 
-        self.circuit_list = Tor_CircuitsList()
+        self.circuit_list = Tor_CircuitsList(is_client=False)
         self.protocol_version = NtorServerKeyAgreement(rsa_identity_digest(self.rsa_id_sk), self.ntor_pvk)
         self.flags = flags
         self.protocols = protocols
@@ -128,6 +128,7 @@ class Tor_Node(Tor_base):
         t0 = time.perf_counter()
         circuit = await self.circuit_list.create_circuit_server(circuit_id)
         circuit.scheduler = self._circuit_scheduler
+        circuit.link_circ_ids[sock] = circuit_id
         self._ev(
             "cell_trace", circ_id=circuit_id, peer=str(sock.socket.getpeername()),
             side="node", dir="recv", cell_cmd="CREATE2"
@@ -187,8 +188,12 @@ class Tor_Node(Tor_base):
         simple_node = Tor_Router_simple(sock)
         circuit.circuit_nodes.append(simple_node)
 
+        downstream_circ_id = await self.circuit_list.allocate_circuit_id(initiator=True)
+        circuit.link_circ_ids[sock] = downstream_circ_id
+        self.circuit_list.add_alias(circuit, downstream_circ_id)
+
         # 发送下游 CREATE2，计时并记录是否成功（下游会回 EXTENDED2）
-        create2 = Cell_Create2(handshake_type=handshake_type, onion_skin=skin, circuit_id=circuit_id)
+        create2 = Cell_Create2(handshake_type=handshake_type, onion_skin=skin, circuit_id=downstream_circ_id)
         t_ext = time.perf_counter()
         try:
             await sock.send_cell(create2)

@@ -20,8 +20,8 @@ loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(
 
 async def register_all_guards(guard_configs):
     guards = []
-    for name, ip, port, role, flags in guard_configs:
-        guard = Tor_Node(name, ip, port, flags)
+    for name, ip, port, role, flags, exit_policy in guard_configs:
+        guard = Tor_Node(name, ip, port, flags, exit_policy=exit_policy)
         guards.append(guard)
 
     # 启动所有guard但不等待完成
@@ -46,12 +46,12 @@ async def main():
     os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
     # 多个 guard 配置
     guard_configs = [
-        ("guard1", "192.168.66.242", 9001, 'Guard', ["Running", "Valid", "Guard","Fast","Stable"]),
-        # ("guard2", "192.168.66.242", 9002, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"]),
-        ("Middle1", "192.168.66.243", 9003, 'Middle',["Running", "Valid", "MiddleOnly", "Fast","Stable"]),
-        # ("Middle2", "192.168.66.244", 9004, 'Middle',["Running", "Valid", "MiddleOnly", "Fast","Stable"]),
-        ("Exit1", "192.168.66.243", 9005, 'Exit',["Running", "Valid", "Exit","Fast","Stable"]),
-        # ("Exit2", "192.168.66.243", 9006, 'Exit',["Running", "Valid", "Exit","Fast","Stable"]),
+        ("guard1", "192.168.66.242", 9001, 'Guard', ["Running", "Valid", "Guard","Fast","Stable"], 'reject 1-65535'),
+        # ("guard2", "192.168.66.242", 9002, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"], 'reject 1-65535'),
+        ("Middle1", "192.168.66.244", 9003, 'Middle',["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
+        # ("Middle2", "192.168.66.244", 9004, 'Middle',["Running", "Valid", "MiddleOnly", "Fast","Stable"], 'reject 1-65535'),
+        # ("Exit1", "192.168.66.243", 9005, 'Exit',["Running", "Valid", "Exit","Fast","Stable"], 'accept 1-65535'),
+        # ("Exit2", "192.168.66.243", 9006, 'Exit',["Running", "Valid", "Exit","Fast","Stable"], 'accept 1-65535'),
 
     ]
 

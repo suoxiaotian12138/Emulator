@@ -7,24 +7,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
-import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib import font_manager
 
-matplotlib.use("Agg")
-
+# ===================== Constants =====================
 PKG_WINDOW_INIT = 1000
-# Tor/TorBox both use the standard circuit packaging window increment of 100 cells.
 PKG_WINDOW_SENDME_INC = 100
 PKG_WINDOW_DATA_DEC = 1
-
 
 SENDME_NAMES = {"RELAY_SENDME", "SENDME"}
 RELAY_DATA_NAMES = {"RELAY_DATA", "DATA"}
 RELAY_END_NAMES = {"RELAY_END", "END"}
-
-SENDME_WINDOW_THRESHOLD = 100.0
 
 TOR_INPUT = Path("exp/semantic_logs/tor")
 TORBOX_INPUT = Path("exp/semantic_logs/torbox")
@@ -43,7 +35,6 @@ STAGE_KEYS = [
 ]
 
 STAGE_ALIASES = {
-    # 建路
     "CREATE": "CREATE2",
     "CREATE2": "CREATE2",
     "RELAY_CREATE": "CREATE2",
@@ -52,7 +43,6 @@ STAGE_ALIASES = {
     "CREATED2": "CREATED2",
     "RELAY_CREATED": "CREATED2",
     "RELAY_CREATED2": "CREATED2",
-    # 扩展
     "EXTEND": "EXTEND2",
     "EXTEND2": "EXTEND2",
     "RELAY_EXTEND": "EXTEND2",
@@ -61,7 +51,6 @@ STAGE_ALIASES = {
     "EXTENDED2": "EXTENDED2",
     "RELAY_EXTENDED": "EXTENDED2",
     "RELAY_EXTENDED2": "EXTENDED2",
-    # 连接/数据
     "RELAY_CONNECTED": "RELAY_CONNECTED",
     "CONNECTED": "RELAY_CONNECTED",
     "RELAY_DATA": "RELAY_DATA",
@@ -69,14 +58,13 @@ STAGE_ALIASES = {
     "SENDME": "SENDME",
     "RELAY_SENDME": "SENDME",
     "DESTROY": "DESTROY",
-    # 可选的常见变体, 你日志里如果出现就能识别
     "RELAY_DESTROY": "DESTROY",
     "CELL_DESTROY": "DESTROY",
 }
 
 
 def _pick(*vals, default=None):
-    # pick first value that is NOT None (so 0 is kept)
+    """Pick first non-None value."""
     for v in vals:
         if v is not None:
             return v
@@ -85,6 +73,7 @@ def _pick(*vals, default=None):
 
 @dataclass
 class LogEvent:
+    """Canonicalized log event with unified field names."""
     timestamp: float
     cell_cmd: str
     direction: str
@@ -93,6 +82,7 @@ class LogEvent:
 
     @classmethod
     def from_raw(cls, raw: Dict[str, object]) -> "LogEvent":
+        # 1) Timestamp normalization (support multiple formats)
         ts = None
         timestamp_keys = (
             ("timestamp", 1.0),
@@ -109,10 +99,13 @@ class LogEvent:
                 break
         if ts is None:
             raise ValueError(
-                "Log line is missing a timestamp (timestamp/ts/time/t/ts_ms/ts_ns/ts_mono_ns)"
+                "Log line missing timestamp (timestamp/ts/time/t/ts_ms/ts_ns/ts_mono_ns)"
             )
 
+        # 2) Extract meta if present
         meta = raw.get("meta") or {}
+
+        # 3) cell_cmd normalization (uppercase)
         cell_cmd = str(
             raw.get("cell_cmd")
             or meta.get("cell_cmd")
@@ -122,13 +115,17 @@ class LogEvent:
             or meta.get("event")
             or ""
         ).upper()
+
+        # 4) direction normalization
         direction = str(
             raw.get("dir")
             or raw.get("direction")
             or meta.get("dir")
             or meta.get("direction")
             or "?"
-        )
+        ).lower()
+
+        # 5) circ_id extraction
         circ_id_val = _pick(
             raw.get("circ_id"),
             raw.get("circuit"),
@@ -138,12 +135,14 @@ class LogEvent:
         )
         circ_id = str(circ_id_val)
 
+        # 6) stream_id extraction with explicit circuit-level default
+        # CRITICAL: for circuit-level events, stream_id should be "0"
         stream_id_val = _pick(
             raw.get("stream_id"),
             raw.get("stream"),
             meta.get("stream_id"),
             meta.get("stream"),
-            default=0,  # important: circuit-level default to 0
+            default=0,
         )
         stream_id = str(stream_id_val)
 
@@ -152,6 +151,7 @@ class LogEvent:
 
 @dataclass
 class ControlPlaneStats:
+    """Statistics for control plane events (CREATE, EXTEND, etc.)."""
     counts: Dict[str, int]
     first_ts: Dict[str, float]
     last_ts: Dict[str, float]
@@ -166,16 +166,19 @@ class ControlPlaneStats:
     def all_times(self, name: str) -> List[float]:
         return self.occurrences.get(name, [])
 
+
 @dataclass
 class SendmeStats:
-    intervals: np.ndarray
-    stream_intervals: np.ndarray
-    count: int
+    """SENDME statistics and circuit window trace."""
+    intervals: np.ndarray  # circuit SENDME intervals
+    stream_intervals: np.ndarray  # stream SENDME intervals
+    count: int  # circuit SENDME count
     first_ts: float | None
-    timestamps: List[float]
-    window_trace_ms: Dict[str, List[float]]
+    timestamps: List[float]  # circuit SENDME timestamps
+    window_trace_ms: Dict[str, List[float]]  # reconstructed window
     base_ts: float | None
     circ_id: str | None
+    relay_data_count: int  # for validation
 
     @property
     def mean(self) -> float:
@@ -185,14 +188,19 @@ class SendmeStats:
     def median(self) -> float:
         return float(np.median(self.intervals)) if len(self.intervals) else float("nan")
 
+
 @dataclass
 class RoundSummary:
+    """Summary for one round of experiments."""
     stages: Dict[str, ControlPlaneStats]
     sendme: Dict[str, SendmeStats]
     destroy_ts: Dict[str, float | None]
     base_ts: Dict[str, float | None]
 
+
+# ===================== Log Loading =====================
 def load_log(path: Path) -> List[LogEvent]:
+    """Load and parse JSONL log file."""
     events: List[LogEvent] = []
     with path.open("r", encoding="utf-8") as f:
         for line_no, line in enumerate(f, 1):
@@ -207,7 +215,9 @@ def load_log(path: Path) -> List[LogEvent]:
     events.sort(key=lambda e: e.timestamp)
     return events
 
+
 def _events_from_meta(meta_path: Path) -> Path:
+    """Extract events log path from run_meta.json."""
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     log_files = meta.get("log_files") or {}
     candidates = []
@@ -240,7 +250,9 @@ def _events_from_meta(meta_path: Path) -> Path:
         raise FileNotFoundError(f"Events log missing: {resolved}")
     return resolved
 
+
 def _events_from_directory(base: Path) -> Path:
+    """Find events log in a directory."""
     meta_path = base / "run_meta.json"
     if meta_path.exists():
         return _events_from_meta(meta_path)
@@ -251,7 +263,9 @@ def _events_from_directory(base: Path) -> Path:
         raise FileNotFoundError(f"No events log found under {base}")
     return candidates[-1]
 
+
 def discover_runs(input_path: Path, rounds: int) -> List[Path]:
+    """Discover all run log files."""
     if not input_path.exists():
         raise FileNotFoundError(f"Input not found: {input_path}")
 
@@ -279,7 +293,10 @@ def discover_runs(input_path: Path, rounds: int) -> List[Path]:
 
     raise ValueError(f"Unsupported input: {input_path}")
 
+
+# ===================== Analysis Functions =====================
 def control_plane_stats(events: Iterable[LogEvent]) -> ControlPlaneStats:
+    """Compute control plane statistics."""
     counts: Dict[str, int] = defaultdict(int)
     first_ts: Dict[str, float] = {}
     last_ts: Dict[str, float] = {}
@@ -308,7 +325,14 @@ def control_plane_stats(events: Iterable[LogEvent]) -> ControlPlaneStats:
 
 
 def _select_circuit(events: List[LogEvent]) -> tuple[str | None, List[LogEvent]]:
-    """Choose a representative circuit (most circuit-level SENDMEs, then DATA)."""
+    """
+    Select the most representative circuit for analysis.
+
+    Priority:
+    1. Most circuit-level SENDMEs (stream_id == 0, dir == recv)
+    2. Most RELAY_DATA sends
+    3. Earliest start time
+    """
     if not events:
         return None, []
 
@@ -317,94 +341,43 @@ def _select_circuit(events: List[LogEvent]) -> tuple[str | None, List[LogEvent]]
         by_circ[str(ev.circ_id)].append(ev)
 
     def _score(items: List[LogEvent]) -> tuple[int, int, float]:
+        # Count circuit-level SENDMEs (stream_id == 0)
         sendme_cnt = sum(
             1
             for ev in items
             if ev.cell_cmd in SENDME_NAMES
-            and (ev.direction or "").lower() == "recv"
+            and ev.direction == "recv"
             and str(ev.stream_id) == "0"
         )
+        # Count DATA sends
         data_cnt = sum(
-            1 for ev in items if ev.cell_cmd in RELAY_DATA_NAMES and (ev.direction or "").lower() == "send"
+            1
+            for ev in items
+            if ev.cell_cmd in RELAY_DATA_NAMES
+            and ev.direction == "send"
         )
         first_ts = min(ev.timestamp for ev in items)
-        # Prefer more SENDMEs, then more DATA, then earliest start (negative for max)
         return (sendme_cnt, data_cnt, -first_ts)
 
     circ_id, circ_events = max(by_circ.items(), key=lambda kv: _score(kv[1]))
     return circ_id, circ_events
 
-def sendme_intervals(events: Iterable[LogEvent], *, base_ts: float | None = None) -> SendmeStats:
-    evs = list(events)
-    circ_id, circ_events = _select_circuit(evs)
-
-    # 1) ONLY circuit-level SENDME: stream_id == 0
-    sendmes = [
-        ev
-        for ev in circ_events
-        if (ev.cell_cmd in SENDME_NAMES)
-        and (str(ev.stream_id) == "0")
-        and ((ev.direction or "").lower() == "recv")
-    ]
-    sendmes.sort(key=lambda e: e.timestamp)
-
-    # 2) intervals based on circuit SENDME only
-    intervals: List[float] = []
-    for a, b in zip(sendmes, sendmes[1:]):
-        intervals.append(b.timestamp - a.timestamp)
-
-    timestamps = [ev.timestamp for ev in sendmes]
-    first_ts = timestamps[0] if timestamps else None
-
-    # 3) REAL pkg_window trace: replay RELAY_DATA(send) and circuit SENDME(recv, sid=0)
-    circuit_base_ts = base_ts if base_ts is not None else (min(ev.timestamp for ev in circ_events) if circ_events else None)
-    window_trace_ms = compute_circuit_pkg_window_trace_ms(
-        circ_events,
-        base_ts=circuit_base_ts,
-        init_window=PKG_WINDOW_INIT,
-        sendme_inc=PKG_WINDOW_SENDME_INC,
-        data_dec=PKG_WINDOW_DATA_DEC,
-    )
-
-    # STREAM-level SENDME intervals (dir=recv, stream_id != 0)
-    stream_sendmes: Dict[str, List[LogEvent]] = defaultdict(list)
-    for ev in circ_events:
-        if ev.cell_cmd in SENDME_NAMES and (ev.direction or "").lower() == "recv" and str(ev.stream_id) != "0":
-            stream_sendmes[str(ev.stream_id)].append(ev)
-
-    stream_intervals: List[float] = []
-    for stream_evs in stream_sendmes.values():
-        stream_evs.sort(key=lambda e: e.timestamp)
-        for a, b in zip(stream_evs, stream_evs[1:]):
-            stream_intervals.append(b.timestamp - a.timestamp)
-
-    return SendmeStats(
-        intervals=np.array(intervals, dtype=float),
-        stream_intervals=np.array(stream_intervals, dtype=float),
-        count=len(sendmes),
-        first_ts=first_ts,
-        timestamps=sorted(timestamps),
-        window_trace_ms=window_trace_ms,
-        base_ts=circuit_base_ts,
-        circ_id=circ_id,
-    )
-
 
 def compute_circuit_pkg_window_trace_ms(
-    events: List[LogEvent],
-    *,
-    base_ts: float | None,
-    init_window: int,
-    sendme_inc: int,
-    data_dec: int = 1,
+        events: List[LogEvent],
+        *,
+        base_ts: float | None,
+        init_window: int,
+        sendme_inc: int,
+        data_dec: int = 1,
 ) -> Dict[str, List[float]]:
     """
-    Circuit-level packaging window reconstruction.
+    Reconstruct circuit-level packaging window trace.
 
-    Rules for your log schema:
-      - Consume window on RELAY_DATA when dir == "send" (any stream_id).
-      - Refill window on RELAY_SENDME/SENDME when dir == "recv" AND stream_id == "0".
-        This filters out stream-level SENDMEs (like stream_id=3 in your sample).
+    Rules:
+    - RELAY_DATA send (any stream_id): decrement window by data_dec
+    - SENDME recv with stream_id == 0: increment window by sendme_inc
+    - Stream-level SENDMEs (stream_id != 0) are IGNORED for circuit window
     """
     if not events:
         return {"time_ms": [], "window": []}
@@ -420,13 +393,14 @@ def compute_circuit_pkg_window_trace_ms(
 
     for ev in evs:
         cmd = ev.cell_cmd
-        d = (ev.direction or "").lower()
+        d = ev.direction
 
-        # RELAY_DATA send consumes window
+        # DATA send: consume window
         if cmd in RELAY_DATA_NAMES and d == "send":
             w = max(0, w - int(data_dec))
 
-        # circuit SENDME recv refills window
+        # Circuit SENDME recv: refill window
+        # CRITICAL: only stream_id == "0" affects circuit window
         elif cmd in SENDME_NAMES and d == "recv" and str(ev.stream_id) == "0":
             w = w + int(sendme_inc)
 
@@ -442,105 +416,88 @@ def compute_circuit_pkg_window_trace_ms(
     return {"time_ms": times_ms, "window": windows}
 
 
-def compute_pkg_window_trace_ms(
-    events: List[LogEvent],
-    *,
-    base_ts: float | None,
-    init_window: int,
-    sendme_inc: int,
-    data_dec: int = 1,
-    # 方向规则: data 用哪个方向算消耗, sendme 用哪个方向算补偿
-    data_dir: str | None = None,
-    sendme_dir: str | None = None,
-) -> Dict[str, List[float]]:
+def sendme_intervals(events: Iterable[LogEvent], *, base_ts: float | None = None) -> SendmeStats:
     """
-    Reconstruct circuit packaging window over time from observable events.
+    Compute SENDME statistics and reconstruct circuit window.
 
-    Assumptions:
-      - Each RELAY_DATA (in chosen direction) consumes 1 cell window by default.
-      - Each SENDME (in chosen direction) increases window by sendme_inc.
+    Returns both circuit-level and stream-level SENDME intervals.
     """
+    evs = list(events)
+    circ_id, circ_events = _select_circuit(evs)
 
-    if not events:
-        return {"time_ms": [], "window": []}
+    # 1) Circuit-level SENDMEs only (stream_id == 0, dir == recv)
+    circuit_sendmes = [
+        ev
+        for ev in circ_events
+        if (ev.cell_cmd in SENDME_NAMES)
+           and (str(ev.stream_id) == "0")
+           and (ev.direction == "recv")
+    ]
+    circuit_sendmes.sort(key=lambda e: e.timestamp)
 
-    if base_ts is None:
-        base_ts = min(ev.timestamp for ev in events)
+    # 2) Circuit SENDME intervals
+    intervals: List[float] = []
+    for a, b in zip(circuit_sendmes, circuit_sendmes[1:]):
+        intervals.append(b.timestamp - a.timestamp)
 
-    # Sort, then replay
-    evs = sorted(events, key=lambda e: e.timestamp)
+    timestamps = [ev.timestamp for ev in circuit_sendmes]
+    first_ts = timestamps[0] if timestamps else None
 
-    w = int(init_window)
-    times_ms: List[float] = [0.0]
-    windows: List[float] = [float(w)]
+    # 3) Count RELAY_DATA sends for validation
+    relay_data_count = sum(
+        1
+        for ev in circ_events
+        if ev.cell_cmd in RELAY_DATA_NAMES and ev.direction == "send"
+    )
 
-    for ev in evs:
-        cmd = ev.cell_cmd
-        d = (ev.direction or "").lower()
+    # 4) Reconstruct circuit window trace
+    circuit_base_ts = base_ts if base_ts is not None else (
+        min(ev.timestamp for ev in circ_events) if circ_events else None
+    )
+    window_trace_ms = compute_circuit_pkg_window_trace_ms(
+        circ_events,
+        base_ts=circuit_base_ts,
+        init_window=PKG_WINDOW_INIT,
+        sendme_inc=PKG_WINDOW_SENDME_INC,
+        data_dec=PKG_WINDOW_DATA_DEC,
+    )
 
-        # Optional direction filter
-        if cmd in RELAY_DATA_NAMES:
-            if data_dir is not None and d != data_dir.lower():
-                continue
-            w = max(0, w - int(data_dec))
+    # 5) Stream-level SENDME intervals (stream_id != 0, dir == recv)
+    stream_sendmes: Dict[str, List[LogEvent]] = defaultdict(list)
+    for ev in circ_events:
+        if (
+                ev.cell_cmd in SENDME_NAMES
+                and ev.direction == "recv"
+                and str(ev.stream_id) != "0"
+        ):
+            stream_sendmes[str(ev.stream_id)].append(ev)
 
-        elif cmd in SENDME_NAMES:
-            if sendme_dir is not None and d != sendme_dir.lower():
-                continue
-            w = w + int(sendme_inc)
+    stream_intervals: List[float] = []
+    for stream_evs in stream_sendmes.values():
+        stream_evs.sort(key=lambda e: e.timestamp)
+        for a, b in zip(stream_evs, stream_evs[1:]):
+            stream_intervals.append(b.timestamp - a.timestamp)
 
-        else:
-            continue
+    return SendmeStats(
+        intervals=np.array(intervals, dtype=float),
+        stream_intervals=np.array(stream_intervals, dtype=float),
+        count=len(circuit_sendmes),
+        first_ts=first_ts,
+        timestamps=sorted(timestamps),
+        window_trace_ms=window_trace_ms,
+        base_ts=circuit_base_ts,
+        circ_id=circ_id,
+        relay_data_count=relay_data_count,
+    )
 
-        t_ms = (ev.timestamp - base_ts) * 1000.0
-        if t_ms < 0:
-            continue
-        times_ms.append(float(t_ms))
-        windows.append(float(w))
-
-    return {"time_ms": times_ms, "window": windows}
-
-
-def _window_trace(timestamps: List[float], *, base_ts: float | None = None) -> Dict[str, List[float]]:
-    if not timestamps:
-        return {"time_ms": [], "window": []}
-
-    if base_ts is None:
-        base_ts = min(timestamps)
-
-    offsets = sorted([(ts - base_ts) * 1000.0 for ts in timestamps])
-    eps = 1e-6
-
-    times: List[float] = [0.0]
-    windows: List[float] = [SENDME_WINDOW_THRESHOLD]
-
-    last_interval = offsets[0] if offsets else None
-    for idx, t in enumerate(offsets):
-        drop_time = max(t, times[-1] + eps)
-        times.append(drop_time)
-        windows.append(0.0)
-
-        jump_time = drop_time + eps
-        times.append(jump_time)
-        windows.append(SENDME_WINDOW_THRESHOLD)
-
-        if idx > 0:
-            last_interval = t - offsets[idx - 1]
-
-    fallback = offsets[-1] if offsets else SENDME_WINDOW_THRESHOLD
-    decay = last_interval if last_interval and last_interval > 0 else (fallback if fallback > 0 else SENDME_WINDOW_THRESHOLD)
-    end_time = times[-1] + decay
-    times.append(end_time)
-    windows.append(0.0)
-
-    return {"time_ms": times, "window": windows}
 
 def infer_destroy(events: List[LogEvent]) -> float | None:
     """
-    Final end time rule:
-    1) If any explicit DESTROY exists (after alias canonicalization), use the latest DESTROY.
-    2) Otherwise use the latest timestamp among all events.
-       This guarantees DESTROY_TS is always >= end of SENDME/RELAY_DATA/etc.
+    Infer circuit destruction time.
+
+    Rules:
+    1. If explicit DESTROY exists, use latest DESTROY timestamp
+    2. Otherwise use latest event timestamp
     """
     if not events:
         return None
@@ -554,7 +511,9 @@ def infer_destroy(events: List[LogEvent]) -> float | None:
 
     return max(ev.timestamp for ev in events)
 
+
 def build_report(tor_events: List[LogEvent], torbox_events: List[LogEvent]) -> RoundSummary:
+    """Build analysis report for one round."""
     base_ts = {
         "Tor": min((ev.timestamp for ev in tor_events), default=None),
         "TorBox": min((ev.timestamp for ev in torbox_events), default=None),
@@ -575,19 +534,23 @@ def build_report(tor_events: List[LogEvent], torbox_events: List[LogEvent]) -> R
 
     return RoundSummary(stages=stages, sendme=sendme, destroy_ts=destroy_ts, base_ts=base_ts)
 
+
+# ===================== Output Functions =====================
 def _fmt_ts(ts: float | None) -> str:
     return "-" if ts is None else f"{ts:.6f}"
 
+
 def _write_stage_summary(report: RoundSummary, output_dir: Path, title: str) -> None:
+    """Write control plane stage summary."""
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / "state_metrics.txt"
     with summary_path.open("w", encoding="utf-8") as f:
-        f.write(f"# {title} (建路阶段与事件出现)\n")
+        f.write(f"# {title} - Control Plane Events\n")
         stage_payload = {}
         for label in ("Tor", "TorBox"):
             stats = report.stages[label]
             stage_payload[label] = {}
-            f.write(f"[{label}] 阶段事件统计\n")
+            f.write(f"[{label}] Stage Event Statistics\n")
 
             for key in STAGE_KEYS:
                 cnt = stats.counts.get(key, 0)
@@ -595,6 +558,7 @@ def _write_stage_summary(report: RoundSummary, output_dir: Path, title: str) -> 
                 end_val = stats.end_time(key)
                 times_list = stats.all_times(key)
 
+                # For high-frequency events, only show first and last
                 if key in {"SENDME", "RELAY_DATA"}:
                     if times_list:
                         trimmed = [times_list[0]]
@@ -603,14 +567,14 @@ def _write_stage_summary(report: RoundSummary, output_dir: Path, title: str) -> 
                         times_list = trimmed
                         end_val = times_list[-1]
 
-                # Critical: force DESTROY end to be the inferred final end time
+                # Force DESTROY end to inferred value
                 if key == "DESTROY":
                     end_val = report.destroy_ts.get(label)
 
                 start = _fmt_ts(start_val)
                 end = _fmt_ts(end_val)
                 times = ", ".join(f"{ts:.6f}" for ts in times_list) or "-"
-                f.write(f"  {key}: 次数={cnt}, 起始={start}, 结束={end}, 出现={times}\n")
+                f.write(f"  {key}: count={cnt}, start={start}, end={end}, occurrences={times}\n")
 
                 stage_payload[label][key] = {
                     "count": cnt,
@@ -620,29 +584,53 @@ def _write_stage_summary(report: RoundSummary, output_dir: Path, title: str) -> 
                 }
 
             destroy_val = _fmt_ts(report.destroy_ts.get(label))
-            f.write(f"  推测 DESTROY 时间={destroy_val}\n")
+            f.write(f"  Inferred DESTROY time={destroy_val}\n")
             stage_payload[label]["DESTROY_TS"] = report.destroy_ts.get(label)
 
         f.write(f"# RAW_STAGE_JSON {json.dumps(stage_payload, ensure_ascii=False)}\n")
 
+
 def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) -> None:
+    """Write SENDME and circuit window summary."""
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / "sendme_metrics.txt"
     with summary_path.open("w", encoding="utf-8") as f:
-        f.write(f"# {title} (SENDME 触发)\n")
+        f.write(f"# {title} - Circuit Window Analysis\n")
+        f.write("# This file contains:\n")
+        f.write("#   - Circuit-level SENDME statistics (stream_id == 0)\n")
+        f.write("#   - Stream-level SENDME statistics (stream_id != 0)\n")
+        f.write("#   - Circuit packaging window trace (DATA decrements + circuit SENDME increments)\n")
+        f.write("#\n")
+
         payload = {}
         for label in ("Tor", "TorBox"):
             s = report.sendme[label]
+
+            # Validation warnings
+            if s.count == 0:
+                f.write(f"[{label}] WARNING: No circuit-level SENDMEs found!\n")
+            if s.relay_data_count == 0:
+                f.write(f"[{label}] WARNING: No RELAY_DATA sends found!\n")
+            if len(s.window_trace_ms.get("time_ms", [])) < 2:
+                f.write(f"[{label}] WARNING: Window trace has insufficient data points!\n")
+
             f.write(
-                f"[{label}] SENDME: 触发次数={s.count}, 首次时间={_fmt_ts(s.first_ts)}, 间隔样本={len(s.intervals)}, 平均={s.mean:.3f}, 中位数={s.median:.3f}"
-                f", circ_id={s.circ_id or '-'}\n"
+                f"[{label}] Circuit SENDME: count={s.count}, first_ts={_fmt_ts(s.first_ts)}, "
+                f"interval_samples={len(s.intervals)}, mean={s.mean:.3f}s, median={s.median:.3f}s, "
+                f"circ_id={s.circ_id or '-'}, relay_data_count={s.relay_data_count}\n"
             )
+
             if s.first_ts is None:
                 delta_str = "-"
             else:
                 deltas = [t - s.first_ts for t in s.timestamps]
                 delta_str = ", ".join(f"{v:.6f}" for v in deltas) or "-"
-            f.write(f"  触发时间差序列(相对首次SENDME)={delta_str}\n")
+            f.write(f"  Circuit SENDME timestamps (relative to first)={delta_str}\n")
+
+            # Stream-level SENDME info
+            if len(s.stream_intervals) > 0:
+                stream_mean = float(np.mean(s.stream_intervals))
+                f.write(f"  Stream SENDME: interval_samples={len(s.stream_intervals)}, mean={stream_mean:.3f}s\n")
 
             payload[label] = {
                 "count": s.count,
@@ -655,17 +643,19 @@ def _write_sendme_summary(report: RoundSummary, output_dir: Path, title: str) ->
                 "window_trace_ms": s.window_trace_ms,
                 "base_ts": s.base_ts,
                 "circ_id": s.circ_id,
-
+                "relay_data_count": s.relay_data_count,
             }
         f.write(f"# RAW_SENDME_JSON {json.dumps(payload, ensure_ascii=False)}\n")
 
+
 def main(
-    *,
-    tor_input: Path = TOR_INPUT,
-    torbox_input: Path = TORBOX_INPUT,
-    output_dir: Path = OUTPUT_DIR,
-    rounds: int = ROUNDS,
+        *,
+        tor_input: Path = TOR_INPUT,
+        torbox_input: Path = TORBOX_INPUT,
+        output_dir: Path = OUTPUT_DIR,
+        rounds: int = ROUNDS,
 ) -> None:
+    """Main analysis function."""
     tor_inputs = discover_runs(tor_input, rounds)
     torbox_inputs = discover_runs(torbox_input, rounds)
 
@@ -674,6 +664,7 @@ def main(
 
     round_reports: List[RoundSummary] = []
     for idx, (tor_path, tb_path) in enumerate(zip(tor_inputs, torbox_inputs)):
+        print(f"Processing round {idx:03d}...")
         tor_events = load_log(tor_path)
         torbox_events = load_log(tb_path)
 
@@ -684,6 +675,8 @@ def main(
         round_reports.append(round_report)
 
     if round_reports:
+        print("Generating multi-round averages...")
+
         def _nanmean(values: List[float]) -> float:
             arr = [v for v in values if not np.isnan(v)]
             return float(np.mean(arr)) if arr else float("nan")
@@ -716,16 +709,16 @@ def main(
             times = r.stages[label].all_times(key)
             return [_offset(t, base) for t in times if (t is not None and base is not None)]
 
+        # Stage metrics
         avg_state_path = output_dir / "avg_state_metrics.txt"
         with avg_state_path.open("w", encoding="utf-8") as f:
-            f.write("# 多轮平均 - 事件出现与推测 DESTROY\n")
+            f.write("# Multi-Round Average - Control Plane Events\n")
             aggregated_payload = {}
 
             for label in ("Tor", "TorBox"):
                 f.write(f"[{label}]\n")
                 aggregated_payload[label] = {}
 
-                # Precompute destroy_mean per label, used to override DESTROY end
                 destroy_mean = _nanmean([
                     _offset(r.destroy_ts.get(label), r.base_ts.get(label)) for r in round_reports
                 ])
@@ -743,12 +736,11 @@ def main(
                         for r in round_reports
                     ])
 
-                    # Critical: force DESTROY end to inferred global end (destroy_mean)
                     if key == "DESTROY":
                         end_mean = destroy_mean
 
                     f.write(
-                        f"  {key}: 平均次数={mean_count:.2f}, 平均起始={_fmt_ts(start_mean)}, 平均结束={_fmt_ts(end_mean)}\n"
+                        f"  {key}: avg_count={mean_count:.2f}, avg_start={_fmt_ts(start_mean)}, avg_end={_fmt_ts(end_mean)}\n"
                     )
 
                     per_round = [_occurrence_offsets(r, label, key) for r in round_reports]
@@ -756,7 +748,7 @@ def main(
 
                     if key in {"EXTEND2", "EXTENDED2"}:
                         seq_str = ", ".join(_fmt_ts(v) for v in mean_seq if v is not None) if mean_seq else "-"
-                        f.write(f"    {key}: 平均出现序列(按第k次)={seq_str}\n")
+                        f.write(f"    {key}: avg occurrence sequence={seq_str}\n")
 
                     trimmed_seq = mean_seq
                     if key in {"SENDME", "RELAY_DATA"} and mean_seq:
@@ -771,21 +763,27 @@ def main(
                         "times": [v for v in trimmed_seq if v is not None],
                     }
 
-                f.write(f"  平均推测 DESTROY={_fmt_ts(destroy_mean)}\n")
+                f.write(f"  Avg inferred DESTROY={_fmt_ts(destroy_mean)}\n")
                 aggregated_payload[label]["DESTROY_TS"] = _clean(destroy_mean)
 
             f.write(f"# RAW_STAGE_JSON {json.dumps(aggregated_payload, ensure_ascii=False)}\n")
 
+        # SENDME metrics - use representative round (round_000) for window_trace_ms
         avg_sendme_path = output_dir / "avg_sendme_metrics.txt"
         with avg_sendme_path.open("w", encoding="utf-8") as f:
-            f.write("# 多轮平均 - SENDME 触发\n")
+            f.write("# Multi-Round Average - Circuit Window Analysis\n")
+            f.write("# NOTE: window_trace_ms is from round_000 (representative, not averaged)\n")
+            f.write("#       Other metrics are averaged across all rounds\n")
+            f.write("#\n")
 
             aggregated_payload: dict[str, dict[str, object]] = {}
             for label in ("Tor", "TorBox"):
-                # Representative (not averaged) window trace for plotting in avg file
+                # Use round_000 as representative for window trace
                 rep_round = round_reports[0]
                 rep_window_trace = rep_round.sendme[label].window_trace_ms
                 rep_base_ts = rep_round.sendme[label].base_ts
+                rep_circ_id = rep_round.sendme[label].circ_id
+
                 mean_count = _nanmean([float(r.sendme[label].count) for r in round_reports])
                 mean_first = _nanmean([
                     _offset(r.sendme[label].first_ts, r.sendme[label].base_ts) for r in round_reports
@@ -793,15 +791,18 @@ def main(
                 mean_interval_count = _nanmean([float(len(r.sendme[label].intervals)) for r in round_reports])
                 mean_val = _nanmean([r.sendme[label].mean for r in round_reports])
                 median_val = _nanmean([r.sendme[label].median for r in round_reports])
+                mean_data_count = _nanmean([float(r.sendme[label].relay_data_count) for r in round_reports])
 
                 f.write(
-                    f"[{label}] 平均触发次数={mean_count:.2f}, 平均首次时间={_fmt_ts(mean_first)}, 平均间隔样本={mean_interval_count:.2f}, 平均mean={mean_val:.3f}, 平均median={median_val:.3f}\n"
+                    f"[{label}] Avg circuit SENDME: count={mean_count:.2f}, first_ts={_fmt_ts(mean_first)}, "
+                    f"interval_samples={mean_interval_count:.2f}, mean={mean_val:.3f}s, median={median_val:.3f}s, "
+                    f"relay_data_count={mean_data_count:.2f}\n"
                 )
 
                 per_round_intervals = [r.sendme[label].intervals.tolist() for r in round_reports]
                 mean_interval_seq = _mean_per_occurrence(per_round_intervals)
                 seq_str = ", ".join(_fmt_ts(v) for v in mean_interval_seq) if mean_interval_seq else "-"
-                f.write(f"  平均间隔序列(按第k个间隔)={seq_str}\n")
+                f.write(f"  Avg interval sequence={seq_str}\n")
 
                 per_round_timestamps = [
                     [t - (r.sendme[label].base_ts or 0.0) for t in r.sendme[label].timestamps]
@@ -809,27 +810,36 @@ def main(
                 ]
                 mean_timestamp_seq = _mean_per_occurrence(per_round_timestamps)
 
+                # Stream-level averages
+                per_round_stream_intervals = [r.sendme[label].stream_intervals.tolist() for r in round_reports]
+                all_stream_intervals = [item for sublist in per_round_stream_intervals for item in sublist]
+
                 aggregated_payload[label] = {
                     "count": _clean(mean_count),
                     "first_ts": _clean(mean_first),
                     "intervals": [_clean(v) for v in mean_interval_seq if not np.isnan(v)],
-                    "stream_intervals": rep_round.sendme[label].stream_intervals.tolist(),
+                    "stream_intervals": all_stream_intervals,  # combined from all rounds
                     "timestamps": [_clean(v) for v in mean_timestamp_seq if not np.isnan(v)],
                     "mean": _clean(mean_val),
                     "median": _clean(median_val),
-                    "window_trace_ms": rep_window_trace,
+                    "window_trace_ms": rep_window_trace,  # from round_000
                     "base_ts": rep_base_ts,
-                    "circ_id": rep_round.sendme[label].circ_id,
+                    "circ_id": rep_circ_id,
+                    "relay_data_count": _clean(mean_data_count),
+                    "_note": "window_trace_ms is from round_000, not averaged",
                 }
 
             f.write(f"# RAW_SENDME_JSON {json.dumps(aggregated_payload, ensure_ascii=False)}\n")
 
+    print(f"Analysis complete. Results written to {output_dir}")
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="统计 Tor/TorBox 语义日志，用于 state.py 与 send_me.py")
+    parser = argparse.ArgumentParser(description="Semantic log analysis for Tor/TorBox circuit packaging window")
     parser.add_argument("--tor", type=Path, default=TOR_INPUT)
     parser.add_argument("--torbox", type=Path, default=TORBOX_INPUT)
     parser.add_argument("--out", type=Path, default=OUTPUT_DIR)
-    parser.add_argument("--rounds", type=int, default=ROUNDS, help="当输入目录包含 round_xxx 子目录时使用")
+    parser.add_argument("--rounds", type=int, default=ROUNDS)
     args = parser.parse_args()
 
     main(tor_input=args.tor, torbox_input=args.torbox, output_dir=args.out, rounds=args.rounds)
