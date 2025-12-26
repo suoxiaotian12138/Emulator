@@ -95,26 +95,76 @@ def _to_ms(seq, base_ts):
     return [round((v - base_ts) * 1000.0, 6) for v in seq]
 
 
-def _window_curve(intervals_ms, t_max, samples=300, base_value=100.0):
+def _window_curve(window_trace, t_max, samples=300, base_value=100.0, step=True):
+    times = np.array(window_trace.get("time_ms", []), dtype=float)
+    values = np.array(window_trace.get("window", []), dtype=float)
+
     if t_max <= 0:
         return np.linspace(0, 1, samples), np.full(samples, base_value)
-    if not intervals_ms:
-        return np.linspace(0, t_max, samples), np.full(samples, base_value)
-    base = np.array(intervals_ms)
-    interp = np.interp(
-        np.linspace(0, len(base) - 1, samples),
-        np.arange(len(base)),
-        base,
-    )
-    return np.linspace(0, t_max, samples), interp + base_value
 
+    if len(times) == 0 or len(values) == 0:
+        return np.linspace(0, t_max, samples), np.full(samples, base_value)
+
+    mask = times <= t_max
+    times = times[mask]
+    values = values[mask]
+    if len(times) == 0:
+        return np.linspace(0, t_max, samples), np.full(samples, base_value)
+
+    grid = np.linspace(0, t_max, samples)
+
+    if step:
+        # step-hold: for each grid point, use the last known value at or before that time
+        idx = np.searchsorted(times, grid, side="right") - 1
+        idx = np.clip(idx, 0, len(values) - 1)
+        curve = values[idx]
+    else:
+        curve = np.interp(grid, times, values)
+
+    return grid, curve
+
+def _infer_window_trace(timestamps_ms, base_value=100.0, min_value=0.0, points_per_interval=30):
+    """
+    Synthetic reconstruction only.
+    Assumption:
+      - window decays linearly from base_value to min_value between two SENDMEs
+      - at each SENDME, window jumps back to base_value
+    """
+    if not timestamps_ms:
+        return {"time_ms": [], "window": []}
+
+    ts = sorted(float(x) for x in timestamps_ms)
+    times = [0.0]
+    windows = [base_value]
+
+    prev = 0.0
+    for t in ts:
+        if t <= prev:
+            continue
+
+        # linear decay from base_value to min_value over (prev, t)
+        grid = np.linspace(prev, t, points_per_interval, endpoint=False)
+        vals = np.linspace(base_value, min_value, points_per_interval, endpoint=False)
+
+        times.extend(grid.tolist())
+        windows.extend(vals.tolist())
+
+        # SENDME arrives at t: jump back
+        times.append(t)
+        windows.append(base_value)
+
+        prev = t
+
+    return {"time_ms": times, "window": windows}
 
 def _cdf_from_intervals(intervals_ms):
     if not intervals_ms:
         return np.array([]), np.array([])
     arr = np.sort(np.array(intervals_ms, dtype=float))
+    max_val = arr[-1]
+    norm = arr / max_val if max_val > 0 else arr
     cdf = np.linspace(0, 1, len(arr), endpoint=True)
-    return arr, cdf
+    return norm, cdf
 
 def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path, top_window_ms: float | None = None) -> None:
     top_window_ms = TOP_WINDOW_MS
@@ -125,28 +175,40 @@ def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path, top_w
     def _nan_if_none(value):
         return float("nan") if value is None else float(value)
 
-    base_ts_candidates = []
-    if tor_data.get("timestamps"):
-        base_ts_candidates.append(tor_data["timestamps"][0])
-    if tb_data.get("timestamps"):
-        base_ts_candidates.append(tb_data["timestamps"][0])
-    base_ts = min(base_ts_candidates) if base_ts_candidates else 0.0
+    # Use base_ts recorded by the analysis script to align markers with window_trace_ms
+    tor_base_ts = tor_data.get("base_ts", None)
+    tb_base_ts = tb_data.get("base_ts", None)
 
-    tor_ts = _to_ms(tor_data.get("timestamps", []), base_ts) if tor_data else []
-    tb_ts = _to_ms(tb_data.get("timestamps", []), base_ts) if tb_data else []
+    tor_ts = _to_ms(tor_data.get("timestamps", []), tor_base_ts) if (tor_data and tor_base_ts is not None) else []
+    tb_ts = _to_ms(tb_data.get("timestamps", []), tb_base_ts) if (tb_data and tb_base_ts is not None) else []
+
 
     tor_intervals_ms = [v * 1000.0 for v in tor_data.get("intervals", [])]
     tb_intervals_ms = [v * 1000.0 for v in tb_data.get("intervals", [])]
 
-    t_max = max(tor_ts + tb_ts, default=0.0) + 10
+    tor_trace = tor_data.get("window_trace_ms")
+    tb_trace = tb_data.get("window_trace_ms")
+
+    # If avg payload has no window_trace_ms, force user to choose a round
+    if not tor_trace or not tor_trace.get("time_ms"):
+        raise ValueError(
+            "Tor window_trace_ms missing. Use --round to load round_xxx/sendme_metrics.txt, or add window_trace_ms to avg_sendme_metrics.txt.")
+    if not tb_trace or not tb_trace.get("time_ms"):
+        raise ValueError(
+            "TorBox window_trace_ms missing. Use --round to load round_xxx/sendme_metrics.txt, or add window_trace_ms to avg_sendme_metrics.txt.")
+
+    t_max = max(
+        max(tor_trace.get("time_ms", []) or [0.0]),
+        max(tb_trace.get("time_ms", []) or [0.0]),
+    ) + 10.0
 
     tor_mean = _nan_if_none(tor_data.get("mean", float("nan")))
     tb_mean = _nan_if_none(tb_data.get("mean", float("nan")))
     tor_median = _nan_if_none(tor_data.get("median", float("nan")))
     tb_median = _nan_if_none(tb_data.get("median", float("nan")))
 
-    t, tor_window = _window_curve(tor_intervals_ms, t_max)
-    _, torbox_window = _window_curve(tb_intervals_ms, t_max)
+    t, tor_window = _window_curve(tor_trace, t_max, step=True)
+    _, torbox_window = _window_curve(tb_trace, t_max, step=True)
 
     # ===================== crop top panel by time window =====================
     if top_window_ms is not None and top_window_ms > 0:
@@ -182,8 +244,9 @@ def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path, top_w
     ax2 = fig.add_subplot(gs[1])
 
     # ---- top panel ----
-    l1, = ax1.plot(t_plot, tor_window_plot, linewidth=2.8, label="Tor pkg_window", zorder=3)
-    l2, = ax1.plot(t_plot, torbox_window_plot, linestyle="--", linewidth=2.8, label="TorBox pkg_window", zorder=3)
+    l1, = ax1.plot(t_plot, tor_window_plot, linewidth=2.8, label="Tor pkg_window", zorder=3, drawstyle="steps-post")
+    l2, = ax1.plot(t_plot, torbox_window_plot, linestyle="--", linewidth=2.8, label="TorBox pkg_window", zorder=3,
+                   drawstyle="steps-post")
 
     ax1.axhline(thr, linewidth=2.0, linestyle=(0, (5, 3)), zorder=1)
 
@@ -230,12 +293,13 @@ def plot_figures(metrics_root: Path, round_idx: int | None, out_dir: Path, top_w
         zorder=2,
     ) if len(x_tor) and len(x_tb) else ax2.fill_between([0], [0], alpha=0.0)
 
-    ax2.set_title("SENDME Interval Distribution (CDF)", pad=12)
-    ax2.set_xlabel("Interval (ms)")
-    ax2.set_ylabel("CDF")
+    ax2.set_title("SENDME Interval Distribution (归一化 CDF)", pad=12)
+    ax2.set_xlabel("归一化时间（相对比例）")
+    ax2.set_ylabel("归一化 CDF")
     if len(x_tor) or len(x_tb):
         xmin = min(np.min(x_tor) if len(x_tor) else np.min(x_tb), np.min(x_tb) if len(x_tb) else np.min(x_tor))
         xmax = max(np.max(x_tor) if len(x_tor) else np.max(x_tb), np.max(x_tb) if len(x_tb) else np.max(x_tor))
+        xmax = xmax if xmax > 0 else 1.0
         ax2.set_xlim(xmin, xmax * 1.05)
     ax2.set_ylim(0, 1.02)
     ax2.grid(alpha=0.25, linestyle="--", linewidth=0.8)
