@@ -354,6 +354,8 @@ class Tor_Node(Tor_base):
                             else None,
                         )
                         return
+                    if circuit.next_circid is not None:
+                        cell.circuit_id = circuit.next_circid
                     circuit.enqueue_relay(cell, out_sock=downstream_sock, is_data=False)
                     return
 
@@ -363,6 +365,8 @@ class Tor_Node(Tor_base):
             # downstream -> upstream: add one layer and forward upstream
             next_node = circuit.circuit_nodes[0]
             next_node.encrypt_forward(cell)
+            if circuit.prev_circid is not None:
+                cell.circuit_id = circuit.prev_circid
             circuit.enqueue_relay(cell, out_sock=next_node.sock, is_data=False)
 
         elif isinstance(cell, Cell_RelayEarly):
