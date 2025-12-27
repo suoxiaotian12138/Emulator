@@ -307,8 +307,7 @@ class Tor_Node(Tor_base):
                     self._ev("tor_handshake_fail",peer=str(sock.socket.getpeername()), side="server",error=str(e),version=getattr(sock.protocol, "version", None),ms=(time.perf_counter() - t_tor) * 1000.0)
                     raise
             else:
-                sock.protocol.version = sock.handshake.retrieve_versions(cell)
-                sock.channel.update_version(sock.protocol.version)
+                sock.handshake.retrieve_versions(cell)
         elif isinstance(cell, CellCerts):
             sock.handshake.retrieve_certs(cell)
         elif isinstance(cell, CellAuthChallenge):

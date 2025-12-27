@@ -320,8 +320,7 @@ class Tor_Client(Tor_base):
         # self.print("receive client cell_type:", type(cell))
         # self.print("cell content",cell)
         if isinstance(cell, CellVersions):
-            sock.protocol.version = sock.handshake.retrieve_versions(cell)
-            sock.channel.update_version(sock.protocol.version)
+            sock.handshake.retrieve_versions(cell)
             # self.print("sock protocol:", sock.protocol.version)
         elif isinstance(cell, CellCerts):
             sock.handshake.retrieve_certs(cell)

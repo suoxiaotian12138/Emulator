@@ -117,6 +117,11 @@ class Tor_Socket():
             self.peer = None
             self.peer_str = "not_connected"
 
+    def update_link_protocol_version(self, version: int):
+        """Synchronize negotiated link protocol version across components."""
+        self.protocol.version = version
+        self.channel.update_version(version)
+
     async def _ensure_injector(self):   # ★ 新增/重写
         """
         在 writer/peer 就绪后，如果打开开关且依赖齐全，则创建连接级注入器。
@@ -371,8 +376,7 @@ class Tor_Socket():
     async def tor_handshake_server(self, peer_version_cell: CellVersions, certs_cell, certs_path):
         version_cell = self.handshake.make_versions()
         await self.send_cell(version_cell)
-        self.protocol.version = self.handshake.retrieve_versions(peer_version_cell)
-        self.channel.update_version(self.protocol.version)
+        self.handshake.retrieve_versions(peer_version_cell)
         await self.send_cell(certs_cell)
         auth_cell = CellAuthChallenge()
         await self.send_cell(auth_cell)
@@ -588,6 +592,7 @@ class TorHandshake:
         self.peer_ed_identity_pub: bytes | None = None
         self.peer_tls_cert_der: bytes | None = None
         self.peer_cert_list: list[tuple[int, bytes]] = []
+        self._negotiated_version: int | None = None
 
     @staticmethod
     def _make_new_event():
@@ -608,7 +613,28 @@ class TorHandshake:
     def retrieve_versions(self, cell):
         assert isinstance(cell, CellVersions)
         logger.debug('Remote protocol versions: %s', cell.versions)
-        version = min(max(self.tor_protocol.SUPPORTED_VERSION), max(cell.versions))
+        # Ignore any subsequent VERSIONS once negotiated.
+        if self._negotiated_version is not None:
+            logger.debug(
+                'Ignoring duplicate VERSIONS cell; already negotiated version %s',
+                self._negotiated_version,
+            )
+            return self._negotiated_version
+
+        supported = set(self.tor_protocol.SUPPORTED_VERSION)
+        common_versions = supported.intersection(cell.versions)
+        if not common_versions:
+            self.version_event.set()
+            try:
+                asyncio.get_running_loop().create_task(self.tor_socket._abort())
+            except RuntimeError:
+                # If no running loop, defer to caller to close the socket.
+                pass
+            raise RuntimeError("No shared link protocol version with peer")
+
+        version = max(common_versions)
+        self._negotiated_version = version
+        self.tor_socket.update_link_protocol_version(version)
         self.version_event.set()
         return version
 
