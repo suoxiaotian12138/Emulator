@@ -317,8 +317,8 @@ class Tor_Client(Tor_base):
         return circuit
 
     async def handle_cell(self, cell, sock):
-        # self.print("receive client cell_type:", type(cell))
-        # self.print("cell content",cell)
+        self.print("receive client cell_type:", type(cell))
+        self.print("cell content",cell)
         if isinstance(cell, CellVersions):
             sock.handshake.retrieve_versions(cell)
             # self.print("sock protocol:", sock.protocol.version)

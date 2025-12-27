@@ -4,13 +4,15 @@ import struct
 import time
 import contextlib
 from pathlib import Path
+from enum import Enum, auto
 from typing import Optional, Callable, Awaitable, Any
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
 
-from examples.Tor_simplified.Tor_Cell import TorCell, CellCerts, CellAuthChallenge, TorCommands,\
-    CellVersions, CellNetInfo, AUTH_METHOD_ED25519_SHA256, CellAuthenticate
+from examples.Tor_simplified.Tor_Cell import TorCell, CellCerts, CellAuthChallenge, TorCommands, \
+    CellVersions, CellNetInfo, AUTH_METHOD_ED25519_SHA256, CellAuthenticate, CellVPadding
+
 from examples.Tor_simplified.Tor_Router import logger
 from examples.Tor_simplified.circid_alloc import Channel
 from tools.Packet.packet_TCP import ByteBuffer
@@ -359,6 +361,13 @@ class Tor_Socket():
                 cell = await self.recv_and_parse_cell()
                 if cell is None:
                     continue
+                try:
+                    if not self.handshake_done.is_set():
+                        self.handshake.guard_incoming_cell(cell)
+                except Exception as e:
+                    self.print(f"[HS-ERROR] {self.peer_str} {e}")
+                    await self._abort()
+                    break
                 await self.on_cell(cell, self)
             except Exception as e:
                 import traceback
@@ -369,9 +378,10 @@ class Tor_Socket():
     async def tor_handshake_client(self):
         version_cell = self.handshake.make_versions()
         await self.send_cell(version_cell)
+        await self.handshake.wait_for_responder_handshake()
         net_info_cell = await self.handshake.make_net_info(self.peer, self.local)
         await self.send_cell(net_info_cell)
-        self.handshake_done.set()
+        self.handshake.mark_done()
 
     async def tor_handshake_server(self, peer_version_cell: CellVersions, certs_cell, certs_path):
         version_cell = self.handshake.make_versions()
@@ -583,6 +593,15 @@ class TorProtocol:
         return cell.serialize(self.version)
 
 
+class HandshakeState(Enum):
+    INIT = auto()
+    GOT_VERSIONS = auto()
+    GOT_CERTS = auto()
+    GOT_AUTH_CHAL = auto()
+    GOT_NETINFO = auto()
+    DONE = auto()
+
+
 class TorHandshake:
     def __init__(self, tor_socket, tor_protocol=TorProtocol):
         self.tor_socket = tor_socket
@@ -593,6 +612,8 @@ class TorHandshake:
         self.peer_tls_cert_der: bytes | None = None
         self.peer_cert_list: list[tuple[int, bytes]] = []
         self._negotiated_version: int | None = None
+        self.state = HandshakeState.INIT
+        self._responder_info_ready = asyncio.Event()
 
     @staticmethod
     def _make_new_event():
@@ -601,6 +622,46 @@ class TorHandshake:
     def make_versions(self):
         version_cell = CellVersions(self.tor_protocol.SUPPORTED_VERSION)
         return version_cell
+
+    def _set_state(self, new_state: HandshakeState):
+        if new_state.value > self.state.value:
+            self.state = new_state
+
+    def guard_incoming_cell(self, cell):
+        if self.state == HandshakeState.DONE:
+            return
+
+        allowed_types = (CellVersions, CellCerts, CellAuthChallenge, CellNetInfo, CellVPadding)
+        if not isinstance(cell, allowed_types):
+            raise RuntimeError(f"Received non-handshake cell {type(cell).__name__} before handshake completion")
+
+        if isinstance(cell, CellVersions):
+            self._set_state(HandshakeState.GOT_VERSIONS)
+        elif isinstance(cell, CellCerts):
+            if self.state.value < HandshakeState.GOT_VERSIONS.value:
+                raise RuntimeError("Received CERTS before VERSIONS during handshake")
+            self._set_state(HandshakeState.GOT_CERTS)
+        elif isinstance(cell, CellAuthChallenge):
+            if self.state.value < HandshakeState.GOT_CERTS.value:
+                raise RuntimeError("Received AUTH_CHALLENGE before CERTS during handshake")
+            self._set_state(HandshakeState.GOT_AUTH_CHAL)
+        elif isinstance(cell, CellNetInfo):
+            if self.state.value < HandshakeState.GOT_AUTH_CHAL.value and self.tor_socket.handshake_initiator:
+                raise RuntimeError("Received NETINFO before AUTH_CHALLENGE during handshake")
+            self._set_state(HandshakeState.GOT_NETINFO)
+            if self.tor_socket.handshake_initiator:
+                self._responder_info_ready.set()
+            else:
+                self.mark_done()
+
+    async def wait_for_responder_handshake(self, wait_time: float = 60.0):
+        await asyncio.wait_for(self._responder_info_ready.wait(), wait_time)
+
+    def mark_done(self):
+        if self.state == HandshakeState.DONE:
+            return
+        self._set_state(HandshakeState.DONE)
+        self.tor_socket.handshake_done.set()
 
     async def make_net_info(self, remote_addr, local_addr, wait_time=60):
         await asyncio.wait_for(self.version_event.wait(), wait_time)
@@ -658,6 +719,14 @@ class TorHandshake:
 
     def retrieve_net_info(self, cell):
         logger.debug('Retrieving NET_INFO cell...')
+        timestamp = getattr(cell, "timestamp", None)
+        try:
+            if isinstance(timestamp, (int, float)):
+                skew = abs(time.time() - timestamp)
+                if skew > 3600:
+                    logger.warning("NETINFO time skew warning: %.2fs", skew)
+        except Exception:
+            logger.debug("Failed to evaluate NETINFO timestamp skew", exc_info=True)
 
     def recv_authenticate(self, cell):
         logger.debug('Retrieving authenticate cell...')
