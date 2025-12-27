@@ -37,6 +37,7 @@ class Tor_Node(Tor_base):
         self.ntor_pvk, self.ntor_puk = curve25519_setup()
         self.ed_pvk, self.ed_puk = ed25519_setup()
         self.ed_sign_sk, self.ed_sign_pk = ed25519_setup()
+        self.ks_link_sk, self.ks_link_pk = ed25519_setup()
 
         self.rsa_id_sk, _ = rsa_setup()
         self.rsa_onion_sk, _ = rsa_setup()
@@ -163,6 +164,12 @@ class Tor_Node(Tor_base):
                             source_ip=self.host,
                             on_cell=self.handle_cell,
                             node_id=self.node_id,
+                            role="relay",
+                            rsa_identity_key=self.rsa_id_sk,
+                            ed_identity_key=self.ed_pvk,
+                            ed_signing_key=self.ed_sign_sk,
+                            link_auth_key=self.ks_link_sk,
+                            tls_cert_der=self.tls_cert_der,
                             limiter=self.limiter,
                             **get_args(sim_ip=self.sim_ip)
                         )

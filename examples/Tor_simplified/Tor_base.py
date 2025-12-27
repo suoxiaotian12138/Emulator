@@ -132,6 +132,12 @@ class Tor_base:
                 source_ip=self.host,
                 on_cell=self.handle_cell,
                 node_id=self.node_id,
+                role="relay",
+                rsa_identity_key=getattr(self, "rsa_id_sk", None),
+                ed_identity_key=getattr(self, "ed_pvk", None),
+                ed_signing_key=getattr(self, "ed_sign_sk", None),
+                link_auth_key=getattr(self, "ks_link_sk", None),
+                tls_cert_der=getattr(self, "tls_cert_der", None),
                 limiter=self.limiter,
                 **get_args(sim_ip=self.sim_ip)
             )

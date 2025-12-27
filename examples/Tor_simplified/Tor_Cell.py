@@ -688,10 +688,7 @@ class TorCommands:
 
     @classmethod
     def get_by_num(cls, num):
-        cell_type = cls._map.get(num, None)
-        if not cell_type:
-            raise Exception('Cell type ({}) not found'.format(num))
-        return cell_type
+        return cls._map.get(num)
 
     # The relay commands.
     #

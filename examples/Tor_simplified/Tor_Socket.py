@@ -3,6 +3,7 @@ import ssl
 import struct
 import time
 import contextlib
+import hashlib
 from pathlib import Path
 from enum import Enum, auto
 from typing import Optional, Callable, Awaitable, Any
@@ -11,7 +12,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
 
 from examples.Tor_simplified.Tor_Cell import TorCell, CellCerts, CellAuthChallenge, TorCommands, \
-    CellVersions, CellNetInfo, AUTH_METHOD_ED25519_SHA256, CellAuthenticate, CellVPadding
+    CellVersions, CellNetInfo, AUTH_METHOD_ED25519_SHA256, CellAuthenticate, CellVPadding, CellPadding
 
 from examples.Tor_simplified.Tor_Router import logger
 from examples.Tor_simplified.circid_alloc import Channel
@@ -27,7 +28,13 @@ from tools.Crypt.crypt_common import (
     rsa_identity_digest,
     debug_build_crosscert,
     CT_RSA_ID_X509,
-    CT_RSA_TO_ED_CROSS
+    CT_RSA_TO_ED_CROSS,
+    CT_ED_ID_SIGNING,
+    CT_ED_SIGNING_TLS,
+    build_ed25519_cert,
+    build_rsa_to_ed_crosscert,
+    rsa_identity_x509_der,
+    hours_since_epoch,
 )
 
 from tools.Network_Management.tls_registry import (
@@ -45,6 +52,12 @@ class Tor_Socket():
         writer: asyncio.StreamWriter = None,
         on_cell=None,
         *,
+        role: str = "client",
+        rsa_identity_key=None,
+        ed_identity_key=None,
+        ed_signing_key=None,
+        link_auth_key=None,
+        tls_cert_der: bytes | None = None,
         limiter: Optional[BandwidthLimiter] = None,
         enable_delay: bool = False,                     # ★ 一键总开关（默认关）
         sim_ip: Optional[str] = None,                   # ★ 本端仿真IP
@@ -89,6 +102,28 @@ class Tor_Socket():
         self._wakeup = asyncio.Event()  # 有新数据时唤醒 writer
         self._writer_task = None
         self._last_queue_log = 0.0
+
+        self.role = role
+        if self.role not in {"client", "relay"}:
+            raise ValueError("role must be either 'client' or 'relay'")
+        self.rsa_identity_key = rsa_identity_key
+        self.ed_identity_key = ed_identity_key
+        self.ed_signing_key = ed_signing_key
+        self.link_auth_key = link_auth_key
+        self.tls_cert_der = tls_cert_der
+
+        if self.role == "relay":
+            missing = [
+                name for name, val in (
+                    ("rsa_identity_key", self.rsa_identity_key),
+                    ("ed_identity_key", self.ed_identity_key),
+                    ("ed_signing_key", self.ed_signing_key),
+                    ("link_auth_key", self.link_auth_key),
+                )
+                if val is None
+            ]
+            if missing:
+                raise ValueError(f"relay role requires keys: {', '.join(missing)}")
 
         self.channel = Channel(
             channel_id=self.peer_str,
@@ -183,6 +218,12 @@ class Tor_Socket():
                    ssl_ctx: ssl.SSLContext | None = None,
                    node_id: Optional[str] = None,
                    *,
+                   role: str = "client",
+                   rsa_identity_key=None,
+                   ed_identity_key=None,
+                   ed_signing_key=None,
+                   link_auth_key=None,
+                   tls_cert_der: bytes | None = None,
                    limiter: Optional[BandwidthLimiter] = None,
                    enable_delay: bool = False,
                    sim_ip: Optional[str] = None,
@@ -204,6 +245,12 @@ class Tor_Socket():
             writer=writer,
             on_cell=on_cell,
             node_id=node_id,
+            role=role,
+            rsa_identity_key=rsa_identity_key,
+            ed_identity_key=ed_identity_key,
+            ed_signing_key=ed_signing_key,
+            link_auth_key=link_auth_key,
+            tls_cert_der=tls_cert_der,
             enable_delay=enable_delay,
             sim_ip=sim_ip,
             delay_mapping=delay_mapping,
@@ -378,10 +425,60 @@ class Tor_Socket():
     async def tor_handshake_client(self):
         version_cell = self.handshake.make_versions()
         await self.send_cell(version_cell)
+        if self.role == "relay":
+            certs_cell = self._build_initiator_certs()
+            await self.send_cell(certs_cell)
+            await self.handshake.wait_for_auth_challenge()
+            auth_cell = self._make_authenticate_cell()
+            await self.send_cell(auth_cell)
         await self.handshake.wait_for_responder_handshake()
         net_info_cell = await self.handshake.make_net_info(self.peer, self.local)
         await self.send_cell(net_info_cell)
         self.handshake.mark_done()
+
+    def _build_initiator_certs(self) -> CellCerts:
+        ed_id_pub32 = self.ed_identity_key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        ed_sign_pub32 = self.ed_signing_key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+
+        exp_hr = hours_since_epoch() + 24 * 7
+        cert4 = build_ed25519_cert(
+            cert_type=CT_ED_ID_SIGNING,
+            issuer_sk=self.ed_identity_key,
+            subject_key_bytes=ed_sign_pub32,
+            exp_hours=exp_hr,
+            issuer_pub_for_ext=ed_id_pub32,
+            keytype=1
+        )
+
+        tls_hash32 = hashlib.sha256(self.tls_cert_der or b"").digest()[:32]
+        cert5 = build_ed25519_cert(
+            cert_type=CT_ED_SIGNING_TLS,
+            issuer_sk=self.ed_signing_key,
+            subject_key_bytes=tls_hash32,
+            exp_hours=exp_hr,
+            issuer_pub_for_ext=ed_sign_pub32,
+            keytype=2
+        )
+        cert7 = build_rsa_to_ed_crosscert(
+            self.rsa_identity_key,
+            ed_id_pub32,
+            exp_hr,
+        )
+        cert2 = rsa_identity_x509_der(self.rsa_identity_key)
+        return CellCerts([
+            (CT_RSA_ID_X509, cert2),
+            (CT_ED_ID_SIGNING, cert4),
+            (CT_ED_SIGNING_TLS, cert5),
+            (CT_RSA_TO_ED_CROSS, cert7),
+        ])
+
+    def _make_authenticate_cell(self) -> CellAuthenticate:
+        if self.handshake.auth_challenge is None:
+            raise RuntimeError("No auth challenge received; cannot authenticate")
+        signature = self.link_auth_key.sign(self.handshake.auth_challenge)
+        return CellAuthenticate(auth_type=AUTH_METHOD_ED25519_SHA256, auth_data=signature)
 
     async def tor_handshake_server(self, peer_version_cell: CellVersions, certs_cell, certs_path):
         version_cell = self.handshake.make_versions()
@@ -545,6 +642,20 @@ class Tor_Socket():
             await self.buffer.pop(1)
             return None
 
+        if cell_cls is None:
+            is_var_len = cmd_num in (7, 12, 13) or cmd_num >= 128
+            if is_var_len:
+                hdr_plus = await self._wait_for_bytes(header_len + 2, consume=False)
+                if hdr_plus is None:
+                    return None
+                (payload_len,) = struct.unpack(self.protocol.length_format, hdr_plus[-2:])
+                total_len = header_len + 2 + payload_len
+            else:
+                total_len = header_len + TorCell.MAX_PAYLOAD_SIZE
+            skipped = await self._wait_for_bytes(total_len, consume=True)
+            self.print(f"[UnknownCell] cmd={cmd_num} skipped={len(skipped) if skipped else 0}")
+            return None
+
         if cell_cls.is_var_len():
             hdr_plus = await self._wait_for_bytes(header_len + 2, consume=False)
             if hdr_plus is None:
@@ -614,6 +725,8 @@ class TorHandshake:
         self._negotiated_version: int | None = None
         self.state = HandshakeState.INIT
         self._responder_info_ready = asyncio.Event()
+        self._auth_challenge: bytes | None = None
+        self._auth_chal_event = asyncio.Event()
 
     @staticmethod
     def _make_new_event():
@@ -631,7 +744,14 @@ class TorHandshake:
         if self.state == HandshakeState.DONE:
             return
 
-        allowed_types = (CellVersions, CellCerts, CellAuthChallenge, CellNetInfo, CellVPadding)
+        allowed_types = (
+            CellVersions,
+            CellCerts,
+            CellAuthChallenge,
+            CellNetInfo,
+            CellVPadding,
+            CellPadding,
+        )
         if not isinstance(cell, allowed_types):
             raise RuntimeError(f"Received non-handshake cell {type(cell).__name__} before handshake completion")
 
@@ -645,6 +765,8 @@ class TorHandshake:
             if self.state.value < HandshakeState.GOT_CERTS.value:
                 raise RuntimeError("Received AUTH_CHALLENGE before CERTS during handshake")
             self._set_state(HandshakeState.GOT_AUTH_CHAL)
+            self._auth_challenge = cell.challenge
+            self._auth_chal_event.set()
         elif isinstance(cell, CellNetInfo):
             if self.state.value < HandshakeState.GOT_AUTH_CHAL.value and self.tor_socket.handshake_initiator:
                 raise RuntimeError("Received NETINFO before AUTH_CHALLENGE during handshake")
@@ -657,6 +779,13 @@ class TorHandshake:
     async def wait_for_responder_handshake(self, wait_time: float = 60.0):
         await asyncio.wait_for(self._responder_info_ready.wait(), wait_time)
 
+    async def wait_for_auth_challenge(self, wait_time: float = 60.0):
+        await asyncio.wait_for(self._auth_chal_event.wait(), wait_time)
+
+    @property
+    def auth_challenge(self) -> bytes | None:
+        return self._auth_challenge
+
     def mark_done(self):
         if self.state == HandshakeState.DONE:
             return
@@ -668,7 +797,11 @@ class TorHandshake:
         logger.debug('Sending NET_INFO cell...')
         other_or = remote_addr[0]
         this_or = local_addr[0]
-        net_info_cell = CellNetInfo(int(time.time()), other_or, this_or)
+        if getattr(self.tor_socket, "role", "client") == "client":
+            ts = 0
+        else:
+            ts = int(time.time())
+        net_info_cell = CellNetInfo(ts, other_or, this_or)
         return net_info_cell
 
     def retrieve_versions(self, cell):
