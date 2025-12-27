@@ -424,7 +424,11 @@ class Tor_Socket():
 
     async def tor_handshake_client(self):
         version_cell = self.handshake.make_versions()
+
         await self.send_cell(version_cell)
+
+        await asyncio.wait_for(self.handshake.version_event.wait(), 60.0)
+
         if self.role == "relay":
             certs_cell = self._build_initiator_certs()
             await self.send_cell(certs_cell)
@@ -435,6 +439,20 @@ class Tor_Socket():
         net_info_cell = await self.handshake.make_net_info(self.peer, self.local)
         await self.send_cell(net_info_cell)
         self.handshake.mark_done()
+
+    async def tor_handshake_server(self, peer_version_cell: CellVersions, certs_cell, certs_path):
+        version_cell = self.handshake.make_versions()
+        await self.send_cell(version_cell)
+        self.handshake.retrieve_versions(peer_version_cell)
+        await self.send_cell(certs_cell)
+        auth_cell = CellAuthChallenge()
+        await self.send_cell(auth_cell)
+        self.handshake._auth_challenge = auth_cell.challenge
+        self.handshake._auth_chal_event.set()  # optional but useful
+        self.handshake._set_state(HandshakeState.SENT_AUTH_CHAL)
+
+        net_info_cell = await self.handshake.make_net_info(self.peer, self.socket.getsockname())
+        await self.send_cell(net_info_cell)
 
     def _build_initiator_certs(self) -> CellCerts:
         ed_id_pub32 = self.ed_identity_key.public_key().public_bytes(
@@ -480,15 +498,7 @@ class Tor_Socket():
         signature = self.link_auth_key.sign(self.handshake.auth_challenge)
         return CellAuthenticate(auth_type=AUTH_METHOD_ED25519_SHA256, auth_data=signature)
 
-    async def tor_handshake_server(self, peer_version_cell: CellVersions, certs_cell, certs_path):
-        version_cell = self.handshake.make_versions()
-        await self.send_cell(version_cell)
-        self.handshake.retrieve_versions(peer_version_cell)
-        await self.send_cell(certs_cell)
-        auth_cell = CellAuthChallenge()
-        await self.send_cell(auth_cell)
-        net_info_cell = await self.handshake.make_net_info(self.peer, self.socket.getsockname())
-        await self.send_cell(net_info_cell)
+
 
     async def send_cells(self, cells):
         for cell in cells:
@@ -578,6 +588,10 @@ class Tor_Socket():
             await self._abort()
 
     async def _write_once(self, blob: bytes):
+        # if (len(blob) % 514) != 0:
+        #     self.print(f"[WRITE-MISALIGN] len={len(blob)} not multiple of 514 head32={blob[:32].hex()}")
+        #     raise ValueError("write blob misaligned")
+
         if self._closing.is_set() or self.writer is None:
             return
         try:
@@ -664,6 +678,7 @@ class Tor_Socket():
 
         cell_cls = None
         circ_id = None
+        cmd_num = None
         header_len = primary_header_len
         last_error = None
         last_header_len = primary_header_len
@@ -682,15 +697,16 @@ class Tor_Socket():
             except Exception as e:  # struct.error or unknown command
                 last_error = e
                 last_header_len = hlen
-                continue
+            continue
 
         if cell_cls is None:
-            self.print(f"Header unpack error: {last_error}")
-            await self.buffer.pop(last_header_len)
-            return None
+            if cmd_num is None:
+                self.print(f"Header unpack error: {last_error}")
+                await self.buffer.pop(last_header_len)
+                return None
 
-        if cell_cls is None:
-            is_var_len = cmd_num in (7, 12, 13) or cmd_num >= 128
+            is_var_len = cmd_num ==7 or cmd_num >= 128
+
             if is_var_len:
                 hdr_plus = await self._wait_for_bytes(header_len + 2, consume=False)
                 if hdr_plus is None:
@@ -702,6 +718,7 @@ class Tor_Socket():
             skipped = await self._wait_for_bytes(total_len, consume=True)
             self.print(f"[UnknownCell] cmd={cmd_num} skipped={len(skipped) if skipped else 0}")
             return None
+
 
         if cell_cls.is_var_len():
             hdr_plus = await self._wait_for_bytes(header_len + 2, consume=False)
@@ -716,8 +733,22 @@ class Tor_Socket():
         if raw is None:
             return None
 
+        hdr_hex = raw[:header_len].hex() if raw else ""
+        self.print(f"[HDR] ver={self.protocol.version} hlen={header_len} circ={circ_id} cmd={cmd_num} hdr={hdr_hex}")
+
+
+        if not cell_cls.is_var_len():
+            expected_len = header_len + TorCell.MAX_PAYLOAD_SIZE
+            if self.protocol.version >= 4 and expected_len == 514 and len(raw) != expected_len:
+                raise ValueError(f"[RECV-LEN] cmd={cmd_num} raw_len={len(raw)} expected={expected_len}")
+            print(f"[RecvCell] cmd={cmd_num} raw_len={len(raw)}")
+        else:
+            print(f"[RecvCell] cmd={cmd_num} raw_len={len(raw)}")
+
         payload_offset = header_len + (2 if cell_cls.is_var_len() else 0)
         payload = raw[payload_offset:]
+
+
         try:
             return self.protocol.deserialize(cell_cls, payload, circ_id)
         except Exception as e:
@@ -748,17 +779,34 @@ class TorProtocol:
     def deserialize(self, command, payload, circuit_id=0):
         return TorCell.deserialize(command, circuit_id, payload, self.version)
     def serialize(self, cell):
-        return cell.serialize(self.version)
+        raw = cell.serialize(self.version)
+        header_size = 5 if (self.version >= 4) else 3
+        if not cell.is_var_len() and self.version >= 4:
+            if len(raw) != 514:
+                head_hex = raw[:32].hex()
+                raise ValueError(f"[SEND-CHECK] cmd={cell.NUM} payload_len={len(raw) - header_size} raw_len={len(raw)} head32={head_hex}")
+        return raw
+
 
 
 class HandshakeState(Enum):
     INIT = auto()
-    GOT_VERSIONS = auto()
-    GOT_CERTS = auto()
-    GOT_AUTH_CHAL = auto()
-    GOT_NETINFO = auto()
-    DONE = auto()
 
+    # version negotiation
+    GOT_VERSIONS = auto()
+
+    # certificates exchange (either recv or send depending on role)
+    GOT_CERTS = auto()
+
+    # auth challenge
+    SENT_AUTH_CHAL = auto()   # responder: generated and sent AUTH_CHALLENGE
+    GOT_AUTH_CHAL = auto()    # initiator: received AUTH_CHALLENGE
+
+    # netinfo
+    SENT_NETINFO = auto()
+    GOT_NETINFO = auto()
+
+    DONE = auto()
 
 class TorHandshake:
     def __init__(self, tor_socket, tor_protocol=TorProtocol):
@@ -795,6 +843,7 @@ class TorHandshake:
             CellVersions,
             CellCerts,
             CellAuthChallenge,
+            CellAuthenticate,
             CellNetInfo,
             CellVPadding,
             CellPadding,
@@ -804,6 +853,13 @@ class TorHandshake:
 
         if isinstance(cell, CellVersions):
             self._set_state(HandshakeState.GOT_VERSIONS)
+
+        elif isinstance(cell, CellAuthenticate):
+            if self.state.value < HandshakeState.SENT_AUTH_CHAL.value:
+                raise RuntimeError("Received AUTHENTICATE before AUTH_CHALLENGE during handshake")
+            # optional: verify signature here
+            # self._set_state(HandshakeState.GOT_AUTH_CHAL)  # add a state, or just keep GOT_AUTH_CHAL
+
         elif isinstance(cell, CellCerts):
             if self.state.value < HandshakeState.GOT_VERSIONS.value:
                 raise RuntimeError("Received CERTS before VERSIONS during handshake")

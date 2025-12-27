@@ -552,16 +552,41 @@ class CellAuthenticate(TorCell):
         self.auth_type = auth_type
         self.auth_data = auth_data
 
+    @classmethod
+    def is_var_len(cls):
+        return True
+
     def _serialize_payload(self) -> bytes:
+        # payload = 2B auth_type | 2B auth_len | auth_data
+        if len(self.auth_data) > 0xFFFF:
+            raise ValueError(f"AUTHENTICATE auth_data too long: {len(self.auth_data)}")
         return struct.pack("!HH", self.auth_type, len(self.auth_data)) + self.auth_data
+
+    def serialize(self, proto_version, negotiating=False):
+        # varcell header: circid | cmd | len(2B) | body
+        if proto_version < 4:
+            hdr = struct.pack("!HB", self.circuit_id, self.NUM)  # 2B circid
+        else:
+            hdr = struct.pack("!IB", self.circuit_id, self.NUM)  # 4B circid
+
+        body = self._serialize_payload()
+        if len(body) > 0xFFFF:
+            raise ValueError(f"AUTHENTICATE body too long: {len(body)}")
+
+        raw = hdr + struct.pack("!H", len(body)) + body
+        return raw
 
     @staticmethod
     def _deserialize_payload(payload: bytes, proto_version: int):
+        # 注意：这里的 payload 应该是“body”（已经按 varcell length 截出来了）
         if len(payload) < 4:
             raise ValueError("AUTHENTICATE too short")
         auth_type, auth_len = struct.unpack_from("!HH", payload, 0)
+        if len(payload) < 4 + auth_len:
+            raise ValueError(f"AUTHENTICATE truncated: body_len={len(payload)} need={4+auth_len}")
         auth = payload[4:4+auth_len]
         return {"auth_type": auth_type, "auth_data": auth}
+
 
 class CellNetInfo(TorCell):
     """
@@ -612,10 +637,58 @@ class CellNetInfo(TorCell):
         return payload
 
     @staticmethod
-    def _deserialize_payload(payload, proto_version):
-        our_address_length = int(struct.unpack('!B', payload[5:][:1])[0])
-        our_address = socket.inet_ntoa(payload[6:][:our_address_length])
-        return {'timestamp': '', 'other_or': '', 'this_or': our_address}
+    def _deserialize_payload(payload: bytes, proto_version: int):
+        # payload is the fixed 509-byte body (for fixed-length cells)
+        if len(payload) < 4:
+            raise ValueError("NETINFO too short (no timestamp)")
+
+        off = 0
+
+        # 1) timestamp (uint32)
+        (ts,) = struct.unpack_from("!I", payload, off)
+        off += 4
+
+        def parse_addr(buf: bytes, pos: int):
+            # Tor ADDR: type(1) + len(1) + value(len)
+            if pos + 2 > len(buf):
+                raise ValueError("NETINFO addr header truncated")
+            atype = buf[pos]
+            alen = buf[pos + 1]
+            pos += 2
+            if pos + alen > len(buf):
+                raise ValueError("NETINFO addr value truncated")
+
+            aval = buf[pos:pos + alen]
+            pos += alen
+
+            # Only decode IPv4/IPv6 here; others return empty string
+            if atype == 0x04 and alen == 4:
+                ip = socket.inet_ntoa(aval)
+            elif atype == 0x06 and alen == 16:
+                ip = socket.inet_ntop(socket.AF_INET6, aval)
+            else:
+                ip = ""
+
+            return ip, pos
+
+        # 2) other_or address (one ADDR)
+        other_or, off = parse_addr(payload, off)
+
+        # 3) number of this_or addresses
+        if off >= len(payload):
+            n = 0
+        else:
+            n = payload[off]
+            off += 1
+
+        # 4) this_or addresses (N ADDR)
+        this_or = ""
+        for _ in range(n):
+            ip, off = parse_addr(payload, off)
+            if not this_or and ip:
+                this_or = ip
+
+        return {"timestamp": ts, "other_or": other_or, "this_or": this_or}
 
     def _args_str(self):
         return 'timestamp = {!r}, other_or = {!r}, this_or = {!r}'.format(self.timestamp, self.other_or, self.this_or)
