@@ -216,6 +216,9 @@ class Tor_Node(Tor_base):
         circuit = sock.channel.recv_map.get(circuit_id)
         cell = circuit.make_relay(inner_cell=extend_cell, relay_type=CellRelay)
         sock = circuit.circuit_nodes[0].sock
+        # Upstream must see the circuit ID it negotiated on that link.
+        if circuit.prev_circid is not None:
+            cell.circuit_id = circuit.prev_circid
         circuit.enqueue_relay(cell, out_sock=sock, is_data=False)
         self._ev(
             "cell_trace", circ_id=circuit_id, peer=str(sock.socket.getpeername()),
