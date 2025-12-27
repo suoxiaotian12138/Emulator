@@ -630,16 +630,63 @@ class Tor_Socket():
             return await self.buffer.peek(size)
 
     async def recv_and_parse_cell(self):
-        header_len = struct.calcsize(self.protocol.header_format)
-        header = await self._wait_for_bytes(header_len, consume=False)
+        """Receive one cell from the buffered stream and deserialize it.
+
+        During link protocol negotiation we may not yet know whether the peer
+        is using 2-byte or 4-byte circuit IDs. If parsing with the currently
+        configured header format fails (for example because the peer already
+        speaks v4 and is sending 4-byte circuit IDs), fall back to trying the
+        4-byte header layout before giving up. This keeps the buffer aligned
+        and prevents unknown command errors that break circuit extension.
+        """
+
+        primary_header_len = struct.calcsize(self.protocol.header_format)
+        header = await self._wait_for_bytes(primary_header_len, consume=False)
+
         if header is None:
             return None
-        try:
-            circ_id, cmd_num = struct.unpack(self.protocol.header_format, header)
-            cell_cls = TorCommands.get_by_num(cmd_num)
-        except struct.error as e:
-            self.print(f"Header unpack error: {e}")
-            await self.buffer.pop(1)
+
+        parse_attempts = [
+            (self.protocol.header_format, primary_header_len, self.protocol.version, header)
+        ]
+
+        # If handshake is not done and we are still on a pre-v4 header, also try
+        # to parse using the v4 (4-byte circID) format so we don't misalign the
+        # stream when the peer speaks a newer version.
+        if not self.handshake_done.is_set() and self.protocol.version < 4:
+            alt_format = '!IB'
+            alt_len = struct.calcsize(alt_format)
+            if alt_len > len(header):
+                header = await self._wait_for_bytes(alt_len, consume=False)
+                if header is None:
+                    return None
+            parse_attempts.append((alt_format, alt_len, 4, header))
+
+        cell_cls = None
+        circ_id = None
+        header_len = primary_header_len
+        last_error = None
+        last_header_len = primary_header_len
+
+        for fmt, hlen, implied_version, hdr in parse_attempts:
+            try:
+                circ_id, cmd_num = struct.unpack(fmt, hdr[:hlen])
+                cell_cls = TorCommands.get_by_num(cmd_num)
+                if cell_cls is None:
+                    raise ValueError(f"Unknown command {cmd_num}")
+                header_len = hlen
+                last_header_len = hlen
+                if implied_version > self.protocol.version:
+                    self.update_link_protocol_version(implied_version)
+                break
+            except Exception as e:  # struct.error or unknown command
+                last_error = e
+                last_header_len = hlen
+                continue
+
+        if cell_cls is None:
+            self.print(f"Header unpack error: {last_error}")
+            await self.buffer.pop(last_header_len)
             return None
 
         if cell_cls is None:
