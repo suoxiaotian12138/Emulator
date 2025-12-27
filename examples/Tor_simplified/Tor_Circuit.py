@@ -7,6 +7,7 @@ from examples.Tor_simplified.Tor_Crypt import NtorKeyAgreement
 
 # from torpy.keyagreement import NtorKeyAgreement
 from examples.Tor_simplified.Tor_Cell import *
+from examples.Tor_simplified.circid_alloc import Channel, CircuitRef, CircuitState, allocate_circid
 import logging
 from collections import deque
 from dataclasses import dataclass
@@ -41,28 +42,29 @@ class Tor_CircuitsList:
     GLOBAL_CIRCUIT_ID = 0
 
     def __init__(self, is_client=True):
-        self.msb = is_client
         self._circuits_map = {}
+        self.is_client = is_client
 
     def values(self):
         return self._circuits_map.items()
 
-    async def _get_next_circuit_id(self):
+    async def _next_circuit_uid(self):
         async with Tor_CircuitsList.LOCK:
             Tor_CircuitsList.GLOBAL_CIRCUIT_ID += 1
-            circuit_id = Tor_CircuitsList.GLOBAL_CIRCUIT_ID
-        if self.msb:
-            circuit_id |= 0x80000000
-        return circuit_id
+            return Tor_CircuitsList.GLOBAL_CIRCUIT_ID
 
-    async def create_new_client(self):
-        circuit_id = await self._get_next_circuit_id()
-        circuit = TorCircuit(circuit_id, role="client")
+    async def create_new_client(self, channel: Channel):
+        circuit_uid = await self._next_circuit_uid()
+        circid = allocate_circid(channel)
+        circuit = TorCircuit(circuit_uid, role="client")
+        circuit.bind_prev(channel, circid)
         self._circuits_map[circuit.id] = circuit
         return circuit
 
-    async def create_circuit_server(self, circuit_id):
-        circuit = TorCircuit(circuit_id, role="server")
+    async def create_circuit_server(self, circuit_id, channel: Channel):
+        circuit_uid = await self._next_circuit_uid()
+        circuit = TorCircuit(circuit_uid, role="server")
+        circuit.bind_prev(channel, circuit_id)
         self._circuits_map[circuit.id] = circuit
         return circuit
 
@@ -132,9 +134,11 @@ class ServerCircuitOps(CircuitRoleOps):
         return self.decrypt(cell)
 
 
-class TorCircuit:
+class TorCircuit(CircuitRef):
     def __init__(self, circuit_id, role: str):
-        self._id = circuit_id
+        super().__init__(circuit_id=circuit_id)
+        self.internal_id = circuit_id
+        self.state = CircuitState.OPENING
         self.streams = StreamsList(self)
         self.buffer = Queue()
         self._relay_send_lock = asyncio.Lock()
@@ -267,7 +271,7 @@ class TorCircuit:
 
     @property
     def id(self):
-        return self._id
+        return self.circuit_id
 
     @property
     def nodes_count(self):
@@ -420,7 +424,7 @@ class CircuitManager:
             return
         try:
             # Adjust if your project uses another destroy cell constructor
-            destroy = CellDestroy(circuit_id=circ_id)
+            destroy = CellDestroy(circuit_id=circ_id, reason=0)
             asyncio.create_task(sock.send_cell(destroy))
         except Exception:
             pass

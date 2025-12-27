@@ -228,7 +228,7 @@ class Tor_Client(Tor_base):
 
     async def create_circuit(self, socket, hops_count=3, extend_routers=None):
         # print(f"[create_circuit] begin -> guard {self.guard.addr} hops={hops_count}")
-        circuit = await self.circuit_list.create_new_client()
+        circuit = await self.circuit_list.create_new_client(socket.channel)
         #guard选择记录
         snap = self.consensus.get_consensus_snapshot()
         t0_total = time.perf_counter()
@@ -321,6 +321,7 @@ class Tor_Client(Tor_base):
         # self.print("cell content",cell)
         if isinstance(cell, CellVersions):
             sock.protocol.version = sock.handshake.retrieve_versions(cell)
+            sock.channel.update_version(sock.protocol.version)
             # self.print("sock protocol:", sock.protocol.version)
         elif isinstance(cell, CellCerts):
             sock.handshake.retrieve_certs(cell)
@@ -329,7 +330,7 @@ class Tor_Client(Tor_base):
         elif isinstance(cell, CellNetInfo):
             sock.handshake.retrieve_net_info(cell)
         elif isinstance(cell, CellCreated2):
-            circuit = self.circuit_list.get_by_id(cell.circuit_id)
+            circuit = sock.channel.recv_map.get(cell.circuit_id)
             circuit.created_cell = cell
             self._ev(
                 "cell_trace", circ_id=cell.circuit_id, peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}",
@@ -337,7 +338,7 @@ class Tor_Client(Tor_base):
             )
             circuit.connect_event.set()
         elif isinstance(cell, CellRelay):
-            circuit = self.circuit_list.get_by_id(cell.circuit_id)
+            circuit = sock.channel.recv_map.get(cell.circuit_id)
             if circuit is None:
                 self.print(f"[client] unknown circuit_id={cell.circuit_id} (relay)")
                 return

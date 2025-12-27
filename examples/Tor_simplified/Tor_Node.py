@@ -11,6 +11,7 @@ from collections import defaultdict
 from examples.Tor_simplified.Tor_Cell import *
 from examples.Tor_simplified.Tor_base import Tor_base
 from examples.Tor_simplified.Tor_Circuit import Tor_CircuitsList
+from examples.Tor_simplified.circid_alloc import allocate_circid, validate_incoming_create_circid
 from examples.Tor_simplified.Tor_Descriptor import TorDescriptor_build
 from examples.Tor_simplified.Tor_Router import Tor_Router_simple
 from examples.Tor_simplified.Tor_Crypt import NtorServerKeyAgreement
@@ -126,7 +127,8 @@ class Tor_Node(Tor_base):
     async def create_circuit(self, create_cell, sock, circuit_id):
         """Quickly select several random nodes and freely add nodes, such as exit nodes"""
         t0 = time.perf_counter()
-        circuit = await self.circuit_list.create_circuit_server(circuit_id)
+        validate_incoming_create_circid(sock.channel, circuit_id, remote_initiator=not sock.handshake_initiator)
+        circuit = await self.circuit_list.create_circuit_server(circuit_id, sock.channel)
         circuit.scheduler = self._circuit_scheduler
         self._ev(
             "cell_trace", circ_id=circuit_id, peer=str(sock.socket.getpeername()),
@@ -187,8 +189,11 @@ class Tor_Node(Tor_base):
         simple_node = Tor_Router_simple(sock)
         circuit.circuit_nodes.append(simple_node)
 
+        circid_out = allocate_circid(sock.channel)
+        circuit.bind_next(sock.channel, circid_out)
+
         # 发送下游 CREATE2，计时并记录是否成功（下游会回 EXTENDED2）
-        create2 = Cell_Create2(handshake_type=handshake_type, onion_skin=skin, circuit_id=circuit_id)
+        create2 = Cell_Create2(handshake_type=handshake_type, onion_skin=skin, circuit_id=circid_out)
         t_ext = time.perf_counter()
         try:
             await sock.send_cell(create2)
@@ -204,11 +209,11 @@ class Tor_Node(Tor_base):
                      ms=(time.perf_counter() - t_ext) * 1000.0)
             raise
 
-    async def reply_extend(self, cell: CellCreated2):
+    async def reply_extend(self, cell: CellCreated2, sock):
         circuit_id = cell.circuit_id
         handshake_data = cell.handshake_data
         extend_cell = CellRelayExtended2(handshake_data, circuit_id)
-        circuit = self.circuit_list.get_by_id(circuit_id)
+        circuit = sock.channel.recv_map.get(circuit_id)
         cell = circuit.make_relay(inner_cell=extend_cell, relay_type=CellRelay)
         sock = circuit.circuit_nodes[0].sock
         circuit.enqueue_relay(cell, out_sock=sock, is_data=False)
@@ -246,6 +251,11 @@ class Tor_Node(Tor_base):
         # upstream is circuit_nodes[0].sock
         upstream_sock = circuit.circuit_nodes[0].sock
         sending_to_upstream = (out_sock == upstream_sock)
+
+        if sending_to_upstream and circuit.prev_circid is not None:
+            cell.circuit_id = circuit.prev_circid
+        elif (not sending_to_upstream) and circuit.next_circid is not None:
+            cell.circuit_id = circuit.next_circid
 
 
         # If this is a RELAY cell, we can peek relay command from serialized payload only if you already parsed it.
@@ -295,6 +305,7 @@ class Tor_Node(Tor_base):
                     raise
             else:
                 sock.protocol.version = sock.handshake.retrieve_versions(cell)
+                sock.channel.update_version(sock.protocol.version)
         elif isinstance(cell, CellCerts):
             sock.handshake.retrieve_certs(cell)
         elif isinstance(cell, CellAuthChallenge):
@@ -307,14 +318,19 @@ class Tor_Node(Tor_base):
             sock.handshake.retrieve_net_info(cell)
             sock.handshake_done.set()  # 关键：握手以收齐NETINFO为完成点
         elif isinstance(cell, Cell_Create2):
-            await self.create_circuit(cell, sock, cell.circuit_id)
+            try:
+                await self.create_circuit(cell, sock, cell.circuit_id)
+            except Exception:
+                destroy = CellDestroy(circuit_id=cell.circuit_id, reason=0)
+                await sock.send_cell(destroy)
+                return
         elif isinstance(cell, CellCreated2):
-            await self.reply_extend(cell)
+            await self.reply_extend(cell, sock)
         elif isinstance(cell, CellAuthenticate):  # or cmd == 131
             # self.print("receive a recv_authenticate")
             sock.handshake.recv_authenticate(cell)
         elif isinstance(cell, CellRelay):
-            circuit = self.circuit_list.get_by_id(cell.circuit_id)
+            circuit = sock.channel.recv_map.get(cell.circuit_id) or self.circuit_list.get_by_id(cell.circuit_id)
 
             if sock == circuit.circuit_nodes[0].sock:
                 # upstream -> this hop: peel one layer
@@ -347,11 +363,11 @@ class Tor_Node(Tor_base):
             circuit.enqueue_relay(cell, out_sock=next_node.sock, is_data=False)
 
         elif isinstance(cell, Cell_RelayEarly):
-            circuit = self.circuit_list.get_by_id(cell.circuit_id)
+            circuit = sock.channel.recv_map.get(cell.circuit_id) or self.circuit_list.get_by_id(cell.circuit_id)
             inner_cell = circuit.handle_relay(cell)
             await self.handle_cell_relay(inner_cell, circuit, cell, sock)
         elif isinstance(cell, CellDestroy):
-            circuit = self.circuit_list.get_by_id(cell.circuit_id)
+            circuit = sock.channel.recv_map.get(cell.circuit_id) or self.circuit_list.get_by_id(cell.circuit_id)
             self._ev("circuit_destroy_forwarded", circ_id=cell.circuit_id, from_side=("upstream" if sock == circuit.circuit_nodes[0].sock else "downstream"))
             if sock == circuit.circuit_nodes[0].sock:
                 next_hop_sock = circuit.circuit_nodes[-1].sock
@@ -361,6 +377,10 @@ class Tor_Node(Tor_base):
                 "cell_trace", circ_id=cell.circuit_id, peer=str(next_hop_sock.socket.getpeername()),
                 side="node", dir="send", cell_cmd="DESTROY"
             )
+            if next_hop_sock == circuit.circuit_nodes[0].sock and circuit.prev_circid is not None:
+                cell.circuit_id = circuit.prev_circid
+            elif circuit.next_circid is not None:
+                cell.circuit_id = circuit.next_circid
             await next_hop_sock.send_cell(cell)
             circuit.close_all_streams()
             circuit.circuit_nodes.clear()

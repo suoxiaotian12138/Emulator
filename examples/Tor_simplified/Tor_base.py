@@ -225,7 +225,7 @@ class Tor_base:
                 for n in getattr(c, "circuit_nodes", []):
                     s = getattr(n, "sock", None)
                     if s and not s._closing.is_set():
-                        await s.send_cell(CellDestroy(circuit_id=cid))
+                        await s.send_cell(CellDestroy(circuit_id=cid, reason=0))
                         break
 
             with contextlib.suppress(Exception):

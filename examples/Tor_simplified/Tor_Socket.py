@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import serialization, hashes
 from examples.Tor_simplified.Tor_Cell import TorCell, CellCerts, CellAuthChallenge, TorCommands,\
     CellVersions, CellNetInfo, AUTH_METHOD_ED25519_SHA256, CellAuthenticate
 from examples.Tor_simplified.Tor_Router import logger
+from examples.Tor_simplified.circid_alloc import Channel
 from tools.Packet.packet_TCP import ByteBuffer
 from tools.Packet.packet_TCP import dial_tls
 from tools.Network_Management.bandwidth_limiter import BandwidthLimiter
@@ -63,6 +64,12 @@ class Tor_Socket():
         self.closed = False
         self._limiter = limiter
 
+        # Default peer/local metadata so dependent components can initialize safely
+        self.peer = None
+        self.peer_str = "unknown"
+        self.local = None
+        self.local_str = "unknown"
+
         # —— 延迟注入配置 ——  # ★
         self.enable_delay = bool(enable_delay)
         self.sim_ip = sim_ip
@@ -81,6 +88,12 @@ class Tor_Socket():
         self._writer_task = None
         self._last_queue_log = 0.0
 
+        self.channel = Channel(
+            channel_id=self.peer_str,
+            link_protocol_version=self.protocol.version,
+            circid_len_bytes=4 if self.protocol.version >= 4 else 2,
+            initiator_is_me=self.handshake_initiator,
+        )
 
 
         if self.reader is not None:
@@ -93,6 +106,7 @@ class Tor_Socket():
                 self.peer_str = f"{self.peer[0]}:{self.peer[1]}"
                 self.local = self.socket.getsockname()
                 self.local_str = f"{self.local[0]}:{self.local[1]}"
+                self.channel.channel_id = self.peer_str
             except:
                 self.peer = None
                 self.peer_str = "unknown"
@@ -148,6 +162,9 @@ class Tor_Socket():
         self.local_str = f"{self.local[0]}:{self.local[1]}"
         self.handshake_initiator = True
 
+        self.channel.channel_id = self.peer_str
+        self.channel.initiator_is_me = True
+
         # ★ 出站场景：TLS建好后创建注入器
         await self._ensure_injector()
 
@@ -196,6 +213,8 @@ class Tor_Socket():
             self.peer_str = f"{self.peer[0]}:{self.peer[1]}"
             self.local = self.writer.get_extra_info("sockname")
             self.local_str = f"{self.local[0]}:{self.local[1]}"
+            self.channel.channel_id = self.peer_str
+            self.channel.initiator_is_me = True
         except Exception:
             # 出错也别影响后续逻辑
             pass
@@ -353,6 +372,7 @@ class Tor_Socket():
         version_cell = self.handshake.make_versions()
         await self.send_cell(version_cell)
         self.protocol.version = self.handshake.retrieve_versions(peer_version_cell)
+        self.channel.update_version(self.protocol.version)
         await self.send_cell(certs_cell)
         auth_cell = CellAuthChallenge()
         await self.send_cell(auth_cell)
