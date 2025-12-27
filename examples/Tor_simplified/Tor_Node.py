@@ -22,7 +22,7 @@ from cryptography.hazmat.primitives import serialization, hashes
 from tools.Crypt.crypt_common import (
     build_ed25519_cert, build_rsa_to_ed_crosscert,
     rsa_id_x509_der, rsa_pubkey_spki_der, rsa_identity_x509_der,
-    CT_RSA_ID_X509, CT_ED_ID_SIGNING, CT_ED_SIGNING_TLS, CT_RSA_TO_ED_CROSS,
+    CT_RSA_ID_X509, CT_ED_ID_SIGNING, CT_ED_SIGNING_TLS, CT_RSA_TO_ED_CROSS, CT_ED_SIGNING_LINK_AUTH,
     debug_build_crosscert
 )
 from examples.Tor_simplified.Tor_Cell import CellCerts
@@ -35,9 +35,15 @@ class Tor_Node(Tor_base):
         super().__init__(name, host, port)
 
         self.ntor_pvk, self.ntor_puk = curve25519_setup()
+        # Identity key: long-term Ed25519 master key used for relay identity proofs.
         self.ed_pvk, self.ed_puk = ed25519_setup()
+        # Identity key: long-term Ed25519 master key used for relay identity proofs.
         self.ed_sign_sk, self.ed_sign_pk = ed25519_setup()
-        self.ks_link_sk, self.ks_link_pk = ed25519_setup()
+        # Link authentication key: dedicated Ed25519 key for authenticating the OR link.
+        self.link_auth_sk, self.link_auth_pk = ed25519_setup()
+
+        # Backward-compatible aliases for legacy call sites expecting ks_link_* names.
+        self.ks_link_sk, self.ks_link_pk = self.link_auth_sk, self.link_auth_pk
 
         self.rsa_id_sk, _ = rsa_setup()
         self.rsa_onion_sk, _ = rsa_setup()
@@ -168,7 +174,7 @@ class Tor_Node(Tor_base):
                             rsa_identity_key=self.rsa_id_sk,
                             ed_identity_key=self.ed_pvk,
                             ed_signing_key=self.ed_sign_sk,
-                            link_auth_key=self.ks_link_sk,
+                            link_auth_key=self.link_auth_sk,
                             tls_cert_der=self.tls_cert_der,
                             limiter=self.limiter,
                             **get_args(sim_ip=self.sim_ip)
@@ -184,7 +190,10 @@ class Tor_Node(Tor_base):
                     # Tor 链路握手
                     t_tor = time.perf_counter()
                     try:
-                        await sock.tor_handshake_client()
+                        await sock.tor_handshake_client(
+                            authenticate=True,
+                            certs_cell=self.make_certs_cell_initiator(),
+                        )
                         self._ev("tor_handshake_done", peer=f"{ip}:{port}", side="client", version=getattr(sock.protocol, "version", None), ms=(time.perf_counter() - t_tor) * 1000.0)
                     except Exception as e:
                         self._ev("tor_handshake_fail", peer=f"{ip}:{port}", side="client", fail_reason=FailReason.NTOR_FAIL.value, error=str(e), version=getattr(sock.protocol, "version", None), ms=(time.perf_counter() - t_tor) * 1000.0)
@@ -734,6 +743,61 @@ class Tor_Node(Tor_base):
             (CT_ED_SIGNING_TLS, cert5),
             (CT_RSA_TO_ED_CROSS, cert7),
         ])
+
+    def make_certs_cell_initiator(self, include_rsa: bool = True) -> CellCerts:
+        """Build CERTS cell for initiator relay mode.
+
+        This uses the relay's identity key to delegate to the signing key (type 4),
+        and the signing key to delegate to the link authentication key (type 6).
+        RSA-related certs (types 2 and 7) remain optional but enabled by default
+        to mimic real relay behavior.
+        """
+
+        ed_id_pub32 = self.ed_puk.public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        ed_sign_pub32 = self.ed_sign_pk.public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        link_auth_pub32 = self.link_auth_pk.public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+
+        certs: list[tuple[int, bytes]] = []
+
+        cert4 = build_ed25519_cert(
+            cert_type=CT_ED_ID_SIGNING,
+            issuer_sk=self.ed_pvk,
+            subject_key_bytes=ed_sign_pub32,
+            exp_hours=self.exp_hr,
+            issuer_pub_for_ext=ed_id_pub32,
+            keytype=1,
+        )
+        certs.append((CT_ED_ID_SIGNING, cert4))
+
+        cert6 = build_ed25519_cert(
+            cert_type=CT_ED_SIGNING_LINK_AUTH,
+            issuer_sk=self.ed_sign_sk,
+            subject_key_bytes=link_auth_pub32,
+            exp_hours=self.exp_hr,
+            issuer_pub_for_ext=ed_sign_pub32,
+            keytype=3,
+        )
+        certs.append((CT_ED_SIGNING_LINK_AUTH, cert6))
+
+        if include_rsa:
+            cert2 = rsa_identity_x509_der(self.rsa_id_sk)
+            cert7 = build_rsa_to_ed_crosscert(
+                self.rsa_id_sk,
+                ed_id_pub32,
+                self.exp_hr,
+            )
+            certs.extend(
+                (
+                    (CT_RSA_ID_X509, cert2),
+                    (CT_RSA_TO_ED_CROSS, cert7),
+                )
+            )
+
+        self._ev("initiator_certs_built", cert_types=[c[0] for c in certs])
+        return CellCerts(certs)
 
     async def _flush_relay_agg(self, interval_ms: int = 500):
         try:

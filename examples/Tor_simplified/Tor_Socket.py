@@ -31,6 +31,7 @@ from tools.Crypt.crypt_common import (
     CT_RSA_TO_ED_CROSS,
     CT_ED_ID_SIGNING,
     CT_ED_SIGNING_TLS,
+    CT_ED_SIGNING_LINK_AUTH,
     build_ed25519_cert,
     build_rsa_to_ed_crosscert,
     rsa_identity_x509_der,
@@ -422,20 +423,23 @@ class Tor_Socket():
                 self.print("[STACKTRACE]", stack)
                 self.print(f"[ParseErr] {e}")
 
-    async def tor_handshake_client(self):
+    async def tor_handshake_client(self, authenticate: bool = False, certs_cell: CellCerts | None = None):
         version_cell = self.handshake.make_versions()
 
         await self.send_cell(version_cell)
 
         await asyncio.wait_for(self.handshake.version_event.wait(), 60.0)
+        await self.handshake.wait_for_responder_handshake()
 
-        if self.role == "relay":
-            certs_cell = self._build_initiator_certs()
-            await self.send_cell(certs_cell)
+        if authenticate:
+            if certs_cell is None:
+                logger.error("authenticate=True but no CERTS cell provided")
+                raise ValueError("CERTS cell required when authenticate=True")
             await self.handshake.wait_for_auth_challenge()
+            await self.send_cell(certs_cell)
             auth_cell = self._make_authenticate_cell()
             await self.send_cell(auth_cell)
-        await self.handshake.wait_for_responder_handshake()
+            logger.debug("initiator_auth_sent")
         net_info_cell = await self.handshake.make_net_info(self.peer, self.local)
         await self.send_cell(net_info_cell)
         self.handshake.mark_done()
@@ -454,43 +458,6 @@ class Tor_Socket():
         net_info_cell = await self.handshake.make_net_info(self.peer, self.socket.getsockname())
         await self.send_cell(net_info_cell)
 
-    def _build_initiator_certs(self) -> CellCerts:
-        ed_id_pub32 = self.ed_identity_key.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-        ed_sign_pub32 = self.ed_signing_key.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-
-        exp_hr = hours_since_epoch() + 24 * 7
-        cert4 = build_ed25519_cert(
-            cert_type=CT_ED_ID_SIGNING,
-            issuer_sk=self.ed_identity_key,
-            subject_key_bytes=ed_sign_pub32,
-            exp_hours=exp_hr,
-            issuer_pub_for_ext=ed_id_pub32,
-            keytype=1
-        )
-
-        tls_hash32 = hashlib.sha256(self.tls_cert_der or b"").digest()[:32]
-        cert5 = build_ed25519_cert(
-            cert_type=CT_ED_SIGNING_TLS,
-            issuer_sk=self.ed_signing_key,
-            subject_key_bytes=tls_hash32,
-            exp_hours=exp_hr,
-            issuer_pub_for_ext=ed_sign_pub32,
-            keytype=2
-        )
-        cert7 = build_rsa_to_ed_crosscert(
-            self.rsa_identity_key,
-            ed_id_pub32,
-            exp_hr,
-        )
-        cert2 = rsa_identity_x509_der(self.rsa_identity_key)
-        return CellCerts([
-            (CT_RSA_ID_X509, cert2),
-            (CT_ED_ID_SIGNING, cert4),
-            (CT_ED_SIGNING_TLS, cert5),
-            (CT_RSA_TO_ED_CROSS, cert7),
-        ])
 
     def _make_authenticate_cell(self) -> CellAuthenticate:
         if self.handshake.auth_challenge is None:

@@ -118,6 +118,7 @@ KEYTYPE_RSA     = 2
 CT_RSA_ID_X509              = 2
 CT_ED_ID_SIGNING            = 4
 CT_ED_SIGNING_TLS           = 5
+CT_ED_SIGNING_LINK_AUTH     = 6
 CT_RSA_TO_ED_CROSS          = 7
 CROSSCERT_PREFIX = b"Tor TLS RSA/Ed25519 cross-certificate"
 
