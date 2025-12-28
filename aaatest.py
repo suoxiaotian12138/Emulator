@@ -50,7 +50,7 @@ async def main():
         # ("guard2", "192.168.66.242", 9002, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"], 'reject 1-65535'),
         ("Middle1", "192.168.66.244", 9003, 'Middle',["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
         # ("Middle2", "192.168.66.244", 9004, 'Middle',["Running", "Valid", "MiddleOnly", "Fast","Stable"], 'reject 1-65535'),
-        # ("Exit1", "192.168.66.243", 9005, 'Exit',["Running", "Valid", "Exit","Fast","Stable"], 'accept 1-65535'),
+        ("Exit1", "192.168.66.243", 9005, 'Exit',["Running", "Valid", "Exit","Fast","Stable"], 'accept 1-65535'),
         # ("Exit2", "192.168.66.243", 9006, 'Exit',["Running", "Valid", "Exit","Fast","Stable"], 'accept 1-65535'),
 
     ]
