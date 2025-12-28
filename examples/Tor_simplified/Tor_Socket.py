@@ -509,11 +509,19 @@ class Tor_Socket():
                 raise ValueError("CERTS cell required when authenticate=True")
             await self.handshake.wait_for_auth_challenge()
             await self.send_cell(certs_cell)
-            auth_cell = self._make_authenticate_cell()
-            # await self.send_cell(auth_cell)
-            # ⚠️ AUTHENTICATE 自身不应计入它用于生成 SLOG/CLOG 的 transcript；顺序应保持
-            # snapshot digests -> build/sign -> send bytes -> link_transcript.update_sent(authenticate_bytes)
-            logger.debug("initiator_auth_sent")
+            if AUTH_METHOD_ED25519_SHA256 in self.handshake.auth_methods:
+                # ⚠️ AUTHENTICATE 自己不应该包含在它所签名的 SLOG/CLOG 中（自指悖论）
+                slog = self.link_transcript.snapshot_recv_digest()
+                clog = self.link_transcript.snapshot_sent_digest()
+                auth_cell = await self._make_authenticate_auth0003(slog=slog, clog=clog)
+                auth_raw = self.protocol.serialize(auth_cell)
+                await self._send_raw_immediate(auth_raw, update_transcript=False)
+                self.link_transcript.update_sent(auth_raw)
+                logger.debug("initiator_auth_sent")
+            else:
+                logger.warning(
+                    "AUTH_CHALLENGE does not include AUTH0003; skipping AUTHENTICATE"
+                )
         net_info_cell = await self.handshake.make_net_info(self.peer, self.local)
         await self.send_cell(net_info_cell)
         self.handshake.mark_done()
@@ -533,11 +541,49 @@ class Tor_Socket():
         await self.send_cell(net_info_cell)
 
 
-    def _make_authenticate_cell(self) -> CellAuthenticate:
+    async def _make_authenticate_auth0003(self, *, slog: bytes, clog: bytes) -> CellAuthenticate:
         if self.handshake.auth_challenge is None:
             raise RuntimeError("No auth challenge received; cannot authenticate")
-        signature = self.link_auth_key.sign(self.handshake.auth_challenge)
-        return CellAuthenticate(auth_type=AUTH_METHOD_ED25519_SHA256, auth_data=signature)
+        ssl_obj = None
+        if self.writer is not None:
+            ssl_obj = self.writer.get_extra_info("ssl_object")
+        if ssl_obj is None:
+            raise RuntimeError("ssl_object is None; TLS not established")
+
+        if self.handshake.peer_identity_digest is None:
+            raise RuntimeError("Peer identity digest missing for AUTH0003")
+        if self.handshake.peer_ed_identity_pub is None:
+            raise RuntimeError("Peer Ed25519 identity missing for AUTH0003")
+        if self.rsa_identity_key is None or self.ed_identity_key is None:
+            raise RuntimeError("Local identity keys missing for AUTH0003")
+
+        cid = self.handshake.rsa_identity_digest_pkcs1(self.rsa_identity_key)
+        sid = self.handshake.peer_identity_digest
+        cid_ed = self.ed_identity_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        sid_ed = self.handshake.peer_ed_identity_pub
+
+        peer_cert_der = ssl_obj.getpeercert(binary_form=True)
+        if not peer_cert_der:
+            raise RuntimeError("Peer TLS certificate unavailable for AUTH0003")
+        self.peer_tls_cert_der = peer_cert_der
+        scert = hashlib.sha256(peer_cert_der).digest()
+
+        tlssecrets = tls_exporter_auth0003(ssl_obj, cid)
+
+        body = self.handshake.build_auth0003_body(
+            cid=cid,
+            sid=sid,
+            cid_ed=cid_ed,
+            sid_ed=sid_ed,
+            slog=slog,
+            clog=clog,
+            scert=scert,
+            tlssecrets=tlssecrets,
+        )
+        return CellAuthenticate(auth_type=AUTH_METHOD_ED25519_SHA256, auth_data=body)
 
 
 
@@ -547,6 +593,13 @@ class Tor_Socket():
 
     async def send_cell(self, cell):
         print("send cell: ", cell)
+        #先在这里加个验证，验证CellAuthenticate的格式是否合法
+        if isinstance(cell, CellAuthenticate) and cell.auth_type == 0x0003:
+            auth_len = len(cell.auth_data)
+            self.print(
+                f"sent AUTHENTICATE authtype=0x{cell.auth_type:04x} authlen={auth_len}"
+            )
+            assert auth_len == 352
         if self._closing.is_set():
             self.print(f"[SendDrop] closed: {self.peer_str} {cell}")
             return False
@@ -627,6 +680,26 @@ class Tor_Socket():
             self.print(f"[WriterLoopErr] {self.peer_str} {e}")
         finally:
             await self._abort()
+
+    async def _send_raw_immediate(self, raw: bytes, *, update_transcript: bool = True):
+        if self._closing.is_set() or self.writer is None:
+            raise RuntimeError("Socket closed; cannot send raw bytes")
+
+        try:
+            if self._limiter is not None:
+                await self._limiter.consume(len(raw))
+
+            if self._inj is not None:
+                await self._inj.send(raw)
+            else:
+                self.writer.write(raw)
+                await self.writer.drain()
+
+            if update_transcript:
+                self.link_transcript.update_sent(raw)
+        except Exception:
+            await self._abort()
+            raise
 
     async def _write_once(self, blob: bytes):
         # if (len(blob) % 514) != 0:
@@ -865,6 +938,7 @@ class TorHandshake:
         self._responder_info_ready = asyncio.Event()
         self._auth_challenge: bytes | None = None
         self._auth_chal_event = asyncio.Event()
+        self._auth_methods: list[int] = []
 
     @staticmethod
     def _make_new_event():
@@ -912,6 +986,7 @@ class TorHandshake:
                 raise RuntimeError("Received AUTH_CHALLENGE before CERTS during handshake")
             self._set_state(HandshakeState.GOT_AUTH_CHAL)
             self._auth_challenge = cell.challenge
+            self._auth_methods = list(getattr(cell, "methods", []) or [])
             self._auth_chal_event.set()
         elif isinstance(cell, CellNetInfo):
             if self.state.value < HandshakeState.GOT_AUTH_CHAL.value and self.tor_socket.handshake_initiator:
@@ -931,6 +1006,10 @@ class TorHandshake:
     @property
     def auth_challenge(self) -> bytes | None:
         return self._auth_challenge
+
+    @property
+    def auth_methods(self) -> list[int]:
+        return list(self._auth_methods)
 
     def mark_done(self):
         if self.state == HandshakeState.DONE:
@@ -1020,13 +1099,26 @@ class TorHandshake:
             + tlssecrets
             + rand_bytes
         )
-        assert len(signed_part) == 320
+        assert len(signed_part) == 288
+
+        self.tor_socket.print(
+            "[AUTH0003] CID/SID/CID_ED/SID_ED"
+            f" {cid[:8].hex()} {sid[:8].hex()} {cid_ed[:8].hex()} {sid_ed[:8].hex()}"
+        )
+        self.tor_socket.print(
+            "[AUTH0003] SLOG/CLOG"
+            f" {slog[:8].hex()} {clog[:8].hex()}"
+        )
+        self.tor_socket.print(
+            "[AUTH0003] SCERT/TLSSECRETS"
+            f" {scert[:8].hex()} {tlssecrets[:8].hex()}"
+        )
 
         signature = self.tor_socket.link_auth_key.sign(signed_part)
         assert len(signature) == 64
 
         body = signed_part + signature
-        assert len(body) == 384
+        assert len(body) == 352
         return body
 
     async def make_net_info(self, remote_addr, local_addr, wait_time=60):
