@@ -438,7 +438,7 @@ class Tor_Socket():
             await self.handshake.wait_for_auth_challenge()
             await self.send_cell(certs_cell)
             auth_cell = self._make_authenticate_cell()
-            await self.send_cell(auth_cell)
+            # await self.send_cell(auth_cell)
             logger.debug("initiator_auth_sent")
         net_info_cell = await self.handshake.make_net_info(self.peer, self.local)
         await self.send_cell(net_info_cell)
