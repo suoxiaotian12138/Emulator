@@ -126,6 +126,52 @@ def build_auth0003_body(
     return body
 
 
+def tls_exporter_auth0003(ssl_object, cid: bytes) -> bytes:
+    """Derive the TLS exporter value for AUTH0003 TLSSECRETS.
+
+    Parameters
+    ----------
+    ssl_object: ssl.SSLObject
+        The TLS object providing access to keying material.
+    cid: bytes
+        A 32-byte client identifier used as the exporter context.
+
+    Returns
+    -------
+    bytes
+        A 32-byte exporter secret derived from the TLS session.
+
+    Raises
+    ------
+    NotImplementedError
+        If TLS export_keying_material support is unavailable or fails.
+    """
+
+    label = b"EXPORTER FOR TOR TLS CLIENT BINDING AUTH0003"
+    context = cid
+    length = 32
+
+    try:
+        export_fn = ssl_object.export_keying_material
+    except AttributeError as exc:
+        raise NotImplementedError(
+            "TLS exporter unavailable, need Python/OpenSSL support or TLS refactor"
+        ) from exc
+
+    try:
+        material = export_fn(label, length, context)
+    except Exception as exc:
+        raise NotImplementedError(
+            "TLS exporter unavailable, need Python/OpenSSL support or TLS refactor"
+        ) from exc
+
+    if len(material) != length:
+        raise NotImplementedError(
+            "TLS exporter unavailable, need Python/OpenSSL support or TLS refactor"
+        )
+
+    return material
+
 def build_authenticate_cell(auth_type: int, body: bytes) -> bytes:
     """Build the AUTHENTICATE cell payload from header fields and body.
 
