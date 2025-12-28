@@ -38,10 +38,77 @@ from tools.Crypt.crypt_common import (
     hours_since_epoch,
 )
 
+def tor_tls_export_key_material(writer_or_sslobj, label: bytes, context: bytes, length: int) -> bytes:
+    """Return exporter output of ``length`` bytes using given label and context.
+
+    The caller must pass an asyncio writer (with ``get_extra_info``) or an
+    ``ssl.SSLObject``. No fake or placeholder data is ever returned.
+    """
+
+    ssl_obj = None
+    if isinstance(writer_or_sslobj, ssl.SSLObject):
+        ssl_obj = writer_or_sslobj
+    else:
+        get_extra = getattr(writer_or_sslobj, "get_extra_info", None)
+        if callable(get_extra):
+            ssl_obj = get_extra("ssl_object")
+
+    if ssl_obj is None:
+        raise RuntimeError("ssl_object is None; TLS not established")
+
+    if hasattr(ssl_obj, "export_keying_material"):
+        out = ssl_obj.export_keying_material(label, length, context)
+        if not isinstance(out, (bytes, bytearray)):
+            raise RuntimeError("export_keying_material returned non-bytes")
+        if len(out) != length:
+            raise RuntimeError("export_keying_material returned wrong length")
+        return bytes(out)
+
+    raise NotImplementedError(
+        "TLS exporter unavailable: ssl.SSLObject.export_keying_material not supported. "
+        "Upgrade Python/OpenSSL or refactor TLS layer. Do not fake TLSSECRETS."
+    )
+
+
+def tls_exporter_auth0003(writer_or_sslobj, cid32: bytes) -> bytes:
+    """AUTH0003 helper that exports 32-byte TLSSECRETS for the given CID."""
+
+    assert len(cid32) == 32
+    label = b"EXPORTER FOR TOR TLS CLIENT BINDING AUTH0003"
+    return tor_tls_export_key_material(writer_or_sslobj, label, cid32, 32)
+
+
 from tools.Network_Management.tls_registry import (
     get_client_ctx, get_global_sem, get_node_sem
 )
 _TLS_HANDSHAKE_SEM = asyncio.Semaphore(64)
+
+class LinkTranscriptSHA256:
+    def __init__(self, debug: bool = False, max_dump_len: int = 256):
+        self._recv_hasher = hashlib.sha256()
+        self._sent_hasher = hashlib.sha256()
+        self.debug = debug
+        self._max_dump_len = max_dump_len
+
+    def update_recv(self, raw: bytes):
+        self._recv_hasher.update(raw)
+        if self.debug:
+            preview = raw[: self._max_dump_len]
+            print(f"[Transcript:recv] {len(raw)}B {preview.hex()}")
+
+    def update_sent(self, raw: bytes):
+        self._sent_hasher.update(raw)
+        if self.debug:
+            preview = raw[: self._max_dump_len]
+            print(f"[Transcript:sent] {len(raw)}B {preview.hex()}")
+
+    def snapshot_recv_digest(self) -> bytes:
+        return self._recv_hasher.copy().digest()
+
+    def snapshot_sent_digest(self) -> bytes:
+        return self._sent_hasher.copy().digest()
+
+
 
 
 class Tor_Socket():
@@ -63,7 +130,8 @@ class Tor_Socket():
         enable_delay: bool = False,                     # ★ 一键总开关（默认关）
         sim_ip: Optional[str] = None,                   # ★ 本端仿真IP
         delay_mapping: Optional[MappingCache] = None,   # ★ 指纹/IP -> sim_ip 的映射缓存
-        delay_model: Optional[GeoDelayModel] = None     # ★ 地理延迟模型
+        delay_model: Optional[GeoDelayModel] = None,    # ★ 地理延迟模型
+        debug_transcript: bool = False,
     ):
         self.protocol = TorProtocol()
         self._send_lock = asyncio.Lock()
@@ -132,7 +200,7 @@ class Tor_Socket():
             circid_len_bytes=4 if self.protocol.version >= 4 else 2,
             initiator_is_me=self.handshake_initiator,
         )
-
+        self.link_transcript = LinkTranscriptSHA256(debug=debug_transcript)
 
         if self.reader is not None:
             # 被动连接，已经有SSL socket
@@ -229,7 +297,8 @@ class Tor_Socket():
                    enable_delay: bool = False,
                    sim_ip: Optional[str] = None,
                    delay_mapping: Optional[MappingCache] = None,
-                   delay_model: Optional[GeoDelayModel] = None
+                   delay_model: Optional[GeoDelayModel] = None,
+                   debug_transcript: bool = False
                    ):
         # 1) 先做 TLS 拨号（保持你 tools.dial_tls 的封装）
         reader, writer = await dial_tls(
@@ -257,6 +326,7 @@ class Tor_Socket():
             delay_mapping=delay_mapping,
             delay_model=delay_model,
             limiter=limiter,
+            debug_transcript=debug_transcript,
         )
         self.handshake_initiator = True
 
@@ -439,6 +509,8 @@ class Tor_Socket():
             await self.send_cell(certs_cell)
             auth_cell = self._make_authenticate_cell()
             # await self.send_cell(auth_cell)
+            # ⚠️ AUTHENTICATE 自身不应计入它用于生成 SLOG/CLOG 的 transcript；顺序应保持
+            # snapshot digests -> build/sign -> send bytes -> link_transcript.update_sent(authenticate_bytes)
             logger.debug("initiator_auth_sent")
         net_info_cell = await self.handshake.make_net_info(self.peer, self.local)
         await self.send_cell(net_info_cell)
@@ -562,6 +634,7 @@ class Tor_Socket():
         if self._closing.is_set() or self.writer is None:
             return
         try:
+            self.link_transcript.update_sent(blob)
             # ★ 若注入器存在则走注入器，否则直写
             if self._inj is not None:
                 await self._inj.send(blob)       # ★
@@ -700,6 +773,7 @@ class Tor_Socket():
         if raw is None:
             return None
 
+        self.link_transcript.update_recv(raw)
         hdr_hex = raw[:header_len].hex() if raw else ""
         self.print(f"[HDR] ver={self.protocol.version} hlen={header_len} circ={circ_id} cmd={cmd_num} hdr={hdr_hex}")
 
