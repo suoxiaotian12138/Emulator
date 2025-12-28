@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey, X25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from baselib.sphinxmix.SphinxParams import SphinxParams
+from src.sphinxmix.SphinxParams import SphinxParams
 
 def SECP256R1_setup():
     ''' setup the parameters of the loopix Crypto-system '''

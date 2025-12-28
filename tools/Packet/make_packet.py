@@ -1,7 +1,7 @@
 from typing import List
 
-from baselib.sphinxmix.SphinxClient import Nenc, create_forward_message, create_surb, package_surb
-from baselib.sphinxmix.SphinxParams import SphinxParams
+from src.sphinxmix.SphinxClient import Nenc, create_forward_message, create_surb, package_surb
+from src.sphinxmix.SphinxParams import SphinxParams
 from dataclasses import dataclass
 
 

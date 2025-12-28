@@ -4,7 +4,7 @@ import random
 import asyncio
 from tools.Packet.decrypt_packet import decrypt_sphinx_packet, handle_forward_sphinx
 
-from baselib.sphinxmix.SphinxClient import Relay_flag, Dest_flag
+from src.sphinxmix.SphinxClient import Relay_flag, Dest_flag
 from examples.Loopix.Loopix_base import Loopix_Base
 
 

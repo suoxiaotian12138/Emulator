@@ -6,7 +6,7 @@ import random
 from tools.Packet.decrypt_packet import decrypt_sphinx_packet, handle_forward_sphinx, handle_receive_surb
 from tools.Packet.make_packet import reply_with_surb
 from tools.Crypt.serialization import decode
-from baselib.sphinxmix.SphinxClient import Dest_flag, Surb_flag
+from src.sphinxmix.SphinxClient import Dest_flag, Surb_flag
 
 from examples.Loopix.Loopix_base import Loopix_Base
 

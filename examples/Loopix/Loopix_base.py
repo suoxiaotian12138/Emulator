@@ -16,8 +16,8 @@ from tools.Crypt.key_generator import SECP256R1_setup, sphinx_SECP256R1_setup
 from tools.Monitor.LocalMonitor import LocalMonitor
 
 
-from baselib.sphinxmix.SphinxParams import SphinxParams
-from baselib.json_reader import JSONReader
+from src.sphinxmix.SphinxParams import SphinxParams
+from src.json_reader import JSONReader
 
 
 class Loopix_Base():

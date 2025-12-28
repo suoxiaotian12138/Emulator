@@ -1025,6 +1025,12 @@ class TorHandshake:
         This intentionally does *not* use SubjectPublicKeyInfo.
         """
 
+        if not hasattr(rsa_public_key, "public_bytes"):
+            if hasattr(rsa_public_key, "public_key"):
+                rsa_public_key = rsa_public_key.public_key()
+            else:
+                raise TypeError("rsa_public_key must expose public_bytes or public_key()")
+
         der = rsa_public_key.public_bytes(
             encoding=serialization.Encoding.DER,
             format=serialization.PublicFormat.PKCS1,

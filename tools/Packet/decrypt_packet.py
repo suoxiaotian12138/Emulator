@@ -1,6 +1,6 @@
-from baselib.sphinxmix import SphinxException
-from baselib.sphinxmix.SphinxNode import sphinx_process
-from baselib.sphinxmix.SphinxClient import PFdecode, receive_forward, receive_surb
+from src.sphinxmix import SphinxException
+from src.sphinxmix.SphinxNode import sphinx_process
+from src.sphinxmix.SphinxClient import PFdecode, receive_forward, receive_surb
 
 
 def decrypt_sphinx_packet(params, packet, key):
