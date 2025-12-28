@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from typing import Iterable, Tuple
-
+import struct
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -125,6 +125,17 @@ def build_auth0003_body(
 
     return body
 
+
+def build_authenticate_cell(auth_type: int, body: bytes) -> bytes:
+    """Build the AUTHENTICATE cell payload from header fields and body.
+
+    This helper concatenates the AuthType and AuthLen (both uint16,
+    big-endian) with the provided body without performing any validation on
+    the body contents.
+    """
+
+    auth_len = len(body)
+    return struct.pack("!HH", auth_type, auth_len) + body
 
 def _self_test() -> None:
     ks_link_ed_priv = Ed25519PrivateKey.generate()
