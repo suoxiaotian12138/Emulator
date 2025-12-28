@@ -4,12 +4,14 @@ import struct
 import time
 import contextlib
 import hashlib
+import os
 from pathlib import Path
 from enum import Enum, auto
 from typing import Optional, Callable, Awaitable, Any
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from examples.Tor_simplified.Tor_Cell import TorCell, CellCerts, CellAuthChallenge, TorCommands, \
     CellVersions, CellNetInfo, AUTH_METHOD_ED25519_SHA256, CellAuthenticate, CellVPadding, CellPadding
@@ -935,6 +937,97 @@ class TorHandshake:
             return
         self._set_state(HandshakeState.DONE)
         self.tor_socket.handshake_done.set()
+
+    @staticmethod
+    def rsa_identity_digest_pkcs1(rsa_public_key) -> bytes:
+        """
+        Return SHA256(DER(PKCS#1 RSAPublicKey)).
+
+        This intentionally does *not* use SubjectPublicKeyInfo.
+        """
+
+        der = rsa_public_key.public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.PKCS1,
+        )
+        digest = hashlib.sha256(der).digest()
+        assert len(digest) == 32
+        return digest
+
+    def build_auth0003_body(
+        self,
+        *,
+        cid: bytes,
+        sid: bytes,
+        cid_ed: bytes,
+        sid_ed: bytes,
+        slog: bytes,
+        clog: bytes,
+        scert: bytes,
+        tlssecrets: bytes,
+    ) -> bytes:
+        """
+        Return AUTH0003 Authentication body bytes, length 384.
+
+        Minimal self-test example (requires ed25519 keys and a link_auth_key)::
+
+            fake32 = b"\x11" * 32
+            body = handshake.build_auth0003_body(
+                cid=fake32,
+                sid=fake32,
+                cid_ed=fake32,
+                sid_ed=fake32,
+                slog=fake32,
+                clog=fake32,
+                scert=fake32,
+                tlssecrets=fake32,
+            )
+            assert len(body) == 384
+            signed_part = body[:320]
+            signature = body[320:]
+            handshake.tor_socket.link_auth_key.public_key().verify(signature, signed_part)
+
+        """
+
+        for name, val in (
+            ("cid", cid),
+            ("sid", sid),
+            ("cid_ed", cid_ed),
+            ("sid_ed", sid_ed),
+            ("slog", slog),
+            ("clog", clog),
+            ("scert", scert),
+            ("tlssecrets", tlssecrets),
+        ):
+            if len(val) != 32:
+                raise AssertionError(f"{name} must be 32 bytes, got {len(val)}")
+
+        if not isinstance(self.tor_socket.link_auth_key, ed25519.Ed25519PrivateKey):
+            raise TypeError("link_auth_key must be an Ed25519PrivateKey")
+
+        auth_type = b"AUTH0003"
+        assert len(auth_type) == 8
+        rand_bytes = os.urandom(24)
+        signed_part = (
+            auth_type
+            + cid
+            + sid
+            + cid_ed
+            + sid_ed
+            + slog
+            + clog
+            + scert
+            + tlssecrets
+            + rand_bytes
+        )
+        assert len(signed_part) == 320
+
+        signature = self.tor_socket.link_auth_key.sign(signed_part)
+        assert len(signature) == 64
+
+        body = signed_part + signature
+        assert len(body) == 384
+        return body
 
     async def make_net_info(self, remote_addr, local_addr, wait_time=60):
         await asyncio.wait_for(self.version_event.wait(), wait_time)
