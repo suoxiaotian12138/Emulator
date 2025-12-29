@@ -459,8 +459,12 @@ async def dial_tls(
     source_ip: str | None = None,
     node_id: str | None = None,
     timeout: float = 15.0,
+    ssl_ctx: Optional[ssl.SSLContext] = None,
+    keylog_path: str | None = None,
 ):
-    ctx = get_client_ctx()
+    ctx = ssl_ctx or get_client_ctx()
+    if keylog_path:
+        ctx.keylog_filename = keylog_path
     nid = node_id or source_ip or "default"
 
     async with get_global_sem(), get_node_sem(nid):
@@ -473,6 +477,9 @@ async def dial_tls(
         )
     ssl_obj = writer.get_extra_info("ssl_object")
     if ssl_obj:
+        if keylog_path:
+            with contextlib.suppress(Exception):
+                setattr(ssl_obj, "_keylog_path", keylog_path)
         print(f"[dial_tls] {remote_addr} -> TLS {ssl_obj.version()} {ssl_obj.cipher()}")
     return reader, writer
 

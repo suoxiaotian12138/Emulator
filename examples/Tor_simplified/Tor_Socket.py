@@ -4,6 +4,7 @@ import struct
 import time
 import contextlib
 import hashlib
+import hmac
 import os
 from pathlib import Path
 from enum import Enum, auto
@@ -11,7 +12,7 @@ from typing import Optional, Callable, Awaitable, Any
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 
 from examples.Tor_simplified.Tor_Cell import TorCell, CellCerts, CellAuthChallenge, TorCommands, \
     CellVersions, CellNetInfo, AUTH_METHOD_ED25519_SHA256, CellAuthenticate, CellVPadding, CellPadding
@@ -40,36 +41,143 @@ from tools.Crypt.crypt_common import (
     hours_since_epoch,
 )
 
-def tor_tls_export_key_material(writer_or_sslobj, label: bytes, context: bytes, length: int) -> bytes:
-    """Return exporter output of ``length`` bytes using given label and context.
+def _hkdf_expand(prk: bytes, info: bytes, length: int, hashmod=hashlib.sha256) -> bytes:
+    hash_len = hashmod().digest_size
+    if length > 255 * hash_len:
+        raise ValueError("Cannot expand to more than 255 * HashLen bytes")
+    okm = bytearray()
+    prev = b""
+    counter = 1
+    while len(okm) < length:
+        data = prev + info + bytes([counter])
+        prev = hmac.new(prk, data, hashmod).digest()
+        okm.extend(prev)
+        counter += 1
+    return bytes(okm[:length])
 
-    The caller must pass an asyncio writer (with ``get_extra_info``) or an
-    ``ssl.SSLObject``. No fake or placeholder data is ever returned.
+
+def _hkdf_expand_label_tls13(secret: bytes, label: bytes, context: bytes, length: int, hashmod=hashlib.sha256) -> bytes:
+    full_label = b"tls13 " + label
+    hkdf_label = struct.pack("!H", length)
+    hkdf_label += struct.pack("!B", len(full_label)) + full_label
+    hkdf_label += struct.pack("!B", len(context)) + context
+    return _hkdf_expand(secret, hkdf_label, length, hashmod=hashmod)
+
+
+def _read_exporter_secret_from_keylog(keylog_path: str) -> bytes:
     """
+    Read the last EXPORTER_SECRET from the keylog file.
+
+    Note: In your project each TLS connection uses a unique keylog file path,
+    so taking the last EXPORTER_SECRET is sufficient and avoids needing
+    client_random() (not available on some Python ssl.SSLObject builds).
+    """
+    path = Path(keylog_path)
+    if not path.exists():
+        raise RuntimeError(f"Keylog file not found at {keylog_path}")
+
+    last_secret = None
+    for delay in (0.0, 0.01, 0.02, 0.04, 0.08):
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("EXPORTER_SECRET "):
+                    parts = line.strip().split()
+                    if len(parts) >= 3:
+                        last_secret = parts[2]
+        if last_secret is not None:
+            break
+        time.sleep(delay)
+
+    if last_secret is None:
+        raise RuntimeError(f"EXPORTER_SECRET not found in keylog {keylog_path}")
+
+    try:
+        return bytes.fromhex(last_secret)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid EXPORTER_SECRET hex in keylog {keylog_path}") from exc
+
+
+
+def _sanitize_keylog_component(value: str) -> str:
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    return "".join(ch if ch in allowed else "_" for ch in value)
+
+def tor_tls_export_key_material(writer_or_sslobj, label: bytes, context: bytes, length: int) -> bytes:
+    """Return exporter output of ``length`` bytes using given label and context."""
 
     ssl_obj = None
+    keylog_path = None
     if isinstance(writer_or_sslobj, ssl.SSLObject):
         ssl_obj = writer_or_sslobj
+        keylog_path = getattr(ssl_obj, "_keylog_path", None)
     else:
         get_extra = getattr(writer_or_sslobj, "get_extra_info", None)
         if callable(get_extra):
             ssl_obj = get_extra("ssl_object")
+            keylog_path = getattr(ssl_obj, "_keylog_path", None) if ssl_obj else None
+
+
+    if keylog_path is None and hasattr(writer_or_sslobj, "_keylog_path"):
+        keylog_path = getattr(writer_or_sslobj, "_keylog_path", None)
 
     if ssl_obj is None:
         raise RuntimeError("ssl_object is None; TLS not established")
 
-    if hasattr(ssl_obj, "export_keying_material"):
-        out = ssl_obj.export_keying_material(label, length, context)
-        if not isinstance(out, (bytes, bytearray)):
-            raise RuntimeError("export_keying_material returned non-bytes")
-        if len(out) != length:
-            raise RuntimeError("export_keying_material returned wrong length")
-        return bytes(out)
+    if ssl_obj.version() != "TLSv1.3":
+        raise RuntimeError("TLS exporter is only supported for TLS 1.3 sessions")
 
-    raise NotImplementedError(
-        "TLS exporter unavailable: ssl.SSLObject.export_keying_material not supported. "
-        "Upgrade Python/OpenSSL or refactor TLS layer. Do not fake TLSSECRETS."
+    if keylog_path is None:
+        raise RuntimeError("Keylog path not recorded for TLS connection")
+
+    cipher_info = None
+    with contextlib.suppress(Exception):
+        cipher_info = ssl_obj.cipher()
+    hashmod = hashlib.sha256
+    if cipher_info and isinstance(cipher_info, (list, tuple)) and cipher_info:
+        cipher_name = cipher_info[0]
+        # Pick HKDF hash based on the TLS 1.3 cipher suite hash component.
+        if isinstance(cipher_name, str):
+            if cipher_name.endswith("SHA384"):
+                hashmod = hashlib.sha384
+            elif cipher_name.endswith("SHA256"):
+                hashmod = hashlib.sha256
+
+    # EXPORTER_SECRET from keylog corresponds to the TLS 1.3 exporter_master_secret.
+    exporter_master_secret = _read_exporter_secret_from_keylog(keylog_path)
+
+    hash_len = hashmod().digest_size
+
+    # RFC8446 7.5:
+    # TLS-Exporter(label, context_value, key_length) =
+    #   HKDF-Expand-Label(Derive-Secret(Secret, label, ""),
+    #                     "exporter", Hash(context_value), key_length)
+    #
+    # Derive-Secret(Secret, label, "") uses Hash("") as the context.
+    empty_hash = hashmod(b"").digest()
+
+    # Step 1: secret1 = Derive-Secret(exporter_master_secret, label, "")
+    secret1 = _hkdf_expand_label_tls13(
+        exporter_master_secret,
+        label,               # e.g. b"EXPORTER FOR TOR TLS CLIENT BINDING AUTH0003"
+        empty_hash,          # Hash("")
+        hash_len,            # output length = HashLen
+        hashmod=hashmod,
     )
+
+    # Step 2: out = HKDF-Expand-Label(secret1, "exporter", Hash(context_value), length)
+    context_hash = hashmod(context).digest()
+    out = _hkdf_expand_label_tls13(
+        secret1,
+        b"exporter",
+        context_hash,
+        length,
+        hashmod=hashmod,
+    )
+
+    if len(out) != length:
+        raise RuntimeError("TLS-Exporter returned wrong length")
+    return out
+
 
 
 def tls_exporter_auth0003(writer_or_sslobj, cid32: bytes) -> bytes:
@@ -77,7 +185,10 @@ def tls_exporter_auth0003(writer_or_sslobj, cid32: bytes) -> bytes:
 
     assert len(cid32) == 32
     label = b"EXPORTER FOR TOR TLS CLIENT BINDING AUTH0003"
+
+    # Tor passes raw CID (32 bytes) as exporter context for AUTH0003.
     return tor_tls_export_key_material(writer_or_sslobj, label, cid32, 32)
+
 
 
 from tools.Network_Management.tls_registry import (
@@ -110,8 +221,14 @@ class LinkTranscriptSHA256:
     def snapshot_sent_digest(self) -> bytes:
         return self._sent_hasher.copy().digest()
 
-
-
+class ChannelHandshakeState:
+    def __init__(self):
+        self.received_certs = False
+        self.received_auth_challenge = False
+        self.sent_certs = False
+        self.sent_authenticate = False
+        self.handshake_complete = False
+        self.peer_certs_verified = False
 
 class Tor_Socket():
     def __init__(
@@ -138,6 +255,7 @@ class Tor_Socket():
         self.protocol = TorProtocol()
         self._send_lock = asyncio.Lock()
         self.handshake = TorHandshake(self)
+        self.channel_handshake_state = ChannelHandshakeState()
         self.print = print
         self.buffer = ByteBuffer()
         self.on_cell: Optional[Callable[[TorCell, "Tor_Socket"], Awaitable[None]]] = on_cell
@@ -149,6 +267,10 @@ class Tor_Socket():
         self._closing = asyncio.Event()
         self.closed = False
         self._limiter = limiter
+        self._handshake_started = False
+        self._pending_circuit_ops: list[Callable[[], Awaitable[Any]]] = []
+        self._certs_cell_for_auth: CellCerts | None = None
+        self._keylog_path: str | None = None
 
         # Default peer/local metadata so dependent components can initialize safely
         self.peer = None
@@ -167,7 +289,10 @@ class Tor_Socket():
         self.reader: Optional[asyncio.StreamReader] = reader
         self.writer: Optional[asyncio.StreamWriter] = writer
 
-        self._q_ctrl = asyncio.Queue()  # 控制面队列（自动优先）
+        # ctrl queue item: (buf: bytes, enqueued_at: float, flags: int, fut: Optional[Future])
+        self._q_ctrl = asyncio.Queue()
+        self._CTRL_SOLO = 1 << 0
+        self._CTRL_BARRIER = 1 << 1
         self._q_data = asyncio.Queue(maxsize=4096)  # 数据面队列
         self._q_data_backpressure = 3072  # 触发背压阈值
         self._wakeup = asyncio.Event()  # 有新数据时唤醒 writer
@@ -225,6 +350,19 @@ class Tor_Socket():
             self.peer = None
             self.peer_str = "not_connected"
 
+    async def flush_ctrl(self):
+        """
+        Ensure all previously enqueued control-plane buffers are written out.
+        Implemented via a barrier item consumed by writer_loop.
+        """
+        if self._closing.is_set():
+            return
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        await self._q_ctrl.put((b"", loop.time(), self._CTRL_BARRIER, fut))
+        self._wakeup.set()
+        await fut
+
     def update_link_protocol_version(self, version: int):
         """Synchronize negotiated link protocol version across components."""
         self.protocol.version = version
@@ -259,11 +397,17 @@ class Tor_Socket():
 
     async def setup_socket(self, remote_addr: tuple[str, int]):
         """通过 tools.dial_tls 拿到 (reader, writer)，保持分层。"""
+        keylog_dir = Path("temp") / "keylogs"
+        keylog_dir.mkdir(parents=True, exist_ok=True)
+        host_component = _sanitize_keylog_component(remote_addr[0] or "unknown")
+        keylog_path = keylog_dir / f"tls_{host_component}_{remote_addr[1]}_{int(time.monotonic_ns())}.log"
+        self._keylog_path = str(keylog_path)
         reader, writer = await dial_tls(
             remote_addr,
             source_ip=self.source_ip,
             node_id=self.node_id,
-            timeout=15.0
+            timeout=15.0,
+            keylog_path=self._keylog_path,
         )
         # 搬运
         self.reader, self.writer = reader, writer
@@ -303,11 +447,16 @@ class Tor_Socket():
                    debug_transcript: bool = False
                    ):
         # 1) 先做 TLS 拨号（保持你 tools.dial_tls 的封装）
+        keylog_dir = Path("temp") / "keylogs"
+        keylog_dir.mkdir(parents=True, exist_ok=True)
+        host_component = _sanitize_keylog_component(remote_addr[0] or "unknown")
+        keylog_path = keylog_dir / f"tls_{host_component}_{remote_addr[1]}_{int(time.monotonic_ns())}.log"
         reader, writer = await dial_tls(
             remote_addr,
             source_ip=source_ip,
             node_id=node_id,
-            timeout=15.0
+            timeout=15.0,
+            keylog_path=str(keylog_path),
         )
 
         # 2) 用现成的 reader/writer 构造 Tor_Socket
@@ -331,6 +480,7 @@ class Tor_Socket():
             debug_transcript=debug_transcript,
         )
         self.handshake_initiator = True
+        self._keylog_path = str(keylog_path)
 
         # 3) 和 setup_socket() 一致，把底层 transport / socket / peer / local 补齐
         try:
@@ -488,6 +638,7 @@ class Tor_Socket():
                     self.print(f"[HS-ERROR] {self.peer_str} {e}")
                     await self._abort()
                     break
+                await self._handle_handshake_cell(cell)
                 await self.on_cell(cell, self)
             except Exception as e:
                 import traceback
@@ -495,44 +646,172 @@ class Tor_Socket():
                 self.print("[STACKTRACE]", stack)
                 self.print(f"[ParseErr] {e}")
 
-    async def tor_handshake_client(self, authenticate: bool = False, certs_cell: CellCerts | None = None):
-        version_cell = self.handshake.make_versions()
+    async def _handle_handshake_cell(self, cell: TorCell):
+        hs = self.channel_handshake_state
+        if isinstance(cell, CellCerts):
+            if not hs.received_certs:
+                hs.received_certs = True
+                logger.info(f"[HS] recv CERTS from {self.peer_str}")
 
+                # Parse and minimally verify required peer identity material for AUTH0003
+                try:
+                    self.handshake.retrieve_certs(cell)
+                    ok = (
+                            isinstance(self.handshake.peer_identity_digest, (bytes, bytearray))
+                            and len(self.handshake.peer_identity_digest) == 32
+                            and isinstance(self.handshake.peer_ed_identity_pub, (bytes, bytearray))
+                            and len(self.handshake.peer_ed_identity_pub) == 32
+                    )
+                    hs.peer_certs_verified = bool(ok)
+                    if not hs.peer_certs_verified:
+                        logger.error(f"[HS] peer CERTS parsed but missing required identity fields: {self.peer_str}")
+                except Exception as e:
+                    hs.peer_certs_verified = False
+                    logger.error(f"[HS] peer CERTS parse/verify failed: {self.peer_str} err={e}")
+        elif isinstance(cell, CellAuthChallenge):
+            if not hs.received_auth_challenge:
+                hs.received_auth_challenge = True
+                logger.info(f"[HS] recv AUTH_CHALLENGE from {self.peer_str}")
+            # await self.maybe_send_auth_response()
+
+    async def ensure_handshake_complete(self):
+        if self.channel_handshake_state.handshake_complete:
+            return True
+        await self.handshake_done.wait()
+        return self.channel_handshake_state.handshake_complete
+
+    def enqueue_circuit_op(self, op: Callable[[], Awaitable[Any]]):
+        if self.channel_handshake_state.handshake_complete:
+            asyncio.create_task(op())
+            return
+        self._pending_circuit_ops.append(op)
+
+    async def _flush_pending_circuit_ops(self):
+        if not self._pending_circuit_ops:
+            return
+        pending = list(self._pending_circuit_ops)
+        self._pending_circuit_ops.clear()
+        for op in pending:
+            asyncio.create_task(op())
+
+    def _mark_handshake_complete(self):
+        hs = self.channel_handshake_state
+        if hs.handshake_complete:
+            return
+        hs.handshake_complete = True
+        logger.info(f"[HS] handshake complete with {self.peer_str}")
+        self.handshake_done.set()
+        asyncio.create_task(self._flush_pending_circuit_ops())
+
+    async def maybe_send_auth_response(self):
+        hs = self.channel_handshake_state
+        if hs.handshake_complete:
+            logger.info(f"[HS] Ignoring AUTH response attempt after handshake complete {self.peer_str}")
+            return
+        if hs.sent_authenticate:
+            return
+        if not hs.received_auth_challenge:
+            logger.info(f"[HS] Refusing to send AUTHENTICATE before AUTH_CHALLENGE from {self.peer_str}")
+            return
+        if not hs.received_certs:
+            logger.info(f"[HS] Waiting for peer CERTS before AUTHENTICATE to {self.peer_str}")
+            return
+        if not hs.peer_certs_verified:
+            logger.info(f"[HS] Waiting for verified peer CERTS before AUTHENTICATE to {self.peer_str}")
+            return
+        if self._certs_cell_for_auth is None:
+            logger.error(f"[HS] Cannot send CERTS/AUTHENTICATE to {self.peer_str}: CERTS payload missing")
+            return
+
+        if not hs.sent_certs:
+            logger.info(f"[HS] send CERTS to {self.peer_str}")
+            await self.send_cell(self._certs_cell_for_auth)
+            hs.sent_certs = True
+            await self.flush_ctrl()
+
+        if AUTH_METHOD_ED25519_SHA256 in self.handshake.auth_methods:
+            slog = self.handshake._slog_at_auth_challenge or self.link_transcript.snapshot_recv_digest()
+            clog = self.link_transcript.snapshot_sent_digest()
+
+            # --- DEBUG: verify CID matches the RSA ID cert we are about to send in CERTS ---
+            try:
+                if self._certs_cell_for_auth is not None:
+                    for cert_type, cert_bytes in self._certs_cell_for_auth.certs:
+                        if cert_type == CT_RSA_ID_X509:
+                            cert = x509.load_der_x509_certificate(cert_bytes, default_backend())
+                            cid_from_cert = self.handshake.rsa_identity_digest_pkcs1(cert.public_key())
+                            cid_from_key = self.handshake.rsa_identity_digest_pkcs1(self.rsa_identity_key)
+                            self.print(
+                                f"[AUTH0003-CHK] CID(key)={cid_from_key[:8].hex()} CID(cert)={cid_from_cert[:8].hex()}")
+                            break
+            except Exception as e:
+                self.print(f"[AUTH0003-CHK] CID compare failed: {e}")
+
+            auth_cell = await self._make_authenticate_auth0003(slog=slog, clog=clog)
+            self.print("[AUTH0003-CHK] SLOG =", slog.hex()[:16], "CLOG =", clog.hex()[:16])
+            self.print("[AUTH0003-CHK] sent_digest_now =", self.link_transcript.snapshot_sent_digest().hex()[:16])
+
+            auth_raw = self.protocol.serialize(auth_cell)
+
+            payload = auth_raw
+            print("[DEBUG][AUTH_CELL] type/len+head =", payload[:80].hex())
+            print("[DEBUG][AUTH_CELL] AUTH0003?     =", auth_raw[11:19])
+
+            logger.info(f"[HS] send AUTHENTICATE to {self.peer_str}")
+            await self._send_raw_immediate(auth_raw, update_transcript=False)
+            self.link_transcript.update_sent(auth_raw)
+            hs.sent_authenticate = True
+        else:
+            logger.info(f"[HS] AUTH0003 not offered by {self.peer_str}; skipping AUTHENTICATE send")
+
+    async def tor_handshake_client(self, authenticate: bool = False, certs_cell: CellCerts | None = None):
+        if self.channel_handshake_state.handshake_complete:
+            logger.info(f"[HS] Channel handshake already complete with {self.peer_str}; skipping client handshake")
+            return
+        if self._handshake_started:
+            logger.info(f"[HS] Channel handshake already in progress with {self.peer_str}; ignoring duplicate request")
+            return
+        self._handshake_started = True
+
+
+        version_cell = self.handshake.make_versions()
         await self.send_cell(version_cell)
+        await self.flush_ctrl()
 
         await asyncio.wait_for(self.handshake.version_event.wait(), 60.0)
-        await self.handshake.wait_for_responder_handshake()
 
         if authenticate:
             if certs_cell is None:
                 logger.error("authenticate=True but no CERTS cell provided")
                 raise ValueError("CERTS cell required when authenticate=True")
+            self._certs_cell_for_auth = certs_cell
             await self.handshake.wait_for_auth_challenge()
-            await self.send_cell(certs_cell)
-            if AUTH_METHOD_ED25519_SHA256 in self.handshake.auth_methods:
-                # ⚠️ AUTHENTICATE 自己不应该包含在它所签名的 SLOG/CLOG 中（自指悖论）
-                slog = self.link_transcript.snapshot_recv_digest()
-                clog = self.link_transcript.snapshot_sent_digest()
-                auth_cell = await self._make_authenticate_auth0003(slog=slog, clog=clog)
-                auth_raw = self.protocol.serialize(auth_cell)
-                await self._send_raw_immediate(auth_raw, update_transcript=False)
-                self.link_transcript.update_sent(auth_raw)
-                logger.debug("initiator_auth_sent")
-            else:
-                logger.warning(
-                    "AUTH_CHALLENGE does not include AUTH0003; skipping AUTHENTICATE"
-                )
+            await self.maybe_send_auth_response()
+
+        await self.handshake.wait_for_responder_handshake()
+
         net_info_cell = await self.handshake.make_net_info(self.peer, self.local)
         await self.send_cell(net_info_cell)
         self.handshake.mark_done()
 
     async def tor_handshake_server(self, peer_version_cell: CellVersions, certs_cell, certs_path):
+        if self.channel_handshake_state.handshake_complete:
+            logger.info(f"[HS] Channel handshake already complete with {self.peer_str}; skipping server handshake")
+            return
+        if self._handshake_started:
+            logger.info(f"[HS] Channel handshake already in progress with {self.peer_str}; ignoring duplicate request")
+            return
+        self._handshake_started = True
+
         version_cell = self.handshake.make_versions()
         await self.send_cell(version_cell)
         self.handshake.retrieve_versions(peer_version_cell)
         await self.send_cell(certs_cell)
+        self.channel_handshake_state.sent_certs = True
+        logger.info(f"[HS] send CERTS to {self.peer_str}")
         auth_cell = CellAuthChallenge()
         await self.send_cell(auth_cell)
+        await self.flush_ctrl()
         self.handshake._auth_challenge = auth_cell.challenge
         self.handshake._auth_chal_event.set()  # optional but useful
         self.handshake._set_state(HandshakeState.SENT_AUTH_CHAL)
@@ -571,7 +850,10 @@ class Tor_Socket():
         self.peer_tls_cert_der = peer_cert_der
         scert = hashlib.sha256(peer_cert_der).digest()
 
+
+        # TLS exporter for AUTH0003
         tlssecrets = tls_exporter_auth0003(ssl_obj, cid)
+        print("[DEBUG][TLSSECRETS] ctx=CID(raw) =", tlssecrets[:8].hex())
 
         body = self.handshake.build_auth0003_body(
             cid=cid,
@@ -593,19 +875,29 @@ class Tor_Socket():
 
     async def send_cell(self, cell):
         print("send cell: ", cell)
-        #先在这里加个验证，验证CellAuthenticate的格式是否合法
+
+        # Validate AUTH0003 length if present (optional)
         if isinstance(cell, CellAuthenticate) and cell.auth_type == 0x0003:
             auth_len = len(cell.auth_data)
-            self.print(
-                f"sent AUTHENTICATE authtype=0x{cell.auth_type:04x} authlen={auth_len}"
-            )
+            self.print(f"sent AUTHENTICATE authtype=0x{cell.auth_type:04x} authlen={auth_len}")
             assert auth_len == 352
+
         if self._closing.is_set():
             self.print(f"[SendDrop] closed: {self.peer_str} {cell}")
             return False
+
         buf = self.protocol.serialize(cell)
+        now = asyncio.get_running_loop().time()
+
+        # Treat AUTHENTICATE(AUTH0003) as control-plane SOLO:
+        # It must not be merged with other ctrl cells into a single blob.
+        if isinstance(cell, CellAuthenticate) and cell.auth_type == 0x0003:
+            await self._q_ctrl.put((buf, now, self._CTRL_SOLO, None))
+            self._wakeup.set()
+            return False
+
         if self._is_control_cell(cell):
-            await self._q_ctrl.put((buf, asyncio.get_running_loop().time()))
+            await self._q_ctrl.put((buf, now, 0, None))
             self._wakeup.set()
             return False
         else:
@@ -647,17 +939,46 @@ class Tor_Socket():
                 out = bytearray()
                 t0 = loop.time()
                 ctrl_count = 0
+
                 while not self._q_ctrl.empty():
-                    buf, enqueued_at = await self._q_ctrl.get()
+                    item = await self._q_ctrl.get()
+
+                    # Backward compatibility if any old tuples exist
+                    # Old: (buf, enqueued_at)
+                    if len(item) == 2:
+                        buf, enqueued_at = item
+                        flags, fut = 0, None
+                    else:
+                        buf, enqueued_at, flags, fut = item
+
+                    # Barrier: flush all pending ctrl bytes then resolve the future
+                    if flags & self._CTRL_BARRIER:
+                        if out:
+                            await self._write_once(bytes(out))
+                            out.clear()
+                        if fut is not None and not fut.done():
+                            fut.set_result(True)
+                        continue
+
+                    # SOLO: flush pending ctrl, then write this buf alone
+                    if flags & self._CTRL_SOLO:
+                        if out:
+                            await self._write_once(bytes(out))
+                            out.clear()
+                        await self._write_once(buf)
+                        continue
+
                     out.extend(buf)
                     self._maybe_log_queue("ctrl", enqueued_at, self._q_ctrl.qsize())
                     ctrl_count += 1
                     if (loop.time() - t0) > 0.0002 or ctrl_count >= 8:
                         break
+
                 if out:
-                    await self._write_once(bytes(out))   # ★ 注入生效点
+                    await self._write_once(bytes(out))
                     continue
 
+                # Data plane (keep your existing logic)
                 out.clear()
                 t0 = loop.time()
                 total = 0
@@ -673,7 +994,7 @@ class Tor_Socket():
                 if out:
                     if self._limiter is not None:
                         await self._limiter.consume(len(out))
-                    await self._write_once(bytes(out))   # ★ 注入生效点
+                    await self._write_once(bytes(out))
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -702,20 +1023,17 @@ class Tor_Socket():
             raise
 
     async def _write_once(self, blob: bytes):
-        # if (len(blob) % 514) != 0:
-        #     self.print(f"[WRITE-MISALIGN] len={len(blob)} not multiple of 514 head32={blob[:32].hex()}")
-        #     raise ValueError("write blob misaligned")
-
         if self._closing.is_set() or self.writer is None:
             return
         try:
-            self.link_transcript.update_sent(blob)
-            # ★ 若注入器存在则走注入器，否则直写
             if self._inj is not None:
-                await self._inj.send(blob)       # ★
+                await self._inj.send(blob)
             else:
                 self.writer.write(blob)
                 await self.writer.drain()
+
+            # Update transcript only after the write has completed
+            self.link_transcript.update_sent(blob)
         except Exception as e:
             self.print(f"[WriteErr] {self.peer_str} {e}")
             await self._abort()
@@ -939,6 +1257,7 @@ class TorHandshake:
         self._auth_challenge: bytes | None = None
         self._auth_chal_event = asyncio.Event()
         self._auth_methods: list[int] = []
+        self._slog_at_auth_challenge: bytes | None = None
 
     @staticmethod
     def _make_new_event():
@@ -974,8 +1293,9 @@ class TorHandshake:
         elif isinstance(cell, CellAuthenticate):
             if self.state.value < HandshakeState.SENT_AUTH_CHAL.value:
                 raise RuntimeError("Received AUTHENTICATE before AUTH_CHALLENGE during handshake")
-            # optional: verify signature here
-            # self._set_state(HandshakeState.GOT_AUTH_CHAL)  # add a state, or just keep GOT_AUTH_CHAL
+            # Minimal AUTH0003 structural validation (length + TYPE marker).
+            if getattr(cell, "auth_type", None) == AUTH_METHOD_ED25519_SHA256:
+                signed, sig = _parse_auth0003(cell.auth_data)  # will raise if invalid
 
         elif isinstance(cell, CellCerts):
             if self.state.value < HandshakeState.GOT_VERSIONS.value:
@@ -987,7 +1307,9 @@ class TorHandshake:
             self._set_state(HandshakeState.GOT_AUTH_CHAL)
             self._auth_challenge = cell.challenge
             self._auth_methods = list(getattr(cell, "methods", []) or [])
+            self._slog_at_auth_challenge = self.tor_socket.link_transcript.snapshot_recv_digest()
             self._auth_chal_event.set()
+
         elif isinstance(cell, CellNetInfo):
             if self.state.value < HandshakeState.GOT_AUTH_CHAL.value and self.tor_socket.handshake_initiator:
                 raise RuntimeError("Received NETINFO before AUTH_CHALLENGE during handshake")
@@ -1015,7 +1337,7 @@ class TorHandshake:
         if self.state == HandshakeState.DONE:
             return
         self._set_state(HandshakeState.DONE)
-        self.tor_socket.handshake_done.set()
+        self.tor_socket._mark_handshake_complete()
 
     @staticmethod
     def rsa_identity_digest_pkcs1(rsa_public_key) -> bytes:
@@ -1052,7 +1374,6 @@ class TorHandshake:
         tlssecrets: bytes,
     ) -> bytes:
         """
-        Return AUTH0003 Authentication body bytes, length 384.
 
         Minimal self-test example (requires ed25519 keys and a link_auth_key)::
 
@@ -1067,9 +1388,7 @@ class TorHandshake:
                 scert=fake32,
                 tlssecrets=fake32,
             )
-            assert len(body) == 384
-            signed_part = body[:320]
-            signature = body[320:]
+
             handshake.tor_socket.link_auth_key.public_key().verify(signature, signed_part)
 
         """
@@ -1105,6 +1424,17 @@ class TorHandshake:
             + tlssecrets
             + rand_bytes
         )
+
+        print("[DEBUG][AUTH0003] CID        =", cid[:8].hex(), "len=", len(cid))
+        print("[DEBUG][AUTH0003] SID        =", sid[:8].hex(), "len=", len(sid))
+        print("[DEBUG][AUTH0003] CID_ED     =", cid_ed[:8].hex(), "len=", len(cid_ed))
+        print("[DEBUG][AUTH0003] SID_ED     =", sid_ed[:8].hex(), "len=", len(sid_ed))
+        print("[DEBUG][AUTH0003] SLOG       =", slog[:8].hex(), "len=", len(slog))
+        print("[DEBUG][AUTH0003] CLOG       =", clog[:8].hex(), "len=", len(clog))
+        print("[DEBUG][AUTH0003] SCERT      =", scert[:8].hex(), "len=", len(scert))
+        print("[DEBUG][AUTH0003] TLSSECRETS =", tlssecrets[:8].hex(), "len=", len(tlssecrets))
+        print("[DEBUG][AUTH0003] RAND       =", rand_bytes[:8].hex(), "len=", len(rand_bytes))
+
         assert len(signed_part) == 288
 
         self.tor_socket.print(
@@ -1168,22 +1498,45 @@ class TorHandshake:
         return version
 
     def retrieve_certs(self, cell_certs: CellCerts):
+        self.peer_identity_digest = None
+        self.peer_ed_identity_pub = None
         self.peer_cert_list = cell_certs.certs
+
+        # Reset fields to avoid stale values from previous connections
+        self.peer_identity_digest = None
+        self.peer_ed_identity_pub = None
+
         for cert_type, cert_bytes in self.peer_cert_list:
             if cert_type == CT_RSA_ID_X509:
+                if self.peer_identity_digest is not None:
+                    raise ValueError("Duplicate CT_RSA_ID_X509 in CERTS")
+
                 cert = x509.load_der_x509_certificate(cert_bytes, default_backend())
-                spki = cert.public_key().public_bytes(
-                    encoding=serialization.Encoding.DER,
-                    format=serialization.PublicFormat.SubjectPublicKeyInfo
-                )
-                digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
-                digest.update(spki)
-                self.peer_identity_digest = digest.finalize()
+                pub = cert.public_key()
+                if not isinstance(pub, rsa.RSAPublicKey):
+                    raise ValueError(f"CT_RSA_ID_X509 is not an RSA public key: {type(pub)}")
+
+                # Tor expects SHA256(DER(RSA public key)), often PKCS#1 RSAPublicKey DER
+                self.peer_identity_digest = self.rsa_identity_digest_pkcs1(pub)
+
+
             elif cert_type == CT_RSA_TO_ED_CROSS:
-                CROSSCERT_PREFIX = b"Tor TLS RSA/Ed25519 cross-certificate"
-                prefix_len = len(CROSSCERT_PREFIX)
-                ed_pub = cert_bytes[prefix_len : prefix_len + 32]
-                self.peer_ed_identity_pub = ed_pub
+                if self.peer_ed_identity_pub is not None:
+                    raise ValueError("Duplicate CT_RSA_TO_ED_CROSS in CERTS")
+
+                # CT_RSA_TO_ED_CROSS is not guaranteed to start with the ASCII prefix.
+                # In Tor link certs, the Ed25519 identity key is the first 32 bytes of the crosscert body.
+                self.peer_ed_identity_pub = parse_rsa_to_ed_crosscert_ed_pub(cert_bytes)
+
+            else:
+                # Ignore other cert types here if you don't need them
+                continue
+
+        if self.peer_identity_digest is None:
+            raise ValueError("Missing peer RSA identity digest from CERTS (CT_RSA_ID_X509)")
+        if self.peer_ed_identity_pub is None:
+            raise ValueError("Missing peer Ed25519 identity pubkey from CERTS (CT_RSA_TO_ED_CROSS)")
+        print("[HS][CERTS] peer_ed_identity_pub =", self.peer_ed_identity_pub.hex())
 
     def retrieve_net_info(self, cell):
         logger.debug('Retrieving NET_INFO cell...')
@@ -1222,3 +1575,25 @@ def _default_client_ctx():
     ctx.verify_mode = ssl.CERT_NONE
     ctx.set_ciphers("ALL:@SECLEVEL=1")
     return ctx
+
+def _parse_auth0003(auth_data: bytes):
+    if len(auth_data) < 352:
+        raise RuntimeError("AUTH0003 too short")
+    if auth_data[:8] != b"AUTH0003":
+        raise RuntimeError("AUTH0003 TYPE mismatch")
+    signed = auth_data[:288]
+    sig = auth_data[288:352]
+    return signed, sig
+
+
+def parse_rsa_to_ed_crosscert_ed_pub(cert_bytes: bytes) -> bytes:
+    # English comments, as you prefer
+    prefix = b"Tor TLS RSA/Ed25519 cross-certificate"
+    if cert_bytes.startswith(prefix):
+        cert_bytes = cert_bytes[len(prefix):]
+
+    if len(cert_bytes) < 32:
+        raise ValueError(f"RSA->Ed crosscert too short: {len(cert_bytes)} bytes")
+
+    # The first 32 bytes are the Ed25519 identity public key
+    return cert_bytes[:32]

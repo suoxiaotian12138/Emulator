@@ -134,6 +134,7 @@ class Tor_Node(Tor_base):
     async def create_circuit(self, create_cell, sock, circuit_id):
         """Quickly select several random nodes and freely add nodes, such as exit nodes"""
         t0 = time.perf_counter()
+        await sock.ensure_handshake_complete()
         validate_incoming_create_circid(sock.channel, circuit_id, remote_initiator=not sock.handshake_initiator)
         circuit = await self.circuit_list.create_circuit_server(circuit_id, sock.channel)
         circuit.scheduler = self._circuit_scheduler
@@ -199,31 +200,38 @@ class Tor_Node(Tor_base):
                         self._ev("tor_handshake_fail", peer=f"{ip}:{port}", side="client", fail_reason=FailReason.NTOR_FAIL.value, error=str(e), version=getattr(sock.protocol, "version", None), ms=(time.perf_counter() - t_tor) * 1000.0)
                         raise
 
-        await sock.handshake_done.wait()
+        async def _send_extend():
+            await sock.ensure_handshake_complete()
 
-        circuit = self.circuit_list.get_by_id(circuit_id)
-        simple_node = Tor_Router_simple(sock)
-        circuit.circuit_nodes.append(simple_node)
+            circuit = self.circuit_list.get_by_id(circuit_id)
+            simple_node = Tor_Router_simple(sock)
+            circuit.circuit_nodes.append(simple_node)
 
-        circid_out = allocate_circid(sock.channel)
-        circuit.bind_next(sock.channel, circid_out)
+            circid_out = allocate_circid(sock.channel)
+            circuit.bind_next(sock.channel, circid_out)
 
-        # 发送下游 CREATE2，计时并记录是否成功（下游会回 EXTENDED2）
-        create2 = Cell_Create2(handshake_type=handshake_type, onion_skin=skin, circuit_id=circid_out)
-        t_ext = time.perf_counter()
-        try:
-            await sock.send_cell(create2)
-            self._ev("circuit_extend_downstream_sent",
-                     circ_id=circuit_id, target=f"{ip}:{port}")
-            self._ev(
-                "cell_trace", circ_id=circuit_id, peer=f"{ip}:{port}",
-                side="node", dir="send", cell_cmd="CREATE2"
-            )
-        except Exception as e:
-            self._ev("circuit_extend_downstream_fail",
-                     circ_id=circuit_id, target=f"{ip}:{port}", error=str(e),
-                     ms=(time.perf_counter() - t_ext) * 1000.0)
-            raise
+            # 发送下游 CREATE2，计时并记录是否成功（下游会回 EXTENDED2）
+            create2 = Cell_Create2(handshake_type=handshake_type, onion_skin=skin, circuit_id=circid_out)
+            t_ext = time.perf_counter()
+            try:
+                await sock.send_cell(create2)
+                self._ev("circuit_extend_downstream_sent",
+                         circ_id=circuit_id, target=f"{ip}:{port}")
+                self._ev(
+                    "cell_trace", circ_id=circuit_id, peer=f"{ip}:{port}",
+                    side="node", dir="send", cell_cmd="CREATE2"
+                )
+            except Exception as e:
+                self._ev("circuit_extend_downstream_fail",
+                         circ_id=circuit_id, target=f"{ip}:{port}", error=str(e),
+                         ms=(time.perf_counter() - t_ext) * 1000.0)
+                raise
+
+        if sock.channel_handshake_state.handshake_complete:
+            await _send_extend()
+        else:
+            sock.enqueue_circuit_op(_send_extend)
+            self._ev("circuit_extend_queued", circ_id=circuit_id, target=f"{ip}:{port}")
 
     async def reply_extend(self, cell: CellCreated2, sock):
         circuit_id = cell.circuit_id

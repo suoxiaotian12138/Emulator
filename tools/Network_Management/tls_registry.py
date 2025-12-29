@@ -38,6 +38,5 @@ def register_server_ctx(node_id: str, certfile: str, keyfile: str):
 def get_server_ctx(node_id: str):
     return _server_ctxs[node_id]
 
-_client_ctx = make_client_ctx()
 def get_client_ctx():
-    return _client_ctx
+    return make_client_ctx()
