@@ -159,7 +159,7 @@ class TorCircuit(CircuitRef):
         self.sendq_stats = {"dequeued": 0, "wait_total_s": 0.0, "avg_wait_s": 0.0}
         self.scheduler = None
 
-    def connect_to_guard(self, guard):
+    def make_create2_cell_to_guard(self, guard):
         key_agreement_cls = NtorKeyAgreement
         circuit_node = guard
         onion_skin = circuit_node.create_onion_skin()
@@ -376,9 +376,7 @@ class CircuitManager:
 
         # —— isolation 模式，或者显式要求新建 —— #
         await self.client.ready_to_send.wait()
-        socket = self.client.socket_map.get(self.client.guard.addr)
-        if not socket:
-            raise RuntimeError("[cirmgr] guard socket not ready")
+
 
         # 串行化建路
         async with self._build_sem:
@@ -394,7 +392,7 @@ class CircuitManager:
 
             # 真正建路
             try:
-                circ = await self.client.create_circuit(socket, hops_count, extend_routers)
+                circ = await self.client.create_circuit(hops_count, extend_routers)
             except Exception as e:
                 import traceback
                 print(f"[cirmgr] build error: {repr(e)}")

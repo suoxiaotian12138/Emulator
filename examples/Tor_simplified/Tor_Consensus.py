@@ -5,12 +5,13 @@ from stem.descriptor.remote import DescriptorDownloader
 from stem.descriptor.server_descriptor import RelayDescriptor
 
 import aiohttp, asyncio, random, base64, binascii
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Callable
 from datetime import datetime
 import hashlib, time, statistics
 from typing import Optional, List, Dict
 
 class Tor_Consensus:
+    TORBOX_IP_PREFIX = "192.168.66."
     def __init__(self, model, dire_ip='192.168.66.241', dire_port=9030) -> None:
         self.dire_ip = dire_ip
         self.dire_port = dire_port
@@ -142,7 +143,7 @@ class Tor_Consensus:
         return results
 
     def get_random_router(self, flags=None, has_dir_port=None,
-                          exclude=None, exclude_flags=None):
+                          exclude=None, exclude_flags=None, ip_pred: Callable[[Dict], bool] | None = None):
         """
         Select a random router:
         - flags: required flags (all must be present)
@@ -166,6 +167,9 @@ class Tor_Consensus:
             if exclude_flags & r_flags:
                 continue
 
+            if ip_pred and not ip_pred(r):
+                continue
+
             candidates.append(r)
         if not candidates:
             raise RuntimeError("No available routers after exclusion")
@@ -176,6 +180,7 @@ class Tor_Consensus:
         flags = ['Guard']
         return self.get_random_router(flags=flags, exclude=exclude)
 
+
     def get_random_middle_node(self, exclude=None):
         # 中间节点：需要 Fast/Running/Valid，且不能有 Guard/Exit 标志
         flags = ['Fast', 'Running', 'Valid']
@@ -185,6 +190,58 @@ class Tor_Consensus:
     def get_random_exit_node(self, exclude=None):
         flags = ['Exit', 'Fast', 'Running', 'Valid']
         return self.get_random_router(flags=flags, exclude=exclude)
+
+    def get_random_guard_node_torbox(self, exclude=None):
+        """
+        Select a Guard node whose IP falls in the TorBox range (192.168.66.xxx).
+        """
+        flags = ['Guard']
+        return self.get_random_router(flags=flags, exclude=exclude, ip_pred=self._is_torbox_ip)
+
+    def get_random_guard_node_not_torbox(self, exclude=None):
+        """
+        Select a Guard node whose IP is outside the TorBox range (not 192.168.66.xxx).
+        """
+        flags = ['Guard']
+        return self.get_random_router(flags=flags, exclude=exclude, ip_pred=self._is_not_torbox_ip)
+
+    def get_random_middle_node_torbox(self, exclude=None):
+        """
+        Select a middle node (Fast/Running/Valid, not Guard/Exit) within the TorBox IP range.
+        """
+        flags = ['Fast', 'Running', 'Valid']
+        exclude_flags = ['Guard', 'Exit']
+        return self.get_random_router(flags=flags, exclude=exclude, exclude_flags=exclude_flags, ip_pred=self._is_torbox_ip)
+
+    def get_random_middle_node_not_torbox(self, exclude=None):
+        """
+        Select a middle node (Fast/Running/Valid, not Guard/Exit) outside the TorBox IP range.
+        """
+        flags = ['Fast', 'Running', 'Valid']
+        exclude_flags = ['Guard', 'Exit']
+        return self.get_random_router(flags=flags, exclude=exclude, exclude_flags=exclude_flags, ip_pred=self._is_not_torbox_ip)
+
+    def get_random_exit_node_torbox(self, exclude=None):
+        """
+        Select an Exit node within the TorBox IP range (192.168.66.xxx).
+        """
+        flags = ['Exit', 'Fast', 'Running', 'Valid']
+        return self.get_random_router(flags=flags, exclude=exclude, ip_pred=self._is_torbox_ip)
+
+    def get_random_exit_node_not_torbox(self, exclude=None):
+        """
+        Select an Exit node outside the TorBox IP range (not 192.168.66.xxx).
+        """
+        flags = ['Exit', 'Fast', 'Running', 'Valid']
+        return self.get_random_router(flags=flags, exclude=exclude, ip_pred=self._is_not_torbox_ip)
+
+    def _is_torbox_ip(self, router: Dict) -> bool:
+        """TorBox nodes are approximated as those with IPs starting with 192.168.66.xxx."""
+        ip = router.get("ip", "")
+        return ip.startswith(self.TORBOX_IP_PREFIX)
+
+    def _is_not_torbox_ip(self, router: Dict) -> bool:
+        return not self._is_torbox_ip(router)
 
     @staticmethod
     def _compute_consensus_id(relays: List[Dict], model: str, dire_ip: str, dire_port: int) -> str:

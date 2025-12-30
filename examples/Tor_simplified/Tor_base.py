@@ -150,7 +150,7 @@ class Tor_base:
             # ★必须统一走 handle_connection，确保回收
             self._spawn_bg_task(self.handle_connection(addr, tor_sock))
 
-        self.print(f"[LISTEN] Node {self.name} listening on {self.host}:{self.port}")
+        # self.print(f"[LISTEN] Node {self.name} listening on {self.host}:{self.port}")
         try:
             await accept_tls_connections(
                 self.socket,

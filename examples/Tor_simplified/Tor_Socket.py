@@ -741,21 +741,15 @@ class Tor_Socket():
                             cert = x509.load_der_x509_certificate(cert_bytes, default_backend())
                             cid_from_cert = self.handshake.rsa_identity_digest_pkcs1(cert.public_key())
                             cid_from_key = self.handshake.rsa_identity_digest_pkcs1(self.rsa_identity_key)
-                            self.print(
-                                f"[AUTH0003-CHK] CID(key)={cid_from_key[:8].hex()} CID(cert)={cid_from_cert[:8].hex()}")
                             break
             except Exception as e:
                 self.print(f"[AUTH0003-CHK] CID compare failed: {e}")
 
             auth_cell = await self._make_authenticate_auth0003(slog=slog, clog=clog)
-            self.print("[AUTH0003-CHK] SLOG =", slog.hex()[:16], "CLOG =", clog.hex()[:16])
-            self.print("[AUTH0003-CHK] sent_digest_now =", self.link_transcript.snapshot_sent_digest().hex()[:16])
 
             auth_raw = self.protocol.serialize(auth_cell)
 
             payload = auth_raw
-            print("[DEBUG][AUTH_CELL] type/len+head =", payload[:80].hex())
-            print("[DEBUG][AUTH_CELL] AUTH0003?     =", auth_raw[11:19])
 
             logger.info(f"[HS] send AUTHENTICATE to {self.peer_str}")
             await self._send_raw_immediate(auth_raw, update_transcript=False)
@@ -853,7 +847,6 @@ class Tor_Socket():
 
         # TLS exporter for AUTH0003
         tlssecrets = tls_exporter_auth0003(ssl_obj, cid)
-        print("[DEBUG][TLSSECRETS] ctx=CID(raw) =", tlssecrets[:8].hex())
 
         body = self.handshake.build_auth0003_body(
             cid=cid,
@@ -874,13 +867,13 @@ class Tor_Socket():
             await self.send_cell(cell)
 
     async def send_cell(self, cell):
-        print("send cell: ", cell)
+        # print("send cell: ", cell)
 
         # Validate AUTH0003 length if present (optional)
-        if isinstance(cell, CellAuthenticate) and cell.auth_type == 0x0003:
-            auth_len = len(cell.auth_data)
-            self.print(f"sent AUTHENTICATE authtype=0x{cell.auth_type:04x} authlen={auth_len}")
-            assert auth_len == 352
+        # if isinstance(cell, CellAuthenticate) and cell.auth_type == 0x0003:
+        #     auth_len = len(cell.auth_data)
+        #     self.print(f"sent AUTHENTICATE authtype=0x{cell.auth_type:04x} authlen={auth_len}")
+        #     assert auth_len == 352
 
         if self._closing.is_set():
             self.print(f"[SendDrop] closed: {self.peer_str} {cell}")
@@ -1149,7 +1142,6 @@ class Tor_Socket():
             else:
                 total_len = header_len + TorCell.MAX_PAYLOAD_SIZE
             skipped = await self._wait_for_bytes(total_len, consume=True)
-            self.print(f"[UnknownCell] cmd={cmd_num} skipped={len(skipped) if skipped else 0}")
             return None
 
 
@@ -1168,17 +1160,17 @@ class Tor_Socket():
 
         self.link_transcript.update_recv(raw)
         hdr_hex = raw[:header_len].hex() if raw else ""
-        self.print(f"[HDR] ver={self.protocol.version} hlen={header_len} circ={circ_id} cmd={cmd_num} hdr={hdr_hex}")
+        # self.print(f"[HDR] ver={self.protocol.version} hlen={header_len} circ={circ_id} cmd={cmd_num} hdr={hdr_hex}")
 
 
         if not cell_cls.is_var_len():
             expected_len = header_len + TorCell.MAX_PAYLOAD_SIZE
             if self.protocol.version >= 4 and expected_len == 514 and len(raw) != expected_len:
                 raise ValueError(f"[RECV-LEN] cmd={cmd_num} raw_len={len(raw)} expected={expected_len}")
-            print(f"[RecvCell] cmd={cmd_num} raw_len={len(raw)}")
+            # print(f"[RecvCell] cmd={cmd_num} raw_len={len(raw)}")
         else:
-            print(f"[RecvCell] cmd={cmd_num} raw_len={len(raw)}")
-
+            # print(f"[RecvCell] cmd={cmd_num} raw_len={len(raw)}")
+            pass
         payload_offset = header_len + (2 if cell_cls.is_var_len() else 0)
         payload = raw[payload_offset:]
 
@@ -1425,15 +1417,6 @@ class TorHandshake:
             + rand_bytes
         )
 
-        print("[DEBUG][AUTH0003] CID        =", cid[:8].hex(), "len=", len(cid))
-        print("[DEBUG][AUTH0003] SID        =", sid[:8].hex(), "len=", len(sid))
-        print("[DEBUG][AUTH0003] CID_ED     =", cid_ed[:8].hex(), "len=", len(cid_ed))
-        print("[DEBUG][AUTH0003] SID_ED     =", sid_ed[:8].hex(), "len=", len(sid_ed))
-        print("[DEBUG][AUTH0003] SLOG       =", slog[:8].hex(), "len=", len(slog))
-        print("[DEBUG][AUTH0003] CLOG       =", clog[:8].hex(), "len=", len(clog))
-        print("[DEBUG][AUTH0003] SCERT      =", scert[:8].hex(), "len=", len(scert))
-        print("[DEBUG][AUTH0003] TLSSECRETS =", tlssecrets[:8].hex(), "len=", len(tlssecrets))
-        print("[DEBUG][AUTH0003] RAND       =", rand_bytes[:8].hex(), "len=", len(rand_bytes))
 
         assert len(signed_part) == 288
 
@@ -1536,7 +1519,6 @@ class TorHandshake:
             raise ValueError("Missing peer RSA identity digest from CERTS (CT_RSA_ID_X509)")
         if self.peer_ed_identity_pub is None:
             raise ValueError("Missing peer Ed25519 identity pubkey from CERTS (CT_RSA_TO_ED_CROSS)")
-        print("[HS][CERTS] peer_ed_identity_pub =", self.peer_ed_identity_pub.hex())
 
     def retrieve_net_info(self, cell):
         logger.debug('Retrieving NET_INFO cell...')

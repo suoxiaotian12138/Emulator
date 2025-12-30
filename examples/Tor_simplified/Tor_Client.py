@@ -226,7 +226,11 @@ class Tor_Client(Tor_base):
             )
             await socket.send_cell(stream.make_relay(CellRelayData(chunk, circuit.id)))
 
-    async def create_circuit(self, socket, hops_count=3, extend_routers=None):
+    async def create_circuit(self, hops_count=3, extend_routers=None):
+        socket = self.socket_map.get(self.guard.addr)
+        if not socket:
+            raise RuntimeError("[cirmgr] guard socket not ready")
+
         # print(f"[create_circuit] begin -> guard {self.guard.addr} hops={hops_count}")
         circuit = await self.circuit_list.create_new_client(socket.channel)
         #guard选择记录
@@ -244,7 +248,7 @@ class Tor_Client(Tor_base):
         self._ev("path_step_selected", circ_id=circuit.id, hop=1, nickname=guard_hop.nickname,
                  fp=guard_hop.fingerprint_str, role="guard",
                  consensus_id=snap["consensus_id"])
-        create_cell = circuit.connect_to_guard(guard_hop)
+        create_cell = circuit.make_create2_cell_to_guard(guard_hop)
         self._ev(
             "cell_trace", circ_id=circuit.id, peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}",
             side="client", dir="send", cell_cmd="CREATE2"
@@ -317,8 +321,8 @@ class Tor_Client(Tor_base):
         return circuit
 
     async def handle_cell(self, cell, sock):
-        self.print("receive client cell_type:", type(cell))
-        self.print("cell content",cell)
+        # self.print("receive client cell_type:", type(cell))
+        # self.print("cell content",cell)
         if isinstance(cell, CellVersions):
             sock.handshake.retrieve_versions(cell)
             # self.print("sock protocol:", sock.protocol.version)
@@ -355,15 +359,14 @@ class Tor_Client(Tor_base):
                     self.print(f"[client] RELAY decrypt failed circ={cell.circuit_id} err={repr(e)}")
                 return
 
-            # 到这里说明已成功识别出 inner
-            self.print(
-                f"[client] RELAY decrypted circ={cell.circuit_id} sid={getattr(cell, 'stream_id', None)} inner={type(inner_cell).__name__}")
+            # # 到这里说明已成功识别出 inner
+            # self.print(
+            #     f"[client] RELAY decrypted circ={cell.circuit_id} sid={getattr(cell, 'stream_id', None)} inner={type(inner_cell).__name__}")
             await self.handle_cell_relay(inner_cell, circuit, cell)
 
     async def handle_cell_relay(self, cell, circuit, origin_cell):
         # self.print("inner_cell:", cell)
         if isinstance(cell, CellRelayExtended2):
-            self.print(f"[client] EXTENDED2 ok circ={circuit.id} (event set)")
             circuit.extended_cell = cell
             self._ev(
                 "cell_trace", circ_id=circuit.id, peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}",
@@ -433,7 +436,6 @@ class Tor_Client(Tor_base):
                     await socket.send_cell(sendme_cell)
         elif isinstance(cell, CellRelaySendMe):
             sid = origin_cell.stream_id
-            self.print(f"[RECV] SENDME sid={sid} circ={circuit.id}")
             self._ev(
                 "cell_trace", circ_id=circuit.id, stream_id=sid,
                 peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}", side="client", dir="recv",
