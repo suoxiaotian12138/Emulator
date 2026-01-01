@@ -48,10 +48,18 @@ class PatternedTorClient(Tor_Client):
             super().__init__()
             self.emit = lambda *_, **__: None  # type: ignore[attr-defined]
 
-    def __init__(self, *args, default_pattern: Pattern | None = None, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.default_pattern = default_pattern.upper() if default_pattern else None
+        self._pattern_lock = asyncio.Lock()
+        self._current_pattern: Pattern | None = None  # Only set during explicit pattern builds
+        self._guard_locks: dict[tuple[str, int], asyncio.Lock] = {}
         self._disable_base_logging()
+
+    async def consensus_init(self):  # type: ignore[override]
+        """Load consensus only; guard/socket is selected on demand."""
+        await self.consensus.consus_init_async()
+        self.ready_to_send.set()
+
 
     def _disable_base_logging(self):
         bus = self._SilentBus()
@@ -76,13 +84,15 @@ class PatternedTorClient(Tor_Client):
             return self._is_torbox_ip(self.guard.ip)
         return not self._is_torbox_ip(self.guard.ip)
 
-    async def _ensure_guard_for_pattern(self, guard_char: str):
+    def _get_guard_lock(self, addr: tuple[str, int]) -> asyncio.Lock:
+        if addr not in self._guard_locks:
+            self._guard_locks[addr] = asyncio.Lock()
+        return self._guard_locks[addr]
+
+    async def _select_guard_for_char(self, guard_char: str) -> Tor_Router:
         if guard_char not in {"R", "T"}:
             raise ValueError(f"Unknown guard pattern char: {guard_char}")
 
-        socket = self.socket_map.get(getattr(self.guard, "addr", None)) if self.guard else None
-        if self._guard_matches_pattern(guard_char) and socket:
-            return
 
         getter = (
             self.consensus.get_random_guard_node_torbox
@@ -93,26 +103,51 @@ class PatternedTorClient(Tor_Client):
         guard_router = Tor_Router(guard_info)
         desc = await self.consensus.fetch_descriptor(guard_router.fingerprint_str)
         guard_router.set_descriptor(desc)
+        return guard_router
 
-        socket = Tor_Socket(
-            self.host,
-            on_cell=self.handle_cell,
-            node_id=self.node_id,
-            limiter=self.limiter,
-            **get_args(sim_ip=self.sim_ip),
-        )
+    async def _get_or_create_guard_socket(self, guard_router: Tor_Router) -> Tor_Socket:
+        """Return an existing handshake-complete socket or establish a new one."""
 
-        await socket.setup_socket(remote_addr=guard_router.addr)
-        self._ev("tls_handshake_done", peer=f"{guard_router.addr[0]}:{guard_router.addr[1]}", side="client")
+        addr = guard_router.addr
+        lock = self._get_guard_lock(addr)
+        async with lock:
+            existing = self.socket_map.get(addr)
+            if existing:
+                if existing.handshake_done.is_set():
+                    return existing
+                # Wait for in-flight handshake to finish if already started
+                await existing.handshake_done.wait()
+                return existing
 
-        self._spawn_bg_task(self.handle_connection(guard_router.addr, socket))
-        await socket.listen_started.wait()
-        await socket.tor_handshake_client()
-        await socket.handshake_done.wait()
-        self._ev("tor_handshake_done", peer=f"{guard_router.addr[0]}:{guard_router.addr[1]}", versions=[3, 4], auth="none")
+            socket = Tor_Socket(
+                self.host,
+                on_cell=self.handle_cell,
+                node_id=self.node_id,
+                limiter=self.limiter,
+                **get_args(sim_ip=self.sim_ip),
+            )
+            await socket.setup_socket(remote_addr=addr)
+            self._ev("tls_handshake_done", peer=f"{addr[0]}:{addr[1]}", side="client")
 
-        self.guard = guard_router
-        self.ready_to_send.set()
+            self._spawn_bg_task(self.handle_connection(addr, socket))
+            await socket.listen_started.wait()
+            await socket.tor_handshake_client()
+            await socket.handshake_done.wait()
+            self._ev("tor_handshake_done", peer=f"{addr[0]}:{addr[1]}", versions=[3, 4], auth="none")
+
+        return socket
+
+    async def _ensure_guard_for_pattern(self, guard_char: str) -> Tor_Socket:
+        if self._guard_matches_pattern(guard_char):
+            socket = self.socket_map.get(self.guard.addr) if self.guard else None
+            if socket and socket.handshake_done.is_set():
+                return socket
+
+        guard_router = await self._select_guard_for_char(guard_char)
+        guard_socket = await self._get_or_create_guard_socket(guard_router)
+
+        self.guard = guard_router  # Bind selected guard to client state for logging
+        return guard_socket
 
     def _select_router(self, role: str, char: str, exclude: Iterable[str]):
         exclude_set = set(exclude or [])
@@ -139,24 +174,22 @@ class PatternedTorClient(Tor_Client):
 
     async def create_circuit(
         self,
-        socket,
         hops_count: int = 3,
         extend_routers: Optional[List[dict]] = None,
-        pattern: Pattern | None = None,
     ):
-        pattern = (pattern or self.default_pattern)
+        pattern = self._current_pattern
         if pattern is None:
-            return await super().create_circuit(socket, hops_count=hops_count, extend_routers=extend_routers)
-
-        pattern = pattern.upper()
-        if pattern not in PATTERNS:
-            raise ValueError(f"Unsupported pattern '{pattern}'. Must be one of {sorted(PATTERNS)}")
+            if not self.guard:
+                guard_info = self.consensus.get_random_guard_node()
+                guard_router = Tor_Router(guard_info)
+                desc = await self.consensus.fetch_descriptor(guard_router.fingerprint_str)
+                guard_router.set_descriptor(desc)
+                self.guard = guard_router
+            await self._get_or_create_guard_socket(self.guard)
+            return await super().create_circuit(hops_count=hops_count, extend_routers=extend_routers)
 
         guard_char, middle_char, exit_char = pattern
-        await self._ensure_guard_for_pattern(guard_char)
-        guard_socket = self.socket_map.get(self.guard.addr)
-        if guard_socket is None:
-            raise RuntimeError("Guard socket not ready for pattern circuit")
+        guard_socket = await self._ensure_guard_for_pattern(guard_char)
 
         if extend_routers is None:
             exclude = {self.guard.fingerprint_str}
@@ -167,6 +200,31 @@ class PatternedTorClient(Tor_Client):
 
         return await self._create_circuit_with_routers(guard_socket, extend_routers, hops_count=hops_count)
 
+    async def build_circuit_by_pattern(
+        self,
+        pattern: Pattern,
+        *,
+        hops_count: int = 3,
+        extend_routers: Optional[List[dict]] = None,
+        isolation_key: str = "general",
+        prefer_new: bool = True,
+    ):
+        """Explicitly build a circuit using the given pattern."""
+
+        pattern = pattern.upper()
+        if pattern not in PATTERNS:
+            raise ValueError(f"Unsupported pattern '{pattern}'. Must be one of {sorted(PATTERNS)}")
+
+        async with self._pattern_lock:
+            self._current_pattern = pattern
+            try:
+                circuit = await self.circuit_mgr.get_or_build(
+                    isolation_key, hops_count=hops_count, extend_routers=extend_routers, prefer_new=prefer_new
+                )
+            finally:
+                self._current_pattern = None
+        return circuit
+
     async def _create_circuit_with_routers(self, socket, extend_routers: List[dict], hops_count=3):
         if hops_count != 3:
             raise ValueError("PatternedTorClient only supports 3-hop circuits")
@@ -174,6 +232,7 @@ class PatternedTorClient(Tor_Client):
             raise ValueError("extend_routers must provide at least middle and exit routers")
 
         circuit = await self.circuit_list.create_new_client(socket.channel)
+        circuit.guard_socket = socket  # Record the guard socket used for this circuit
         snap = self.consensus.get_consensus_snapshot()
         t0_total = time.perf_counter()
         # Record when circuit construction begins (after TLS handshake, before first cell).
@@ -297,6 +356,19 @@ class PatternedTorClient(Tor_Client):
         )
 
         return circuit
+
+    def get_active_guard_socket(self, circuit=None) -> Tor_Socket | None:
+        """Safely fetch the guard socket used by a circuit (or current guard)."""
+
+        if circuit is not None:
+            sock = getattr(circuit, "guard_socket", None)
+            if sock:
+                return sock
+        if self.guard:
+            sock = self.socket_map.get(self.guard.addr)
+            if sock and sock.handshake_done.is_set():
+                return sock
+        return None
 
     def _send_destroy(self, circ_id: int):
         sock = self.socket_map.get(self.guard.addr if self.guard else None)

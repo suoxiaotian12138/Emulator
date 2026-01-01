@@ -1,5 +1,6 @@
 import asyncio
 from queue import Queue
+import traceback
 
 from examples.Tor_simplified.Tor_Stream import StreamsList
 from examples.Tor_simplified.Tor_Router import Tor_Router_simple
@@ -346,26 +347,46 @@ class CircuitManager:
         cid = cand[0][0]
         return self.client.circuit_list.get_by_id(cid)
 
-    async def get_or_build(self, isolation_key: str,
-                           exit_hint=None, hops_count=3, extend_routers=None,
-                           prefer_new: bool = False):
-        # —— 第一次检查：持锁只做查表、准备 —— #
-        async with self._lock:
-            circ = self._pick_open(isolation_key)
-            if circ:
-                return circ
+    async def get_or_build(
+        self,
+        isolation_key: str,
+        exit_hint=None,
+        hops_count: int = 3,
+        extend_routers=None,
+        prefer_new: bool = False,
+    ):
+        """
+        Behavior summary:
+        - If prefer_new is True: never reuse any existing OPEN circuit (including "general").
+          Always build a fresh circuit.
+        - If prefer_new is False:
+            - If isolation_enabled:
+                - reuse OPEN circuit for isolation_key if exists, else build.
+            - If not isolation_enabled:
+                - reuse OPEN "general" if exists; if not, wait until "general" appears (no building here).
+                - also alias the returned "general" circuit into the caller's isolation_key.
+        Notes:
+        - All "fast path" reuse checks are done under lock.
+        - Building is serialized by _build_sem.
+        """
 
-            if not self.isolation_enabled:
-                # 没开隔离，可以复用 general
-                circ = self._pick_open("general")
+        # ---- Fast path: reuse if allowed ----
+        async with self._lock:
+            if not prefer_new:
+                # 1) isolation reuse
+                circ = self._pick_open(isolation_key)
                 if circ:
-                    # 给 general 电路挂别名
-                    self.index.setdefault(isolation_key, set()).add(circ.id)
                     return circ
 
-        # 如果没开隔离：只允许等 general，不允许新建
+                # 2) no-isolation: reuse general and alias
+                if not self.isolation_enabled:
+                    circ = self._pick_open("general")
+                    if circ:
+                        self.index.setdefault(isolation_key, set()).add(circ.id)
+                        return circ
+
+        # ---- No-isolation mode: if not prefer_new, never build; only wait for general ----
         if not self.isolation_enabled and not prefer_new:
-            # 等待直到有 general 出现
             while True:
                 await asyncio.sleep(0.5)
                 async with self._lock:
@@ -374,32 +395,40 @@ class CircuitManager:
                         self.index.setdefault(isolation_key, set()).add(circ.id)
                         return circ
 
-        # —— isolation 模式，或者显式要求新建 —— #
+        # ---- Need to build (isolation mode, or prefer_new=True) ----
         await self.client.ready_to_send.wait()
 
-
-        # 串行化建路
+        # Serialize building to avoid stampede
         async with self._build_sem:
+            # Re-check under lock (double-check)
             async with self._lock:
-                circ = self._pick_open(isolation_key)
-                if circ:
-                    return circ
-                if not self.isolation_enabled:
-                    circ = self._pick_open("general")
+                if not prefer_new:
+                    circ = self._pick_open(isolation_key)
                     if circ:
-                        self.index.setdefault(isolation_key, set()).add(circ.id)
                         return circ
 
-            # 真正建路
+                    if not self.isolation_enabled:
+                        circ = self._pick_open("general")
+                        if circ:
+                            self.index.setdefault(isolation_key, set()).add(circ.id)
+                            return circ
+
+            # Actually build a new circuit
             try:
                 circ = await self.client.create_circuit(hops_count, extend_routers)
             except Exception as e:
-                import traceback
                 print(f"[cirmgr] build error: {repr(e)}")
                 print(traceback.format_exc())
                 raise
+
+            # Register/alias
             async with self._lock:
-                self._register(circ, isolation_key=isolation_key, purpose="general", exit_fp=None)
+                self._register(
+                    circ,
+                    isolation_key=isolation_key,
+                    purpose="general",
+                    exit_fp=None,
+                )
             return circ
 
     def mark_used(self, circ):

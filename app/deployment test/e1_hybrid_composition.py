@@ -44,13 +44,13 @@ if sys.platform.startswith("win"):
 # Workload constants (fixed by spec)
 # -------------------------------
 CONCURRENT_USERS = 10
-CIRCUITS_PER_USER = 20
-STREAMS_PER_CIRCUIT = 1
+CIRCUITS_PER_USER =10
+STREAMS_PER_CIRCUIT = 2
 STREAM_CONCURRENCY = 2
 PAYLOAD_BYTES_PER_STREAM = 64 * 1024
 HOPS = 3
-USER_START_JITTER_MS = 100
-GAP_BETWEEN_CIRCUITS_MS = 100
+USER_START_JITTER_MS = 500
+GAP_BETWEEN_CIRCUITS_MS = 200
 GAP_BETWEEN_STREAM_BATCHES_MS = 100
 
 # -------------------------------
@@ -60,8 +60,8 @@ GAP_BETWEEN_STREAM_BATCHES_MS = 100
 # sampling/selection. Keep this explicit ordering aligned with the pattern list
 # provided in the experiment description.
 PATTERN_ORDER: list[Pattern] = [
-    "RRR",
     "TTT",
+    "RRR",
     "RTR",
     "TRT",
     "RRT",
@@ -188,7 +188,11 @@ def env_str(key: str, default: str) -> str:
 
 
 async def open_stream_on_circuit(client: Tor_Client, circuit, addr: tuple[str, int]):
-    socket = client.socket_map.get(client.guard.addr, None)
+    socket = getattr(client, "get_active_guard_socket", None)
+    if callable(socket):
+        socket = socket(circuit)
+    else:
+        socket = client.socket_map.get(getattr(getattr(client, "guard", None), "addr", None), None)
     if socket is None:
         raise RuntimeError("no socket to guard")
 
@@ -259,8 +263,12 @@ async def run_circuit(
     stream_fail_stage: str | None = None
 
     try:
-        circuit = await client.circuit_mgr.get_or_build(
-            iso_key, hops_count=HOPS, extend_routers=None, prefer_new=True
+        circuit = await client.build_circuit_by_pattern(
+            pattern,
+            hops_count=HOPS,
+            extend_routers=None,
+            isolation_key=iso_key,
+            prefer_new=True,
         )
         circuit_id = getattr(circuit, "id", None)
         circ_status = "built_ok"
@@ -426,6 +434,7 @@ async def run_circuit(
 
 
 async def run_one_user(
+    client: PatternedTorClient,
     user_index: int,
     pattern: Pattern,
     run_id: str,
@@ -437,50 +446,31 @@ async def run_one_user(
     writer: AsyncJsonlWriter,
     pattern_seed_offset: int,
 ):
-    name = f"client{user_index}"
-    node_addr = env_str("NODE_ADDR", "192.168.66.242")
-    port = 9102 + user_index
-    client = PatternedTorClient(name=name, host=node_addr, port=port, model="sim", default_pattern=pattern)
 
-    def bus_factory(node_name: str) -> EventBus:
-        return EventBus(writer.emit_nowait, node_id=node_name, role="client")
-
-    client.attach_bus(bus_factory(name))
-    client.emit = client.event_bus.emit
 
     rng = random.Random(int(os.environ.get("RANDOM_SEED", "0")) + pattern_seed_offset + user_index)
 
     jitter = user_index * USER_START_JITTER_MS / 1000
     await asyncio.sleep(jitter)
 
-    proto_task = asyncio.create_task(client.start_protocol())
-    try:
-        await asyncio.wait_for(client.ready_to_send.wait(), timeout=env_int("START_TIMEOUT_S", 30))
-        for circ_index in range(CIRCUITS_PER_USER):
-            try:
-                await run_circuit(
-                    client,
-                    user_index,
-                    circ_index,
-                    addr,
-                    payload_bytes,
-                    gap_between_batches_ms,
-                    stream_concurrency,
-                    rng,
-                    pattern=pattern,
-                    run_id=run_id,
-                    writer=writer,
-                )
-            except Exception as exc:  # noqa: BLE001
-                print(f"[User {user_index}] circuit {circ_index} failed: {exc}")
-            await asyncio.sleep(gap_between_circuits_ms / 1000)
-    finally:
-        with contextlib.suppress(Exception):
-            await client.stop_protocol()
-        if not proto_task.done():
-            proto_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await proto_task
+    for circ_index in range(CIRCUITS_PER_USER):
+        try:
+            await run_circuit(
+                client,
+                user_index,
+                circ_index,
+                addr,
+                payload_bytes,
+                gap_between_batches_ms,
+                stream_concurrency,
+                rng,
+                pattern=pattern,
+                run_id=run_id,
+                writer=writer,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[User {user_index}] circuit {circ_index} failed: {exc}")
+        await asyncio.sleep(gap_between_circuits_ms / 1000)
 
 
 async def run_pattern(
@@ -492,6 +482,7 @@ async def run_pattern(
     max_workers: int,
     exp_label: str,
     seed: int,
+    clients: list[PatternedTorClient],
 ):
     log_dir_path = log_dir_base / pattern
     log_dir_path.mkdir(parents=True, exist_ok=True)
@@ -521,6 +512,7 @@ async def run_pattern(
     tasks = [
         asyncio.create_task(
             run_one_user(
+                client=clients[i],
                 user_index=i,
                 pattern=pattern,
                 run_id=run_id,
@@ -586,24 +578,57 @@ async def main():
         f"gap_batch={GAP_BETWEEN_STREAM_BATCHES_MS} ms"
     )
 
-    patterns = PATTERN_ORDER
-    meta_paths = []
+    node_addr = env_str("NODE_ADDR", "192.168.66.242")
+    clients: list[PatternedTorClient] = []
+    proto_tasks: list[asyncio.Task] = []
 
-    for idx, pattern in enumerate(patterns):
-        meta_path = await run_pattern(
-            pattern=pattern,
-            pattern_index=idx,
-            log_dir_base=log_dir_base,
-            writer_factory=build_writer,
-            addr=addr,
-            max_workers=max_workers,
-            exp_label=exp_label,
-            seed=seed,
-        )
-        meta_paths.append(str(meta_path))
+    try:
+        for i in range(CONCURRENT_USERS):
+            name = f"client{i}"
+            port = 9102 + i
+            client = PatternedTorClient(name=name, host=node_addr, port=port, model="sim")
 
-    print(f"[Main] completed patterns: {', '.join(patterns)}")
-    return meta_paths
+            def bus_factory(node_name: str) -> EventBus:
+                return EventBus(lambda *_args, **_kwargs: None, node_id=node_name, role="client")
+
+            client.attach_bus(bus_factory(name))
+            client.emit = client.event_bus.emit
+            clients.append(client)
+
+            proto_task = asyncio.create_task(client.start_protocol())
+            proto_tasks.append(proto_task)
+
+        for client in clients:
+            await asyncio.wait_for(client.ready_to_send.wait(), timeout=env_int("START_TIMEOUT_S", 30))
+
+        patterns = PATTERN_ORDER
+        meta_paths = []
+
+        for idx, pattern in enumerate(patterns):
+            meta_path = await run_pattern(
+                pattern=pattern,
+                pattern_index=idx,
+                log_dir_base=log_dir_base,
+                writer_factory=build_writer,
+                addr=addr,
+                max_workers=max_workers,
+                exp_label=exp_label,
+                seed=seed,
+                clients=clients,
+            )
+            meta_paths.append(str(meta_path))
+
+        print(f"[Main] completed patterns: {', '.join(patterns)}")
+        return meta_paths
+    finally:
+        for client in clients:
+            with contextlib.suppress(Exception):
+                await client.stop_protocol()
+        for task in proto_tasks:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
 
 if __name__ == "__main__":
