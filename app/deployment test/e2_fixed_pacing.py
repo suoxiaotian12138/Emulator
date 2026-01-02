@@ -26,10 +26,10 @@ import random
 import sys
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
-from examples.Tor_simplified.Tor_Client import Tor_Client
-from tools.Log.bus import EventBus
+from labeled_tor_client import LabeledTorClient
+from resource_probe import ResourceProbe, VmContainerSampler
 from tools.Log.writer import AsyncJsonlWriter
 
 if sys.platform.startswith("win"):
@@ -39,8 +39,8 @@ if sys.platform.startswith("win"):
 # Workload constants (fixed by spec)
 # -------------------------------
 CIRCUIT_PERIOD_MS = 500
-WARMUP_DURATION_S = 2 * 60
-MEASURE_DURATION_S = 6 * 60
+WARMUP_DURATION_S = 1 * 60
+MEASURE_DURATION_S = 2 * 60
 TOTAL_DURATION_S = WARMUP_DURATION_S + MEASURE_DURATION_S
 STREAMS_PER_CIRCUIT = 4
 STREAM_CONCURRENCY = 2
@@ -78,8 +78,12 @@ def env_str(key: str, default: str) -> str:
     v = os.environ.get(key)
     return default if v is None else v
 
+def env_csv(key: str, default: str) -> List[str]:
+    raw = env_str(key, default)
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    return parts
 
-async def open_stream_on_circuit(client: Tor_Client, circuit, addr: tuple[str, int]):
+async def open_stream_on_circuit(client: LabeledTorClient, circuit, addr: tuple[str, int]):
     socket = client.socket_map.get(client.guard.addr, None)
     if socket is None:
         raise RuntimeError("no socket to guard")
@@ -107,7 +111,7 @@ async def open_stream_on_circuit(client: Tor_Client, circuit, addr: tuple[str, i
     return stream_uid, stream
 
 
-async def send_stream_payload(client: Tor_Client, circuit, stream, payload: bytes, stream_uid: str):
+async def send_stream_payload(client: LabeledTorClient, circuit, stream, payload: bytes, stream_uid: str):
     try:
         await client.stream_write(circuit, stream, payload)
         client.stream_tracker.set_status(stream_uid, "ok")
@@ -122,7 +126,7 @@ async def send_stream_payload(client: Tor_Client, circuit, stream, payload: byte
 
 
 async def run_stream_batch(
-    client: Tor_Client,
+    client: LabeledTorClient,
     circuit,
     addr: tuple[str, int],
     payload_bytes: int,
@@ -157,7 +161,7 @@ async def run_stream_batch(
 
 
 async def run_circuit(
-    client: Tor_Client,
+    client: LabeledTorClient,
     circ_seq: int,
     addr: tuple[str, int],
     payload_bytes: int,
@@ -202,7 +206,7 @@ async def run_circuit(
 
 
 async def circuit_scheduler(
-    client: Tor_Client,
+    client: LabeledTorClient,
     addr: tuple[str, int],
     payload_bytes: int,
     start_time: float,
@@ -251,7 +255,7 @@ async def circuit_scheduler(
 
 async def limited_circuit(
     sem: asyncio.Semaphore,
-    client: Tor_Client,
+    client: LabeledTorClient,
     circ_seq: int,
     addr: tuple[str, int],
     payload_bytes: int,
@@ -264,7 +268,9 @@ async def limited_circuit(
 
 async def main():
     loop = asyncio.get_running_loop()
-    log_dir = env_str("LOG_DIR", "exp/deployment/e2/logs")
+    ratio_label = "50%"
+    default_log_dir = Path("exp") / "deployment" / "e2" / ratio_label / "logs"
+    log_dir = env_str("LOG_DIR", str(default_log_dir))
     log_dir_path = Path(log_dir)
     log_dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -292,6 +298,7 @@ async def main():
         "started_at": time.time(),
         "exp_label": exp_label,
         "random_seed": seed,
+        "ratio_label": ratio_label,
         "log_dir": str(log_dir_path.resolve()),
         "streams_per_circuit": STREAMS_PER_CIRCUIT,
         "payload_bytes_per_stream": PAYLOAD_BYTES_PER_STREAM,
@@ -314,17 +321,33 @@ async def main():
     name = env_str("CLIENT_NAME", "client0")
     node_addr = env_str("NODE_ADDR", "192.168.66.242")
     port = env_int("CLIENT_PORT", 9102)
-    client = Tor_Client(name=name, host=node_addr, port=port, model="sim")
+    client = LabeledTorClient(name=name, host=node_addr, port=port, model="sim", ratio_label=ratio_label, writer=writer)
 
-    def bus_factory(node_name: str) -> EventBus:
-        return EventBus(writer.emit_nowait, node_id=node_name, role="client")
+    client.attach_labeled_bus(role="client")
 
-    client.attach_bus(bus_factory(name))
-    client.emit = client.event_bus.emit
+    vm_sampler: Optional[VmContainerSampler] = None
+    vm_prefixes: List[str] = []
+    if env_str("ENABLE_VM_SAMPLING", "1") != "0":
+        vm_prefixes = env_csv("VM_CONTAINER_PREFIXES", "tor-guard,tor-middle,tor-exit")
+        vm_sampler = VmContainerSampler(
+            env_str("VM_HOST", "192.168.66.10"),
+            env_str("VM_USER", "root"),
+            env_str("VM_PASS", ""),
+            vm_prefixes,
+        )
+
+    probe = ResourceProbe(
+        writer,
+        ratio_label,
+        interval_s=float(os.environ.get("RESOURCE_SAMPLE_INTERVAL_S", "1.0")),
+        vm_sampler=vm_sampler,
+    )
+
 
     proto_task = asyncio.create_task(client.start_protocol())
     try:
         await asyncio.wait_for(client.ready_to_send.wait(), timeout=env_int("START_TIMEOUT_S", 30))
+        probe.start()
         rng = random.Random(seed)
         start_time = time.time()
         sem = asyncio.Semaphore(env_int("MAX_CONCURRENT_CIRCUITS", MAX_CONCURRENT_CIRCUITS))
@@ -340,6 +363,7 @@ async def main():
             sem,
         )
     finally:
+        await probe.stop()
         with contextlib.suppress(Exception):
             await client.stop_protocol()
         if not proto_task.done():
