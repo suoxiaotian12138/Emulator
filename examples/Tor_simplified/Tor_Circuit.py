@@ -502,7 +502,7 @@ class CircuitManager:
                 import traceback
                 print(f"[prebuild] error: {repr(e)}")
                 print(traceback.format_exc())
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(0.5 if need else 3.0)
 
 
 

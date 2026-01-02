@@ -924,10 +924,13 @@ class Tor_Socket():
             while not self._closing.is_set():
                 if self._q_ctrl.empty() and self._q_data.empty():
                     self._wakeup.clear()
-                    try:
-                        await asyncio.wait_for(self._wakeup.wait(), timeout=5.0)
-                    except asyncio.TimeoutError:
-                        continue
+                    await asyncio.wait(
+                        [
+                            asyncio.create_task(self._wakeup.wait()),
+                            asyncio.create_task(self._closing.wait()),
+                        ],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
 
                 out = bytearray()
                 t0 = loop.time()

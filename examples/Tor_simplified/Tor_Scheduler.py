@@ -32,12 +32,13 @@ class CircuitSendScheduler:
     async def _wait_for_credit(self, window, wake_event: asyncio.Event):
         if window.can_send(1):
             return
-        tasks = [
-            asyncio.create_task(window.credit_event.wait()),
-            asyncio.create_task(wake_event.wait()),
-        ]
+
         done, pending = await asyncio.wait(
-            tasks, return_when=asyncio.FIRST_COMPLETED, timeout=0.5
+            [
+                asyncio.create_task(window.credit_event.wait()),
+                asyncio.create_task(wake_event.wait()),
+            ],
+            return_when=asyncio.FIRST_COMPLETED,
         )
         for task in pending:
             task.cancel()
@@ -49,10 +50,13 @@ class CircuitSendScheduler:
         while not out_sock._closing.is_set():
             if not queue:
                 wake_event.clear()
-                try:
-                    await asyncio.wait_for(wake_event.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
+                await asyncio.wait(
+                    [
+                        asyncio.create_task(wake_event.wait()),
+                        asyncio.create_task(out_sock._closing.wait()),
+                    ],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
 
             if not queue:
                 continue
