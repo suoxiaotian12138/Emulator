@@ -57,7 +57,7 @@ if sys.platform.startswith("win"):
 # Defaults for E3 (can be overridden by env vars)
 # ============================================================
 
-DEFAULT_RUN_DURATION_S = 60 * 60          # 60 minutes
+DEFAULT_RUN_DURATION_S = 1 * 60          # 60 minutes
 DEFAULT_WARMUP_S = 5 * 60                 # first 5 minutes treated as warmup in labels
 DEFAULT_CIRCUIT_PERIOD_MS = 2000          # slower fixed pacing
 DEFAULT_MAX_CONCURRENT_CIRCUITS = 3       # strict concurrency cap (non-saturated)
@@ -191,15 +191,29 @@ async def send_stream_payload(client, circuit, stream, payload: bytes, stream_ui
         await client.stream_write(circuit, stream, payload)
         client.stream_tracker.set_status(stream_uid, "ok")
         emit_driver_log(client, "stream_payload_sent", {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "bytes": len(payload)})
+
+        # Wait for the exit to reply with RELAY_END so downstream bytes/latencies
+        # can be collected by Tor_Client.handle_cell_relay before we tear down the
+        # stream. Without this, we end the tracker too early and the metrics stay 0.
+        await asyncio.wait_for(stream.end_event.wait(), timeout=5.0)
+    except asyncio.TimeoutError:
+        client.stream_tracker.set_status(stream_uid, "timeout")
+        emit_driver_log(client, "stream_timeout",
+                        {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "bytes": len(payload)})
+        rec = client.stream_tracker.end(stream_uid)
+        client._stream(**rec) if rec else None
     except Exception:
         client.stream_tracker.set_status(stream_uid, "error")
         emit_driver_log(client, "stream_payload_error", {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "bytes": len(payload)})
-        raise
-    finally:
         rec = client.stream_tracker.end(stream_uid)
         client._stream(**rec) if rec else None
-        if rec:
-            emit_driver_log(client, "stream_end", {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "status": rec.get("status"), "dur_ms": rec.get("dur_ms"), "bytes": rec.get("bytes")})
+        raise
+    else:
+        # Normal completion: Tor_Client.handle_cell_relay will emit the stream
+        # record (with downstream bytes/latency). We only log a driver hint here.
+        emit_driver_log(client, "stream_complete",
+                        {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "bytes": len(payload)})
+    finally:
         with contextlib.suppress(Exception):
             await client.close_stream(circuit, stream)
 
@@ -270,6 +284,7 @@ async def run_circuit(
 ):
     iso_key = f"circ-{circ_seq}"
     await counters.inc("circuit_launch")
+    build_started = time.monotonic()
     try:
         circuit = await client.circuit_mgr.get_or_build(
             iso_key,
@@ -277,15 +292,36 @@ async def run_circuit(
             extend_routers=None,
             prefer_new=True,
         )
+        build_ms = (time.monotonic() - build_started) * 1000
     except Exception as exc:
         await counters.inc("circuit_build_fail")
         print(f"[{label}] circuit build failed: {exc}")
-        emit_driver_log(client, "circuit_build_fail", {"circ_seq": circ_seq, "iso_key": iso_key, "label": label, "error": str(exc)})
+        emit_driver_log(
+            client,
+            "circuit_build_fail",
+            {
+                "circ_seq": circ_seq,
+                "iso_key": iso_key,
+                "label": label,
+                "error": str(exc),
+                "build_ms": (time.monotonic() - build_started) * 1000,
+            },
+        )
         return
 
     await counters.inc("circuit_build_ok")
     client.circuit_mgr.mark_used(circuit)
-    emit_driver_log(client, "circuit_start", {"circ_seq": circ_seq, "iso_key": iso_key, "circuit_id": getattr(circuit, "id", None), "label": label})
+    emit_driver_log(
+        client,
+        "circuit_start",
+        {
+            "circ_seq": circ_seq,
+            "iso_key": iso_key,
+            "circuit_id": getattr(circuit, "id", None),
+            "label": label,
+            "build_ms": build_ms,
+        },
+    )
 
     for b in range(batches_per_circuit):
         await run_stream_batch(client, circuit, addr, payload_bytes, batch_size, rng, f"{label}-b{b+1}", counters)
