@@ -47,11 +47,18 @@ async def main():
     # 多个 guard 配置
     guard_configs = [
         ("guard01", "192.168.66.242", 9001, 'Guard', ["Running", "Valid", "Guard","Fast","Stable"], 'reject 1-65535'),
-        # ("guard2", "192.168.66.242", 9002, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"], 'reject 1-65535'),
-        ("Middle01", "192.168.66.244", 9003, 'Middle',["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
-        # ("Middle2", "192.168.66.244", 9004, 'Middle',["Running", "Valid", "MiddleOnly", "Fast","Stable"], 'reject 1-65535'),
-        ("Exit01", "192.168.66.243", 9005, 'Exit',["Running", "Valid", "Exit","Fast","Stable"], 'accept 1-65535'),
-        # ("Exit2", "192.168.66.243", 9006, 'Exit',["Running", "Valid", "Exit","Fast","Stable"], 'accept 1-65535'),
+        ("Middle01", "192.168.66.244", 9001, 'Middle',["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
+        ("Exit01", "192.168.66.243", 9001, 'Exit',["Running", "Valid", "Exit","Fast","Stable"], 'accept 1-65535'),
+        ("guard02", "192.168.66.242", 9002, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"], 'reject 1-65535'),
+        ("Middle02", "192.168.66.244", 9002, 'Middle', ["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
+        ("Exit02", "192.168.66.243", 9002, 'Exit', ["Running", "Valid", "Exit", "Fast", "Stable"], 'accept 1-65535'),
+        # ("guard03", "192.168.66.242", 9003, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"], 'reject 1-65535'),
+        # ("Middle03", "192.168.66.244", 9003, 'Middle', ["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
+        # ("Exit03", "192.168.66.243", 9003, 'Exit', ["Running", "Valid", "Exit", "Fast", "Stable"], 'accept 1-65535'),
+        # ("guard04", "192.168.66.242", 9004, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"], 'reject 1-65535'),
+        # ("Middle04", "192.168.66.244", 9004, 'Middle', ["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
+        # ("Exit04", "192.168.66.243", 9004, 'Exit', ["Running", "Valid", "Exit", "Fast", "Stable"], 'accept 1-65535'),
+
 
     ]
 

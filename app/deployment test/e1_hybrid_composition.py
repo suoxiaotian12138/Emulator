@@ -43,8 +43,8 @@ if sys.platform.startswith("win"):
 # -------------------------------
 # Workload constants (fixed by spec)
 # -------------------------------
-CONCURRENT_USERS = 10
-CIRCUITS_PER_USER =10
+CONCURRENT_USERS = 50
+CIRCUITS_PER_USER =2
 STREAMS_PER_CIRCUIT = 2
 STREAM_CONCURRENCY = 2
 PAYLOAD_BYTES_PER_STREAM = 64 * 1024
@@ -60,9 +60,9 @@ GAP_BETWEEN_STREAM_BATCHES_MS = 100
 # sampling/selection. Keep this explicit ordering aligned with the pattern list
 # provided in the experiment description.
 PATTERN_ORDER: list[Pattern] = [
+    "RTR",
     "TTT",
     "RRR",
-    "RTR",
     "TRT",
     "RRT",
     "RTT",

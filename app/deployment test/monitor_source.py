@@ -25,6 +25,10 @@ CONTAINER_PREFIXES = ("tor-guard", "tor-middle", "tor-exit")
 INTERVAL_S = 0.5
 PRINT_EVERY_S = 5.0
 
+# 如果本地脚本一直没启动，就只统计远端容器（VM）
+# 超过该时间仍未找到本地进程，则进入“VM-only”模式，直到 Ctrl+C 结束
+LOCAL_WAIT_TIMEOUT_S = 10.0
+
 # 是否同时监控所有候选 python 进程
 MONITOR_ALL_CANDIDATES = False
 
@@ -275,6 +279,9 @@ def main():
     procs: List[ProcState] = []
     chosen_pid = None
 
+    # 等待本地脚本出现，但不要无限等：超时后进入 VM-only 模式
+    wait_start = time.time()
+    local_attached = False
     while True:
         cands = find_python_candidates_by_script(TARGET_SCRIPT)
         if cands:
@@ -306,21 +313,24 @@ def main():
                     )
                 except Exception:
                     continue
+            local_attached = bool(procs)
+            break
+
+        if (time.time() - wait_start) >= LOCAL_WAIT_TIMEOUT_S:
             break
         time.sleep(0.2)
 
-    if not procs:
-        print("[monitor] no process attached")
-        return
-
-    print(f"[monitor] attached {len(procs)} process(es):")
-    for ps in procs:
-        try:
-            p = psutil.Process(ps.pid)
-            exe = p.exe()
-        except Exception:
-            exe = "?"
-        print(f"  pid={ps.pid} exe={exe} cmd={' '.join(ps.cmdline)}")
+    if local_attached:
+        print(f"[monitor] attached {len(procs)} process(es):")
+        for ps in procs:
+            try:
+                p = psutil.Process(ps.pid)
+                exe = p.exe()
+            except Exception:
+                exe = "?"
+            print(f"  pid={ps.pid} exe={exe} cmd={' '.join(ps.cmdline)}")
+    else:
+        print(f"[monitor] local script not found within {LOCAL_WAIT_TIMEOUT_S:.1f}s, VM-only mode")
 
     # VM sampler
     vm = VmSampler(VM_HOST, VM_USER, VM_PASS)
@@ -340,6 +350,7 @@ def main():
 
     start_wall = time.time()
     last_print = start_wall
+    finished: List[ProcState] = []
 
     try:
         while True:
@@ -372,11 +383,15 @@ def main():
                     ps.last_ts = now
 
                     alive.append(ps)
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                except psutil.NoSuchProcess:
+                    # 进程已结束，保留最后一次统计值用于 summary
+                    finished.append(ps)
+                    continue
+                except psutil.AccessDenied:
                     continue
 
             procs = alive
-            if not procs:
+            if local_attached and not procs:
                 break
 
             # sample vm containers
@@ -402,6 +417,8 @@ def main():
                         vm_cpu_total_usec = cpu_sum
                         vm_mem_total = mem_sum
                         vm_peak_mem_total = max(vm_peak_mem_total, mem_sum)
+                        vm_last_cpu_total_usec = cpu_sum
+                        vm_last_ts = now
                         if not vm_start:
                             # store baseline per run
                             vm_start["cpu_total_usec"] = cpu_sum
@@ -462,22 +479,23 @@ def main():
 
     win_cpu_ms = 0
     win_peak_rss_mb = 0.0
-    for ps in procs:
+    for ps in (procs + finished):
         win_cpu_ms += (ps.last_cpu_ms - ps.start_cpu_ms)
         win_peak_rss_mb += ps.peak_rss / (1024 * 1024)
 
     vm_cpu_ms = None
-    if vm_start.get("cpu_total_usec") is not None:
-        # best effort final resample is skipped, so we use last captured totals if any
-        # If you need accurate end value, keep last successful vm_cpu_total_usec in a variable and use it here.
-        pass
+    if vm_start.get("cpu_total_usec") is not None and vm_last_cpu_total_usec is not None:
+        vm_cpu_ms = int((vm_last_cpu_total_usec - vm_start["cpu_total_usec"]) / 1000)
 
     print("\n[Result] summary")
     print(f"  wall_ms: {wall_ms}")
     print(f"  win_cpu_total_ms: {win_cpu_ms}")
     print(f"  win_peak_rss_mb_sum: {win_peak_rss_mb:.2f}")
+    if vm_cpu_ms is not None:
+        print(f"  vm_cpu_total_ms: {vm_cpu_ms}")
     print(f"  vm_peak_mem_mb_sum: {vm_peak_mem_total/(1024*1024):.2f}")
-    print("  note: vm cpu total is reported live; for final vm cpu total, keep last vm_cpu_total_usec and diff it at exit.")
+    if not local_attached:
+        print("  note: local script did not run; stats are VM-only")
 
 
 if __name__ == "__main__":

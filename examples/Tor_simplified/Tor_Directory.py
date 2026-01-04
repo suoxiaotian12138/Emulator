@@ -53,6 +53,8 @@ class TorDirectoryServer:
         self._cached_key_cert = None
         self._micro_map = {}
         self._network_ready_flag = False
+        self._start_time = time.time()
+        self._min_uptime = 60  # seconds, 可改参数
 
         # static config
         self._server_cfg = {
@@ -663,10 +665,12 @@ bandwidth-weights Wbd=3333 Wbe=3333 Wbg=3333 Wbm=10000 Wdb=10000 Web=10000 Wed=3
 
     async def _handle_consensus(self, request: web.Request) -> web.Response:
         print(f"[DIR] CONSENSUS {request.method} {request.path} match={dict(request.match_info)}")
-        if not self._network_ready_flag:
+        now = time.time()
+
+        if (not self._network_ready_flag) or (now - self._start_time < self._min_uptime):
             return web.Response(
                 status=503,
-                text="Consensus not ready, insufficient relays.",
+                text="Consensus not ready (waiting for network or warmup).",
                 headers={"Retry-After": "5"}
             )
 
@@ -689,7 +693,9 @@ bandwidth-weights Wbd=3333 Wbe=3333 Wbg=3333 Wbm=10000 Wdb=10000 Web=10000 Wed=3
 
     async def _handle_micro(self, request: web.Request) -> web.Response:
         print(f"[DIR] MICRO {request.method} {request.path} match={dict(request.match_info)}")
-        if not self._network_ready_flag:
+        now = time.time()
+
+        if not self._network_ready_flag or (now - self._start_time < self._min_uptime):
             return web.Response(
                 status=503,
                 text="Consensus not ready, insufficient relays.",
