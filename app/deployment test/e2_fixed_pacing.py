@@ -335,7 +335,7 @@ async def run_epoch(
 async def main():
     loop = asyncio.get_running_loop()
 
-    ratio_label = "10%"
+    ratio_label = "75%"
     default_log_dir = Path("exp") / "deployment" / "e2" / ratio_label / "logs"
     log_dir = Path(env_str("LOG_DIR", str(default_log_dir)))
     log_dir.mkdir(parents=True, exist_ok=True)

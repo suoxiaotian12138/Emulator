@@ -30,12 +30,27 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 import matplotlib.pyplot as plt
+import matplotlib
+
+
+# 设置全局字体大小 - 学术风格
+matplotlib.rcParams.update({
+    'font.size': 15,
+    'axes.labelsize': 16,
+    'axes.titlesize': 17,
+    'xtick.labelsize': 15,
+    'ytick.labelsize': 15,
+    'legend.fontsize': 14,
+    'font.family': 'serif',
+    'font.serif': ['Times New Roman', 'DejaVu Serif'],
+})
 
 
 @dataclass
@@ -64,6 +79,15 @@ def _percentile(values: List[float], pct: float) -> Optional[float]:
     low_val = ordered[lower]
     high_val = ordered[upper]
     return low_val + (high_val - low_val) * (pos - lower)
+
+
+def _sort_ratio_labels(labels: List[str]) -> List[str]:
+    """按照比例数值排序标签 (0%, 10%, ..., 100%)"""
+    def extract_number(label: str) -> float:
+        match = re.search(r'(\d+(?:\.\d+)?)', label)
+        return float(match.group(1)) if match else 0.0
+
+    return sorted(labels, key=extract_number)
 
 
 def _load_jsonl_files(dir_path: Path) -> List[dict]:
@@ -171,6 +195,7 @@ def summarize_ratio(run: RunRecords) -> dict:
         "ratio": run.ratio_label,
         "build_ms": build_ms,
         "build_quantiles": {
+            "mean": sum(build_ms) / len(build_ms) if build_ms else None,
             "p50": _percentile(build_ms, 50),
             "p90": _percentile(build_ms, 90),
             "p99": _percentile(build_ms, 99),
@@ -186,86 +211,165 @@ def summarize_ratio(run: RunRecords) -> dict:
     }
 
 
-def _prepare_bar_positions(n_groups: int, n_series: int, width: float = 0.2):
+def _prepare_bar_positions(n_groups: int, n_series: int, width: float = 0.25):
     base = list(range(n_groups))
     offsets = [((i - (n_series - 1) / 2) * width) for i in range(n_series)]
     return base, offsets
 
 
 def plot_circuit_build(summary: Dict[str, dict], out_path: Path) -> None:
-    ratios = list(summary.keys())
+    ratios = _sort_ratio_labels(list(summary.keys()))
     if not ratios:
         return
 
     labels = [summary[r]["ratio"] for r in ratios]
     metrics = [summary[r]["build_quantiles"] for r in ratios]
-    series = ["p50", "p90", "p99"]
+    series = ["mean", "p50", "p90", "p99"]
+    # 学术配色：色盲友好的配色方案
+    colors = ['#377eb8', '#4daf4a', '#ff7f00', '#e41a1c']
 
-    x_base, offsets = _prepare_bar_positions(len(ratios), len(series))
-    fig, ax = plt.subplots(figsize=(10, 6))
+    x_base, offsets = _prepare_bar_positions(len(ratios), len(series), width=0.2)
+    fig, ax = plt.subplots(figsize=(12, 6.5))
 
+    bars_list = []
     for idx, key in enumerate(series):
         values = [(metrics[i].get(key) or 0) for i in range(len(ratios))]
-        ax.bar([x + offsets[idx] for x in x_base], values, width=0.2, label=key.upper())
+        bars = ax.bar([x + offsets[idx] for x in x_base], values, width=0.2,
+                      label=key.upper(), color=colors[idx], alpha=0.9,
+                      edgecolor='black', linewidth=0.8)
+        bars_list.append((bars, values))
+
+        # 在柱状图上方添加数值标签
+        for bar, val in zip(bars, values):
+            height = bar.get_height()
+            if height > 0:
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                       f'{val:.1f}',
+                       ha='center', va='bottom', fontsize=11,
+                       rotation=0, fontweight='normal')
 
     ax.set_xticks(x_base)
-    ax.set_xticklabels(labels)
-    ax.set_ylabel("Circuit build latency (ms)")
-    ax.set_title("E2 circuit build latency quantiles")
-    ax.legend()
+    ax.set_xticklabels(labels, rotation=0, fontweight='bold')
+    ax.set_ylabel("Circuit build latency (ms)", fontweight='bold')
+    ax.legend(frameon=True, fancybox=False, shadow=False,
+             edgecolor='black', loc='upper left')
+    ax.grid(axis='y', alpha=0.25, linestyle='-', linewidth=0.5, color='gray')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(1.2)
+    ax.spines['bottom'].set_linewidth(1.2)
+
     fig.tight_layout()
-    fig.savefig(out_path / "circuit_build_latency.png", dpi=150)
+    fig.savefig(out_path / "circuit_build_latency.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 
 def plot_cpu(summary: Dict[str, dict], out_path: Path) -> None:
-    ratios = list(summary.keys())
+    ratios = _sort_ratio_labels(list(summary.keys()))
     values = [summary[r].get("cpu_per_circuit") for r in ratios]
     if not any(v is not None for v in values):
         return
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(ratios, [(v or 0) for v in values], color="#4C72B0")
-    ax.set_ylabel("CPU ms per built circuit")
-    ax.set_title("Per-circuit CPU cost (local + VM)")
+    fig, ax = plt.subplots(figsize=(12, 6))
+    bars = ax.bar(range(len(ratios)), [(v or 0) for v in values],
+                   color="#2166ac", alpha=0.9, width=0.65,
+                   edgecolor='black', linewidth=0.8)
+
+    # 添加数值标签
+    for bar, val in zip(bars, values):
+        if val is not None and val > 0:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{val:.1f}',
+                   ha='center', va='bottom', fontsize=12, fontweight='normal')
+
+    ax.set_xticks(range(len(ratios)))
+    ax.set_xticklabels(ratios, rotation=0, fontweight='bold')
+    ax.set_ylabel("CPU ms per built circuit", fontweight='bold')
+    ax.grid(axis='y', alpha=0.25, linestyle='-', linewidth=0.5, color='gray')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(1.2)
+    ax.spines['bottom'].set_linewidth(1.2)
+
     fig.tight_layout()
-    fig.savefig(out_path / "cpu_per_circuit.png", dpi=150)
+    fig.savefig(out_path / "cpu_per_circuit.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 
 def plot_stream_latency(summary: Dict[str, dict], out_path: Path) -> None:
-    ratios = list(summary.keys())
+    ratios = _sort_ratio_labels(list(summary.keys()))
     avg_values = [summary[r].get("stream_latency_avg") for r in ratios]
     p90_values = [summary[r].get("stream_latency_p90") for r in ratios]
     if not any(v is not None for v in avg_values):
         return
 
-    x_base, offsets = _prepare_bar_positions(len(ratios), 2, width=0.3)
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar([x + offsets[0] for x in x_base], [(v or 0) for v in avg_values], width=0.3, label="mean")
-    ax.bar([x + offsets[1] for x in x_base], [(v or 0) for v in p90_values], width=0.3, label="p90")
+    x_base, offsets = _prepare_bar_positions(len(ratios), 2, width=0.35)
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # 学术配色
+    bars1 = ax.bar([x + offsets[0] for x in x_base], [(v or 0) for v in avg_values],
+                   width=0.35, label="Mean", color='#1b9e77', alpha=0.9,
+                   edgecolor='black', linewidth=0.8)
+    bars2 = ax.bar([x + offsets[1] for x in x_base], [(v or 0) for v in p90_values],
+                   width=0.35, label="P90", color='#d95f02', alpha=0.9,
+                   edgecolor='black', linewidth=0.8)
+
+    # 添加数值标签
+    for bars, values in [(bars1, avg_values), (bars2, p90_values)]:
+        for bar, val in zip(bars, values):
+            if val is not None and val > 0:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                       f'{val:.1f}',
+                       ha='center', va='bottom', fontsize=11, fontweight='normal')
+
     ax.set_xticks(x_base)
-    ax.set_xticklabels(ratios)
-    ax.set_ylabel("Stream completion latency (ms)")
-    ax.set_title("Stream latency per replacement ratio")
-    ax.legend()
+    ax.set_xticklabels(ratios, rotation=0, fontweight='bold')
+    ax.set_ylabel("Stream completion latency (ms)", fontweight='bold')
+    ax.legend(frameon=True, fancybox=False, shadow=False,
+             edgecolor='black', loc='upper left')
+    ax.grid(axis='y', alpha=0.25, linestyle='-', linewidth=0.5, color='gray')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(1.2)
+    ax.spines['bottom'].set_linewidth(1.2)
+
     fig.tight_layout()
-    fig.savefig(out_path / "stream_latency.png", dpi=150)
+    fig.savefig(out_path / "stream_latency.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 
 def plot_memory(summary: Dict[str, dict], out_path: Path) -> None:
-    ratios = list(summary.keys())
+    ratios = _sort_ratio_labels(list(summary.keys()))
     mem_values = [summary[r].get("peak_mem_mb") for r in ratios]
     if not any(v is not None for v in mem_values):
         return
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(ratios, [(v or 0) for v in mem_values], color="#55A868")
-    ax.set_ylabel("Peak memory usage (MB)")
-    ax.set_title("Peak total memory (local + VM)")
+    fig, ax = plt.subplots(figsize=(12, 6))
+    bars = ax.bar(range(len(ratios)), [(v or 0) for v in mem_values],
+                   color="#7570b3", alpha=0.9, width=0.65,
+                   edgecolor='black', linewidth=0.8)
+
+    # 添加数值标签
+    for bar, val in zip(bars, mem_values):
+        if val is not None and val > 0:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{val:.1f}',
+                   ha='center', va='bottom', fontsize=12, fontweight='normal')
+
+    ax.set_xticks(range(len(ratios)))
+    ax.set_xticklabels(ratios, rotation=0, fontweight='bold')
+    ax.set_ylabel("Peak memory usage (MB)", fontweight='bold')
+    ax.grid(axis='y', alpha=0.25, linestyle='-', linewidth=0.5, color='gray')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(1.2)
+    ax.spines['bottom'].set_linewidth(1.2)
+
     fig.tight_layout()
-    fig.savefig(out_path / "resource_memory.png", dpi=150)
+    fig.savefig(out_path / "resource_memory.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -302,12 +406,13 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
 
     print("[Summary]")
-    for ratio, metrics in summary.items():
+    for ratio in _sort_ratio_labels(list(summary.keys())):
+        metrics = summary[ratio]
         print(f"- {ratio}:")
         build = metrics["build_quantiles"]
         print(
-            f"  circuits={metrics['circuit_success']} build_ms p50={_fmt(build['p50'])} "
-            f"p90={_fmt(build['p90'])} p99={_fmt(build['p99'])}"
+            f"  circuits={metrics['circuit_success']} build_ms mean={_fmt(build.get('mean'))} "
+            f"p50={_fmt(build['p50'])} p90={_fmt(build['p90'])} p99={_fmt(build['p99'])}"
         )
         print(
             f"  streams_ok={metrics['streams_ok']} latency_avg={_fmt(metrics['stream_latency_avg'])} "

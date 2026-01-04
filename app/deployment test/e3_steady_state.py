@@ -132,6 +132,7 @@ def emit_driver_log(client: LabeledTorClient, kind: str, rec: dict) -> None:
     try:
         base = {
             "ts": time.time(),
+            "event": kind,
             "kind": kind,
             "ratio_label": getattr(client, "ratio_label", None),
             "client": getattr(client, "name", None),
@@ -140,7 +141,12 @@ def emit_driver_log(client: LabeledTorClient, kind: str, rec: dict) -> None:
         # client.writer is the AsyncJsonlWriter passed into LabeledTorClient
         w = getattr(client, "_writer", None) or getattr(client, "writer", None)
         if w is not None:
-            w.emit_nowait(kind, base)
+            log_kind = (
+                "streams"
+                if kind.startswith("stream_")
+                else "circuits" if kind.startswith("circuit_") else "events"
+            )
+            w.emit_nowait(log_kind, base)
     except Exception:
         # Never let logging break the workload
         return

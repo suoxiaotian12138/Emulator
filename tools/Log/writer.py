@@ -7,7 +7,7 @@ from typing import Any, Dict, Literal, List, Optional, Tuple
 import aiofiles
 import orjson
 
-Kind = Literal["events", "circuits", "streams", "paths", "resources"]
+Kind = Literal["events", "circuits", "streams", "paths", "resources", "stability"]
 
 # A unique sentinel object (cannot collide with any real queue item)
 _STOP = object()
@@ -28,7 +28,14 @@ class AsyncJsonlWriter:
       - stop()
     """
 
-    _KINDS: Tuple[Kind, ...] = ("events", "circuits", "streams", "paths", "resources")
+    _KINDS: Tuple[Kind, ...] = (
+        "events",
+        "circuits",
+        "streams",
+        "paths",
+        "resources",
+        "stability",
+    )
 
     def __init__(
         self,
