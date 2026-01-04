@@ -52,6 +52,18 @@ class StreamTracker:
             rec.t_first_ns = _now_ns()
         rec.bytes_down += int(nbytes)
 
+    def mark_connected(self, stream_uid: str) -> None:
+        """
+        Reset the start timestamp to the moment RELAY_CONNECTED is observed.
+
+        Streams are tracked optimistically at creation time so failures can still
+        be logged, but latency measurements should begin only after the Tor
+        CONNECT handshake completes.
+        """
+        rec = self._items.get(stream_uid)
+        if rec:
+            rec.t_start_ns = _now_ns()
+
     def add_retry(self, stream_uid: str) -> None:
         rec = self._items.get(stream_uid)
         if rec:

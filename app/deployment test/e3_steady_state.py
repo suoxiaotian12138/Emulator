@@ -62,7 +62,7 @@ DEFAULT_WARMUP_S = 5 * 60                 # first 5 minutes treated as warmup in
 DEFAULT_CIRCUIT_PERIOD_MS = 2000          # slower fixed pacing
 DEFAULT_MAX_CONCURRENT_CIRCUITS = 3       # strict concurrency cap (non-saturated)
 DEFAULT_STREAM_CONCURRENCY = 1            # light per-circuit load
-DEFAULT_PAYLOAD_BYTES_PER_STREAM = 4 * 1024
+DEFAULT_PAYLOAD_BYTES_PER_STREAM = 64 * 1024
 DEFAULT_STREAM_BATCHES_PER_CIRCUIT = 1    # only 1 batch by default
 DEFAULT_GAP_BETWEEN_STREAM_BATCHES_MS = 100
 HOPS = 3
@@ -174,6 +174,7 @@ async def open_stream_on_circuit(client: LabeledTorClient, circuit, addr: Tuple[
         connect_cell = stream.make_connect(addr)
         await socket.send_cell(connect_cell)
         await stream.wait_connect_ack()
+        client.stream_tracker.mark_connected(stream_uid)
     except Exception:
         client.stream_tracker.set_status(stream_uid, "connect_fail")
         emit_driver_log(client, "stream_connect_fail", {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "dst": dst})
@@ -190,7 +191,17 @@ async def send_stream_payload(client, circuit, stream, payload: bytes, stream_ui
     try:
         await client.stream_write(circuit, stream, payload)
         client.stream_tracker.set_status(stream_uid, "ok")
-        emit_driver_log(client, "stream_payload_sent", {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "bytes": len(payload)})
+        emit_driver_log(
+            client,
+            "stream_payload_sent",
+            {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "bytes": len(payload)},
+        )
+
+        # Send RELAY_END immediately after the payload so the exit/server can
+        # react without waiting for a downstream signal. This mirrors the E1/E2
+        # behavior and avoids the peer timing out waiting for EOF.
+        with contextlib.suppress(Exception):
+            await client.close_stream(circuit, stream)
 
         # Wait for the exit to reply with RELAY_END so downstream bytes/latencies
         # can be collected by Tor_Client.handle_cell_relay before we tear down the
@@ -198,24 +209,37 @@ async def send_stream_payload(client, circuit, stream, payload: bytes, stream_ui
         await asyncio.wait_for(stream.end_event.wait(), timeout=5.0)
     except asyncio.TimeoutError:
         client.stream_tracker.set_status(stream_uid, "timeout")
-        emit_driver_log(client, "stream_timeout",
-                        {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "bytes": len(payload)})
+        emit_driver_log(
+            client,
+            "stream_timeout",
+            {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "bytes": len(payload)},
+        )
         rec = client.stream_tracker.end(stream_uid)
         client._stream(**rec) if rec else None
     except Exception:
         client.stream_tracker.set_status(stream_uid, "error")
-        emit_driver_log(client, "stream_payload_error", {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "bytes": len(payload)})
+        emit_driver_log(
+            client,
+            "stream_payload_error",
+            {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "bytes": len(payload)},
+        )
         rec = client.stream_tracker.end(stream_uid)
         client._stream(**rec) if rec else None
         raise
     else:
-        # Normal completion: Tor_Client.handle_cell_relay will emit the stream
-        # record (with downstream bytes/latency). We only log a driver hint here.
-        emit_driver_log(client, "stream_complete",
-                        {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "bytes": len(payload)})
-    finally:
-        with contextlib.suppress(Exception):
-            await client.close_stream(circuit, stream)
+        rec = client.stream_tracker.end(stream_uid)
+        client._stream(**rec) if rec else None
+        emit_driver_log(
+            client,
+            "stream_complete",
+            {
+                "stream_uid": stream_uid,
+                "circuit_id": getattr(circuit, "id", None),
+                "bytes": len(payload),
+                "status": rec.get("status") if rec else None,
+                "dur_ms": rec.get("dur_ms") if rec else None,
+            },
+        )
 
 
 async def run_stream_batch(
