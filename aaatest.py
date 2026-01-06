@@ -55,9 +55,9 @@ async def main():
         ("guard03", "192.168.66.242", 9003, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"], 'reject 1-65535'),
         ("Middle03", "192.168.66.244", 9003, 'Middle', ["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
         ("Exit03", "192.168.66.243", 9003, 'Exit', ["Running", "Valid", "Exit", "Fast", "Stable"], 'accept 1-65535'),
-        # ("guard04", "192.168.66.242", 9004, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"], 'reject 1-65535'),
-        # ("Middle04", "192.168.66.244", 9004, 'Middle', ["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
-        # ("Exit04", "192.168.66.243", 9004, 'Exit', ["Running", "Valid", "Exit", "Fast", "Stable"], 'accept 1-65535'),
+        ("guard04", "192.168.66.242", 9004, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"], 'reject 1-65535'),
+        ("Middle04", "192.168.66.244", 9004, 'Middle', ["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
+        ("Exit04", "192.168.66.243", 9004, 'Exit', ["Running", "Valid", "Exit", "Fast", "Stable"], 'accept 1-65535'),
 
 
     ]

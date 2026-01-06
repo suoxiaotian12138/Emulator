@@ -41,6 +41,14 @@ class StreamTracker:
     def __init__(self) -> None:
         self._items: Dict[str, StreamRec] = {}
 
+    def mark_first_up(self, stream_uid: str) -> None:
+        """Mark the first upstream write moment for this stream."""
+        rec = self._items.get(stream_uid)
+        if not rec:
+            return
+        if rec.t_first_ns is None:
+            rec.t_first_ns = _now_ns()
+
     def start(self, stream_uid: str, src: str, dst: str) -> None:
         self._items.setdefault(stream_uid, StreamRec(stream_uid=stream_uid, src=src, dst=dst))
 

@@ -176,6 +176,20 @@ async def build_single_circuit(
     with contextlib.suppress(Exception):
         await client.close_circuit(circuit)
 
+def pending_client_tasks(prefix: str) -> List[asyncio.Task]:
+    current = asyncio.current_task()
+    tasks: List[asyncio.Task] = []
+    for t in asyncio.all_tasks():
+        if t is current or t.done():
+            continue
+        name = t.get_name()
+        if name and name.startswith(prefix):
+            tasks.append(t)
+            continue
+        coro = t.get_coro()
+        if coro and prefix in repr(coro):
+            tasks.append(t)
+    return tasks
 
 async def paced_circuit_builder(
     *,
@@ -265,7 +279,7 @@ async def run_client_for_level(
         ratio_label=ratio_label,
         writer=writer,
     )
-    client.attach_labeled_bus(role="client")
+    client.attach_labeled_bus(role="client", enable_circuit_summary=False)
 
     results: List[CircuitAttempt] = []
     per_client_sem = asyncio.Semaphore(per_client_limit)
@@ -299,12 +313,12 @@ async def run_client_for_level(
             results=results,
         )
     finally:
-        with contextlib.suppress(Exception):
-            await client.stop_protocol()
-        if not proto_task.done():
-            proto_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await proto_task
+        await asyncio.gather(proto_task, return_exceptions=True)
+
+        pending = pending_client_tasks(client.name)
+        if pending:
+            print(f"[Diag] pending tasks for {client.name} after shutdown: {len(pending)}")
+        assert not pending, f"client tasks still pending for {client.name}: {pending}"
 
     return results
 
@@ -407,13 +421,16 @@ async def main():
 
     ratio_label = "fixed-topology"
     default_log_dir = Path("exp") / "deployment" / "e1_scalability" / "logs"
-    log_dir = Path(env_str("LOG_DIR", str(default_log_dir)))
+    base_log_dir = Path(env_str("LOG_DIR", str(default_log_dir)))
+    mode_tag = env_str("MODE_TAG", "default")
+    log_dir = base_log_dir / mode_tag
+
     log_dir.mkdir(parents=True, exist_ok=True)
 
     directory_addr = env_str("DIRECTORY_ADDR", "192.168.66.241:9030")
     os.environ["DIRECTORY_ADDR"] = directory_addr
 
-    max_workers = env_int("MAX_TLS_THREADS", 128)
+    max_workers = env_int("MAX_TLS_THREADS", 64)
     loop.set_default_executor(
         concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers,
@@ -440,9 +457,9 @@ async def main():
         "hops": HOPS,
     }
 
-    concurrency_levels = env_csv_int("CONCURRENCY_LEVELS", "1,2,4,8,16,32,48,64")
+    concurrency_levels = env_csv_int("CONCURRENCY_LEVELS", "140,192,216")
     warmup_s = env_float("WARMUP_S", 30.0)
-    measure_s = env_float("MEASURE_S", 120.0)
+    measure_s = env_float("MEASURE_S", 60.0)
     cooldown_s = env_float("LOAD_COOLDOWN_S", 5.0)
     period_s = env_float("PER_CLIENT_PERIOD_S", 2.0)
     timeout_s = env_float("CIRCUIT_BUILD_TIMEOUT_S", 5.0)
@@ -548,6 +565,10 @@ async def main():
     finally:
         await probe.stop()
         await writer.stop()
+        remaining = pending_client_tasks(CLIENT_NAME_PREFIX)
+        if remaining:
+            print(f"[Diag] pending client tasks after main: {len(remaining)}")
+        assert not remaining, f"client tasks still pending after main shutdown: {remaining}"
         run_meta.update(
             {
                 "finished_at": time.time(),

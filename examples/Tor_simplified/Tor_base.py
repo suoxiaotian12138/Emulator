@@ -74,6 +74,9 @@ class Tor_base:
         self.sim_ip = sim_ip
         self._bg_tasks: set[asyncio.Task] = set()
         self.limiter = init_global_limiter_from_env()
+        self._stopping = False
+        self._stopped = asyncio.Event()
+
 
     def attach_bus(self, bus: Optional[EventBus]):
         """在启动脚本里调用；忘记传就用全局默认。"""
@@ -243,49 +246,77 @@ class Tor_base:
             self._ev("circuit_cleanup_due_to_sock_close", circ_id=cid, peer=str(getattr(dead_sock, "peer_str", "unknown")))
 
     async def stop_protocol(self):
+        if self._stopped.is_set():
+            self.print("[Stop] stop_protocol already completed; skipping")
+            return
+        if self._stopping:
+            self.print("[Stop] stop_protocol already in progress; waiting")
+            await self._stopped.wait()
+            return
+
+        self._stopping = True
         self.running = False
 
-        # A) cancel 并 await start_protocol 里登记的长期任务
-        for t in list(getattr(self, "tasks", {}).values()):
-            if t and not t.done():
-                t.cancel()
-        for t in list(getattr(self, "tasks", {}).values()):
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await t
+        managed_tasks = list(getattr(self, "tasks", {}).values())
+        bg_tasks = list(getattr(self, "_bg_tasks", set()))
+        cancel_count = 0
+        await_count = 0
 
-        # B) cancel 并 await 所有后台任务（包括 handle_connection, stream pumps 等）
-        bg = list(getattr(self, "_bg_tasks", set()))
-        for t in bg:
-            if t and not t.done():
-                t.cancel()
-        if bg:
-            await asyncio.gather(*bg, return_exceptions=True)
-        if hasattr(self, "_bg_tasks"):
-            self._bg_tasks.clear()
+        self.print(
+            f"[Stop] stop_protocol starting managed={len(managed_tasks)} bg={len(bg_tasks)}"
+        )
 
-        # C) 关闭所有 Tor_Socket（此时 loop 还活着，安全）
-        for addr, s in list(getattr(self, "socket_map", {}).items()):
+        try:
+            # A) cancel 并 await start_protocol 里登记的长期任务
+            for t in managed_tasks:
+                if t and not t.done():
+                    t.cancel()
+                    cancel_count += 1
+            if managed_tasks:
+                await asyncio.gather(*managed_tasks, return_exceptions=True)
+                await_count += len(managed_tasks)
+
+            # B) cancel 并 await 所有后台任务（包括 handle_connection, stream pumps 等）
+            for t in bg_tasks:
+                if t and not t.done():
+                    t.cancel()
+                    cancel_count += 1
+            if bg_tasks:
+                await asyncio.gather(*bg_tasks, return_exceptions=True)
+                await_count += len(bg_tasks)
+            if hasattr(self, "_bg_tasks"):
+                self._bg_tasks.clear()
+
+            # C) 关闭所有 Tor_Socket（此时 loop 还活着，安全）
+            for addr, s in list(getattr(self, "socket_map", {}).items()):
+                with contextlib.suppress(Exception):
+                    await s._abort()
+            if hasattr(self, "socket_map"):
+                self.socket_map.clear()
+
+            # D) 关闭监听 socket，确保不再向 selector 注册已失效的 fd
             with contextlib.suppress(Exception):
-                await s._abort()
-        if hasattr(self, "socket_map"):
-            self.socket_map.clear()
+                self.socket.close()
 
-        # D) 关闭监听 socket，确保不再向 selector 注册已失效的 fd
-        with contextlib.suppress(Exception):
-            self.socket.close()
+                # E) 可选：停掉你自己的 flush task
+            t = getattr(self, "_relay_flush_task", None)
+            if t and not t.done():
+                t.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await t
 
-        # E) 可选：停掉你自己的 flush task
-        t = getattr(self, "_relay_flush_task", None)
-        if t and not t.done():
-            t.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await t
-
-        if self.limiter is not None:
+            if self.limiter is not None:
+                stats = self.limiter.stats()
+                self.print(
+                    f"[LimiterStats] total={stats.total_bytes}B "
+                    f"avg={stats.average_rate_bps:.2f}B/s peak={stats.peak_rate_bps:.2f}B/s"
+                )
+        finally:
+            self._stopped.set()
+            self._stopping = False
             stats = self.limiter.stats()
             self.print(
-                f"[LimiterStats] total={stats.total_bytes}B "
-                f"avg={stats.average_rate_bps:.2f}B/s peak={stats.peak_rate_bps:.2f}B/s"
+                f"[Stop] stop_protocol finished cancelled={cancel_count} awaited={await_count}"
             )
             
     def _spawn_bg_task(self, coro,  name: str | None = None):

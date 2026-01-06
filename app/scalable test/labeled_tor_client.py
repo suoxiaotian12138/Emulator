@@ -9,7 +9,7 @@ selection remains the default random behavior from ``Tor_Client``.
 from __future__ import annotations
 import asyncio
 from typing import Callable
-
+import contextlib
 from examples.Tor_simplified.Tor_Router import Tor_Router
 from examples.Tor_simplified.Tor_Socket import Tor_Socket
 from examples.Tor_simplified.Tor_Client import Tor_Client
@@ -40,14 +40,26 @@ class LabeledTorClient(Tor_Client):
 
         return wrapped
 
-    def attach_labeled_bus(self, role: str = "client") -> None:
+    def attach_labeled_bus(
+            self,
+            role: str = "client",
+            *,
+            enable_circuit_summary: bool = True,  # 控制 self._circuit
+            enable_path_summary: bool = False,  # 可选：控制 self._path
+            enable_stream_summary: bool = False,  # 可选：控制 self._stream
+            enable_ev: bool = False,  # 可选：控制 self._ev(cell_trace 等)
+    ) -> None:
         bus = EventBus(self._wrap_emitter(self._writer.emit_nowait), node_id=self.name, role=role)
         self.event_bus = bus
         self.emit = bus.emit
-        self._ev = bus.ev
-        self._circuit = bus.circuit
-        self._path = bus.path
-        self._stream = bus.stream
+
+        def _noop(*args, **kwargs):
+            return None
+
+        self._circuit = bus.circuit if enable_circuit_summary else _noop
+        self._path = bus.path if enable_path_summary else _noop
+        self._stream = bus.stream if enable_stream_summary else _noop
+        self._ev = bus.ev if enable_ev else _noop
 
     def _get_guard_lock(self, addr: tuple[str, int]) -> asyncio.Lock:
         if addr not in self._guard_locks:
@@ -76,10 +88,14 @@ class LabeledTorClient(Tor_Client):
 
     async def _get_or_create_guard_socket(self, guard_router: Tor_Router) -> Tor_Socket:
         """Return an existing handshake-complete socket or establish a new one."""
+        if getattr(self, "_stopping", False):
+            raise asyncio.CancelledError
 
         addr = guard_router.addr
         lock = self._get_guard_lock(addr)
         async with lock:
+            if getattr(self, "_stopping", False):
+                raise asyncio.CancelledError
             existing = self.socket_map.get(addr)
             if existing:
                 if existing.handshake_done.is_set():
@@ -94,14 +110,23 @@ class LabeledTorClient(Tor_Client):
                 limiter=self.limiter,
                 **get_args(sim_ip=self.sim_ip),
             )
-            await socket.setup_socket(remote_addr=addr)
-            self._ev("tls_handshake_done", peer=f"{addr[0]}:{addr[1]}", side="client")
+            try:
+                await socket.setup_socket(remote_addr=addr)
+                self._ev("tls_handshake_done", peer=f"{addr[0]}:{addr[1]}", side="client")
 
-            self._spawn_bg_task(self.handle_connection(addr, socket))
-            await socket.listen_started.wait()
-            await socket.tor_handshake_client()
-            await socket.handshake_done.wait()
-            self._ev("tor_handshake_done", peer=f"{addr[0]}:{addr[1]}", versions=[3, 4], auth="none")
+                self._spawn_bg_task(self.handle_connection(addr, socket))
+                await socket.listen_started.wait()
+                await socket.tor_handshake_client()
+                await socket.handshake_done.wait()
+                self._ev("tor_handshake_done", peer=f"{addr[0]}:{addr[1]}", versions=[3, 4], auth="none")
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await socket._abort()
+                raise
+            except Exception:
+                with contextlib.suppress(Exception):
+                    await socket._abort()
+                raise
 
         return socket
 

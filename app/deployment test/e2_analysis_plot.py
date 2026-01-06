@@ -1,29 +1,6 @@
 """
 Analyze E2 fixed-pacing experiment outputs and generate comparison plots.
-
-The script expects one or more ``run_meta.json`` files produced by the E2
-experiment (``e2_fixed_pacing.py``). It automatically discovers runs under the
-root directory (default: ``exp/deployment/e2``), groups them by replacement
-ratio, and produces per-ratio summary statistics and figures. The plotting code
-is resilient to partial data: if only a single ratio (e.g., only ``0%`` or only
-``100%``) is available, it still emits the available plots.
-
-Produced outputs (written under ``--out``):
-- ``circuit_build_latency.png``: p50/p90/p99 circuit build times per ratio.
-- ``cpu_per_circuit.png``: CPU milliseconds consumed per successfully built
-  circuit (local process + optional VM samples).
-- ``stream_latency.png``: average and p90 stream completion latency per ratio.
-- ``resource_memory.png``: peak observed memory (local+VM) per ratio (if data
-  present).
-
-Run example::
-
-    python "app/deployment test/e2_analysis_plot.py" \
-        --root exp/deployment/e2 --out exp/deployment/e2/figures
-
-  You can also point directly at specific ``run_meta.json`` files::
-
-      python "app/deployment test/e2_analysis_plot.py" --run exp/deployment/e2/50%/logs/run_meta.json
+(Optimized for Publication-Quality Figures with Data Tables)
 """
 from __future__ import annotations
 
@@ -38,20 +15,30 @@ from typing import Dict, Iterable, List, Optional
 
 import matplotlib.pyplot as plt
 import matplotlib
+import numpy as np # 引入numpy以方便处理坐标
 
-
-# 设置全局字体大小 - 学术风格
+# --- 1. 全局绘图风格设置 ---
+# 使用无衬线字体，更具现代感和学术清晰度
 matplotlib.rcParams.update({
-    'font.size': 15,
-    'axes.labelsize': 16,
-    'axes.titlesize': 17,
-    'xtick.labelsize': 15,
-    'ytick.labelsize': 15,
-    'legend.fontsize': 14,
-    'font.family': 'serif',
-    'font.serif': ['Times New Roman', 'DejaVu Serif'],
+    'font.family': 'sans-serif',
+    'font.sans-serif': ['DejaVu Sans', 'Arial', 'Helvetica'],
+    'font.size': 20,
+    'axes.labelsize': 20,
+    'axes.titlesize': 22,
+    'xtick.labelsize': 18,
+    'ytick.labelsize': 18,
+    'legend.fontsize': 18,
+    'figure.dpi': 150, # 提高默认分辨率
 })
 
+# 定义统一的配色方案 (Tableau 风格)
+COLORS = {
+    'MEAN': '#4e79a7', # Blue
+    'P50':  '#59a14f', # Green
+    'P90':  '#f28e2b', # Orange
+    'P99':  '#e15759', # Red
+    'SINGLE': '#4e79a7' # 单一柱状图的默认颜色
+}
 
 @dataclass
 class RunRecords:
@@ -82,11 +69,9 @@ def _percentile(values: List[float], pct: float) -> Optional[float]:
 
 
 def _sort_ratio_labels(labels: List[str]) -> List[str]:
-    """按照比例数值排序标签 (0%, 10%, ..., 100%)"""
     def extract_number(label: str) -> float:
         match = re.search(r'(\d+(?:\.\d+)?)', label)
         return float(match.group(1)) if match else 0.0
-
     return sorted(labels, key=extract_number)
 
 
@@ -111,10 +96,8 @@ def _normalize_log_dir(meta_path: Path, meta: dict) -> Path:
     log_dir = meta.get("log_dir")
     if log_dir:
         return Path(log_dir)
-    # Fallback: if run_meta.json lives under logs/, use parent
     if meta_path.parent.name == "logs":
         return meta_path.parent
-    # Fallback: sibling logs directory
     sibling = meta_path.parent / "logs"
     if sibling.exists():
         return sibling
@@ -161,11 +144,6 @@ def discover_runs(root: Path, explicit_meta: Iterable[Path]) -> List[RunRecords]
             if rec:
                 runs.append(rec)
                 searched.append(meta_path)
-
-    if not runs:
-        print("[WARN] No runs found. Checked:")
-        for m in searched:
-            print(f"  - {m}")
     return runs
 
 
@@ -211,12 +189,23 @@ def summarize_ratio(run: RunRecords) -> dict:
     }
 
 
-def _prepare_bar_positions(n_groups: int, n_series: int, width: float = 0.25):
-    base = list(range(n_groups))
-    offsets = [((i - (n_series - 1) / 2) * width) for i in range(n_series)]
-    return base, offsets
+# --- 辅助函数：统一的坐标轴美化 ---
+def _style_axes(ax, ylabel):
+    ax.set_ylabel(ylabel, fontweight='bold', labelpad=10)
+    # 移除顶部和右侧边框
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    # 加粗左侧和底部边框
+    ax.spines['left'].set_linewidth(1.2)
+    ax.spines['bottom'].set_linewidth(1.2)
+    # 添加水平网格线，置于底层
+    ax.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
+    ax.set_axisbelow(True)
+    for label in ax.get_yticklabels():
+        label.set_fontweight('bold')
 
 
+# --- 核心绘图函数 1：带表格的复杂柱状图 ---
 def plot_circuit_build(summary: Dict[str, dict], out_path: Path) -> None:
     ratios = _sort_ratio_labels(list(summary.keys()))
     if not ratios:
@@ -224,152 +213,150 @@ def plot_circuit_build(summary: Dict[str, dict], out_path: Path) -> None:
 
     labels = [summary[r]["ratio"] for r in ratios]
     metrics = [summary[r]["build_quantiles"] for r in ratios]
-    series = ["mean", "p50", "p90", "p99"]
-    # 学术配色：色盲友好的配色方案
-    colors = ['#377eb8', '#4daf4a', '#ff7f00', '#e41a1c']
 
-    x_base, offsets = _prepare_bar_positions(len(ratios), len(series), width=0.2)
-    fig, ax = plt.subplots(figsize=(12, 6.5))
+    # 对应键值和颜色
+    keys = ["mean", "p50", "p90", "p99"]
+    display_keys = ["MEAN", "P50", "P90", "P99"]
+    bar_colors = [COLORS['MEAN'], COLORS['P50'], COLORS['P90'], COLORS['P99']]
 
-    bars_list = []
-    for idx, key in enumerate(series):
-        values = [(metrics[i].get(key) or 0) for i in range(len(ratios))]
-        bars = ax.bar([x + offsets[idx] for x in x_base], values, width=0.2,
-                      label=key.upper(), color=colors[idx], alpha=0.9,
-                      edgecolor='black', linewidth=0.8)
-        bars_list.append((bars, values))
+    # 设置画布
+    fig, ax = plt.subplots(figsize=(11, 7)) # 稍微调高一点给表格留空间
 
-        # 在柱状图上方添加数值标签
-        for bar, val in zip(bars, values):
-            height = bar.get_height()
-            if height > 0:
-                ax.text(bar.get_x() + bar.get_width()/2., height,
-                       f'{val:.1f}',
-                       ha='center', va='bottom', fontsize=11,
-                       rotation=0, fontweight='normal')
+    x = np.arange(len(labels))
+    width = 0.18
+    # 偏移量计算，使柱子居中
+    offsets = [-1.5, -0.5, 0.5, 1.5]
 
-    ax.set_xticks(x_base)
-    ax.set_xticklabels(labels, rotation=0, fontweight='bold')
-    ax.set_ylabel("Circuit build latency (ms)", fontweight='bold')
-    ax.legend(frameon=True, fancybox=False, shadow=False,
-             edgecolor='black', loc='upper left')
-    ax.grid(axis='y', alpha=0.25, linestyle='-', linewidth=0.5, color='gray')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_linewidth(1.2)
-    ax.spines['bottom'].set_linewidth(1.2)
+    # 1. 绘制柱子 (不再在柱子上写字)
+    for i, key in enumerate(keys):
+        vals = [(m.get(key) or 0) for m in metrics]
+        ax.bar(x + offsets[i] * width, vals, width,
+               label=display_keys[i],
+               color=bar_colors[i],
+               edgecolor='black', linewidth=0.5, zorder=3)
+
+    # 2. 准备表格数据 (行: Ratios, 列: Metrics)
+    table_data = []
+    for m in metrics:
+        row = []
+        for key in keys:
+            val = m.get(key)
+            row.append(f"{val:.1f}" if val is not None else "-")
+        table_data.append(row)
+
+    # 3. 绘制右上角表格
+    # bbox=[left, bottom, width, height]
+    the_table = ax.table(cellText=table_data,
+                         rowLabels=labels,
+                         colLabels=display_keys,
+                         colColours=bar_colors, # 表头颜色与柱子一致
+                         loc='upper right',
+                         bbox=[0.55, 0.55, 0.42, 0.35]) # 根据实际留白调整位置
+
+    # 4. 表格样式优化
+    the_table.auto_set_font_size(False)
+    the_table.set_fontsize(16)
+    for (row, col), cell in the_table.get_celld().items():
+        cell.set_linewidth(1.5)
+        cell.set_edgecolor('gray')
+        # 设置表头字体为白色加粗
+        if row == 0:
+            cell.set_text_props(color='white', fontweight='bold')
+
+    # 5. 设置坐标轴和图例
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontweight='bold')
+    # 留出顶部空间给表格
+    max_val = max((m.get('p99') or 0) for m in metrics)
+    ax.set_ylim(0, max_val * 1.15)
+
+    _style_axes(ax, "Circuit build latency (ms)")
+
+    # 图例放左上角，避免遮挡
+    ax.legend(loc='upper left', frameon=False, ncol=4)
 
     fig.tight_layout()
-    fig.savefig(out_path / "circuit_build_latency.png", dpi=300, bbox_inches='tight')
+    fig.savefig(out_path / "E2_circuit_build_latency.png", bbox_inches='tight')
+    plt.close(fig)
+
+
+# --- 核心绘图函数 2：简单柱状图 (Memory/CPU) ---
+def plot_simple_bar(ratios, values, ylabel, filename, out_path, color=COLORS['SINGLE']):
+    if not any(v is not None for v in values):
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(len(ratios))
+
+    # 绘制柱子
+    bars = ax.bar(x, [(v or 0) for v in values],
+                  color=color, width=0.5,
+                  edgecolor='black', linewidth=0.8, zorder=3)
+
+    # 简单图表保留数值标签 (因为没有表格)
+    for bar, val in zip(bars, values):
+        if val is not None and val > 0:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + (height*0.01),
+                   f'{val:.1f}',
+                   ha='center', va='bottom', fontsize=15, fontweight='bold', color='#333333')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(ratios, fontweight='bold')
+
+    # 统一坐标轴风格
+    _style_axes(ax, ylabel)
+    # 稍微增加顶部空间
+    ax.set_ylim(0, max((v or 0) for v in values) * 1.15)
+
+    fig.tight_layout()
+    fig.savefig(out_path / filename, bbox_inches='tight')
     plt.close(fig)
 
 
 def plot_cpu(summary: Dict[str, dict], out_path: Path) -> None:
     ratios = _sort_ratio_labels(list(summary.keys()))
     values = [summary[r].get("cpu_per_circuit") for r in ratios]
-    if not any(v is not None for v in values):
-        return
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    bars = ax.bar(range(len(ratios)), [(v or 0) for v in values],
-                   color="#2166ac", alpha=0.9, width=0.65,
-                   edgecolor='black', linewidth=0.8)
-
-    # 添加数值标签
-    for bar, val in zip(bars, values):
-        if val is not None and val > 0:
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{val:.1f}',
-                   ha='center', va='bottom', fontsize=12, fontweight='normal')
-
-    ax.set_xticks(range(len(ratios)))
-    ax.set_xticklabels(ratios, rotation=0, fontweight='bold')
-    ax.set_ylabel("CPU ms per built circuit", fontweight='bold')
-    ax.grid(axis='y', alpha=0.25, linestyle='-', linewidth=0.5, color='gray')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_linewidth(1.2)
-    ax.spines['bottom'].set_linewidth(1.2)
-
-    fig.tight_layout()
-    fig.savefig(out_path / "cpu_per_circuit.png", dpi=300, bbox_inches='tight')
-    plt.close(fig)
-
-
-def plot_stream_latency(summary: Dict[str, dict], out_path: Path) -> None:
-    ratios = _sort_ratio_labels(list(summary.keys()))
-    avg_values = [summary[r].get("stream_latency_avg") for r in ratios]
-    p90_values = [summary[r].get("stream_latency_p90") for r in ratios]
-    if not any(v is not None for v in avg_values):
-        return
-
-    x_base, offsets = _prepare_bar_positions(len(ratios), 2, width=0.35)
-    fig, ax = plt.subplots(figsize=(12, 6))
-
-    # 学术配色
-    bars1 = ax.bar([x + offsets[0] for x in x_base], [(v or 0) for v in avg_values],
-                   width=0.35, label="Mean", color='#1b9e77', alpha=0.9,
-                   edgecolor='black', linewidth=0.8)
-    bars2 = ax.bar([x + offsets[1] for x in x_base], [(v or 0) for v in p90_values],
-                   width=0.35, label="P90", color='#d95f02', alpha=0.9,
-                   edgecolor='black', linewidth=0.8)
-
-    # 添加数值标签
-    for bars, values in [(bars1, avg_values), (bars2, p90_values)]:
-        for bar, val in zip(bars, values):
-            if val is not None and val > 0:
-                height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2., height,
-                       f'{val:.1f}',
-                       ha='center', va='bottom', fontsize=11, fontweight='normal')
-
-    ax.set_xticks(x_base)
-    ax.set_xticklabels(ratios, rotation=0, fontweight='bold')
-    ax.set_ylabel("Stream completion latency (ms)", fontweight='bold')
-    ax.legend(frameon=True, fancybox=False, shadow=False,
-             edgecolor='black', loc='upper left')
-    ax.grid(axis='y', alpha=0.25, linestyle='-', linewidth=0.5, color='gray')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_linewidth(1.2)
-    ax.spines['bottom'].set_linewidth(1.2)
-
-    fig.tight_layout()
-    fig.savefig(out_path / "stream_latency.png", dpi=300, bbox_inches='tight')
-    plt.close(fig)
+    plot_simple_bar(ratios, values, "CPU ms per built circuit", "cpu_per_circuit.png", out_path)
 
 
 def plot_memory(summary: Dict[str, dict], out_path: Path) -> None:
     ratios = _sort_ratio_labels(list(summary.keys()))
     mem_values = [summary[r].get("peak_mem_mb") for r in ratios]
-    if not any(v is not None for v in mem_values):
+    # 使用稍微不同的颜色区分 Memory
+    plot_simple_bar(ratios, mem_values, "Peak memory usage (MB)", "E2_resource_memory.png", out_path, color='#7570b3')
+
+
+def plot_stream_latency(summary: Dict[str, dict], out_path: Path) -> None:
+    # 这个图有两个系列 (Mean, P90)，我们保持简单双柱风格，但应用新配色和样式
+    ratios = _sort_ratio_labels(list(summary.keys()))
+    avg_values = [summary[r].get("stream_latency_avg") for r in ratios]
+    p90_values = [summary[r].get("stream_latency_p90") for r in ratios]
+
+    if not any(v is not None for v in avg_values):
         return
 
-    fig, ax = plt.subplots(figsize=(12, 6))
-    bars = ax.bar(range(len(ratios)), [(v or 0) for v in mem_values],
-                   color="#7570b3", alpha=0.9, width=0.65,
-                   edgecolor='black', linewidth=0.8)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(len(ratios))
+    width = 0.35
+
+    bars1 = ax.bar(x - width/2, [(v or 0) for v in avg_values], width, label='Mean', color=COLORS['MEAN'], edgecolor='black', linewidth=0.5, zorder=3)
+    bars2 = ax.bar(x + width/2, [(v or 0) for v in p90_values], width, label='P90', color=COLORS['P90'], edgecolor='black', linewidth=0.5, zorder=3)
 
     # 添加数值标签
-    for bar, val in zip(bars, mem_values):
-        if val is not None and val > 0:
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{val:.1f}',
-                   ha='center', va='bottom', fontsize=12, fontweight='normal')
+    for bars, vals in [(bars1, avg_values), (bars2, p90_values)]:
+        for bar, val in zip(bars, vals):
+            if val is not None and val > 0:
+                ax.text(bar.get_x() + bar.get_width()/2., bar.get_height(),
+                       f'{val:.1f}', ha='center', va='bottom', fontsize=10)
 
-    ax.set_xticks(range(len(ratios)))
-    ax.set_xticklabels(ratios, rotation=0, fontweight='bold')
-    ax.set_ylabel("Peak memory usage (MB)", fontweight='bold')
-    ax.grid(axis='y', alpha=0.25, linestyle='-', linewidth=0.5, color='gray')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_linewidth(1.2)
-    ax.spines['bottom'].set_linewidth(1.2)
+    ax.set_xticks(x)
+    ax.set_xticklabels(ratios, fontweight='bold')
+    _style_axes(ax, "Stream completion latency (ms)")
+    ax.legend(frameon=False, loc='upper left')
 
     fig.tight_layout()
-    fig.savefig(out_path / "resource_memory.png", dpi=300, bbox_inches='tight')
+    fig.savefig(out_path / "stream_latency.png", bbox_inches='tight')
     plt.close(fig)
 
 
@@ -405,26 +392,15 @@ def main() -> None:
 
     args.out.mkdir(parents=True, exist_ok=True)
 
+    # 打印文字摘要
     print("[Summary]")
     for ratio in _sort_ratio_labels(list(summary.keys())):
         metrics = summary[ratio]
         print(f"- {ratio}:")
         build = metrics["build_quantiles"]
-        print(
-            f"  circuits={metrics['circuit_success']} build_ms mean={_fmt(build.get('mean'))} "
-            f"p50={_fmt(build['p50'])} p90={_fmt(build['p90'])} p99={_fmt(build['p99'])}"
-        )
-        print(
-            f"  streams_ok={metrics['streams_ok']} latency_avg={_fmt(metrics['stream_latency_avg'])} "
-            f"latency_p90={_fmt(metrics['stream_latency_p90'])}"
-        )
-        if metrics.get("cpu_total_ms") is not None:
-            print(
-                f"  cpu_total_ms={_fmt(metrics['cpu_total_ms'])} cpu_per_circuit={_fmt(metrics['cpu_per_circuit'])}"
-            )
-        if metrics.get("peak_mem_mb") is not None:
-            print(f"  peak_mem_mb={_fmt(metrics['peak_mem_mb'])}")
+        print(f"  circuits={metrics['circuit_success']} build_ms mean={_fmt(build.get('mean'))} ...")
 
+    # 生成图表
     plot_circuit_build(summary, args.out)
     plot_cpu(summary, args.out)
     plot_stream_latency(summary, args.out)

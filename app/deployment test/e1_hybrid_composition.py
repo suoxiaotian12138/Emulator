@@ -60,14 +60,14 @@ GAP_BETWEEN_STREAM_BATCHES_MS = 100
 # sampling/selection. Keep this explicit ordering aligned with the pattern list
 # provided in the experiment description.
 PATTERN_ORDER: list[Pattern] = [
-    "RTR",
-    "TTT",
+    # "RTR",
+    # "TTT",
     "RRR",
-    "TRT",
-    "RRT",
-    "RTT",
-    "TRR",
-    "TTR",
+    # "TRT",
+    # "RRT",
+    # "RTT",
+    # "TRR",
+    # "TTR",
 ]
 
 

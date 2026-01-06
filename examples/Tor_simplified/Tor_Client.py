@@ -29,16 +29,23 @@ class Tor_Client(Tor_base):
         self.ready_to_send = asyncio.Event()
         self.stream_tracker = StreamTracker()     # ★ 新增
         self._sid2uid: dict[int, str] = {}
-        self.circuit_mgr = CircuitManager(self)
+        self.circuit_mgr = CircuitManager(self, isolation_enabled=True)
 
         self.sim_ip = sim_ip or "9.9.9.9"
+
+    def _register_task(self, name: str, coro):
+        task = self._spawn_bg_task(coro, name=name)
+        self.tasks[name] = task
+        task.add_done_callback(lambda _t, key=name: self.tasks.pop(key, None))
+
     async def start_protocol(self):
         try:
-            self.tasks['listener_task'] = self._spawn_bg_task(self.monitor_tor_socket())
+            self.print("[Start] start_protocol begin")
+            self._register_task(f"{self.name}.listener", self.monitor_tor_socket())
             await self.consensus_init()
 
-            self.tasks['prebuild'] = self._spawn_bg_task(self.circuit_mgr.maintain_prebuild())
-            self.tasks['housekeeping'] = self._spawn_bg_task(self._circuit_housekeeping())
+            self._register_task(f"{self.name}.prebuild", self.circuit_mgr.maintain_prebuild())
+            self._register_task(f"{self.name}.housekeeping", self._circuit_housekeeping())
 
             await asyncio.gather(*self.tasks.values())
         except asyncio.CancelledError:
@@ -110,6 +117,7 @@ class Tor_Client(Tor_base):
             connect_cell = stream.make_connect(addr)
             await socket.send_cell(connect_cell)
             await stream.wait_connect_ack()
+            self.stream_tracker.mark_connected(stream_uid)
 
             # -------- stream large payload sending, Tor-like gating --------
             max_payload = RelayedTorCell.MAX_PAYLOD_SIZE
@@ -186,6 +194,8 @@ class Tor_Client(Tor_base):
             connect_cell = stream.make_connect(addr)
             await socket.send_cell(connect_cell)
             await stream.wait_connect_ack()
+            self.stream_tracker.mark_connected(stream_uid)
+
         except Exception:
             self.stream_tracker.set_status(stream_uid, "connect_fail")
             rec = self.stream_tracker.end(stream_uid)
@@ -195,6 +205,8 @@ class Tor_Client(Tor_base):
         return circuit, stream
 
     async def stream_write(self, circuit, stream, data: bytes):
+        sent_first = False
+
         socket = self.socket_map.get(self.guard.addr, None)
         if socket is None:
             raise RuntimeError("no socket to guard")
@@ -225,6 +237,11 @@ class Tor_Client(Tor_base):
                 cell_cmd="RELAY_DATA"
             )
             await socket.send_cell(stream.make_relay(CellRelayData(chunk, circuit.id)))
+            if (not sent_first) and (stream.id is not None):
+                stream_uid = self._sid2uid.get(stream.id)
+                if stream_uid:
+                    self.stream_tracker.mark_first_up(stream_uid)
+                sent_first = True
 
     async def create_circuit(self, hops_count=3, extend_routers=None):
         socket = self.socket_map.get(self.guard.addr)

@@ -57,11 +57,11 @@ if sys.platform.startswith("win"):
 # Defaults for E3 (can be overridden by env vars)
 # ============================================================
 
-DEFAULT_RUN_DURATION_S = 1 * 60          # 60 minutes
-DEFAULT_WARMUP_S = 5 * 60                 # first 5 minutes treated as warmup in labels
+DEFAULT_RUN_DURATION_S = 60 * 60          # 60 minutes
+DEFAULT_WARMUP_S = 1 * 60                 # first 5 minutes treated as warmup in labels
 DEFAULT_CIRCUIT_PERIOD_MS = 2000          # slower fixed pacing
-DEFAULT_MAX_CONCURRENT_CIRCUITS = 3       # strict concurrency cap (non-saturated)
-DEFAULT_STREAM_CONCURRENCY = 1            # light per-circuit load
+DEFAULT_MAX_CONCURRENT_CIRCUITS = 5       # strict concurrency cap (non-saturated)
+DEFAULT_STREAM_CONCURRENCY = 2            # light per-circuit load
 DEFAULT_PAYLOAD_BYTES_PER_STREAM = 64 * 1024
 DEFAULT_STREAM_BATCHES_PER_CIRCUIT = 1    # only 1 batch by default
 DEFAULT_GAP_BETWEEN_STREAM_BATCHES_MS = 100
@@ -203,19 +203,17 @@ async def send_stream_payload(client, circuit, stream, payload: bytes, stream_ui
         with contextlib.suppress(Exception):
             await client.close_stream(circuit, stream)
 
-        # Wait for the exit to reply with RELAY_END so downstream bytes/latencies
-        # can be collected by Tor_Client.handle_cell_relay before we tear down the
-        # stream. Without this, we end the tracker too early and the metrics stay 0.
-        await asyncio.wait_for(stream.end_event.wait(), timeout=5.0)
-    except asyncio.TimeoutError:
-        client.stream_tracker.set_status(stream_uid, "timeout")
-        emit_driver_log(
-            client,
-            "stream_timeout",
-            {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None), "bytes": len(payload)},
-        )
-        rec = client.stream_tracker.end(stream_uid)
-        client._stream(**rec) if rec else None
+        # can be collected by Tor_Client.handle_cell_relay. The wait is best
+        # effort only; if it times out we still keep the status as "ok" so we
+        # don't mislabel successfully delivered payloads.
+        try:
+            await asyncio.wait_for(stream.end_event.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            emit_driver_log(
+                client,
+                "stream_end_wait_timeout",
+                {"stream_uid": stream_uid, "circuit_id": getattr(circuit, "id", None)},
+            )
     except Exception:
         client.stream_tracker.set_status(stream_uid, "error")
         emit_driver_log(

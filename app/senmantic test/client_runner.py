@@ -42,7 +42,7 @@ DEFAULT_ENV = {
     "NODE_ADDR": "192.168.66.242",
     "TARGET_HOST": "192.168.66.243",
     "TARGET_PORT": "8000",
-    "PAYLOAD_MB": "20",
+    "PAYLOAD_MB": "10",
     # Optional knobs (safe defaults)
     "CLIENTS_PER_BATCH": "1",
     "TOTAL_BATCHES": "1",
@@ -93,6 +93,7 @@ async def run_one_client(client: Tor_Client, addr, hop: int,
 
     try:
         try:
+
             await asyncio.wait_for(client.ready_to_send.wait(), timeout=start_timeout_s)
         except asyncio.TimeoutError:
             print(f"[ClientRunner] ready_to_send timeout after {start_timeout_s}s for {client.name}")
@@ -100,7 +101,6 @@ async def run_one_client(client: Tor_Client, addr, hop: int,
 
         print(f"[ClientRunner] {client.name} ready_to_send set")
         print(f"[ClientRunner] {client.name} protocol started in {time.time() - t0:.2f}s")
-
         # open once
         circuit, stream = await client.open_stream(addr=addr, hops_count=hop)
 
