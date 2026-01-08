@@ -50,13 +50,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
+import sys, traceback, time
 
 from labeled_tor_client import LabeledTorClient
 from resource_probe import ResourceProbe, VmContainerSampler
 from tools.Log.writer import AsyncJsonlWriter
 
 if sys.platform.startswith("win"):
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 HOPS = 3
 CLIENT_NAME_PREFIX = "client"
@@ -113,13 +114,21 @@ class CircuitAttempt:
     load_level: int
     phase: str
     seq: int
+
     start_ts: float
     end_ts: float
+
     status: str
-    latency_ms: float
+    latency_ms: float   # 你可以保留为 total_ms，或改名
+
     reason: Optional[str] = None
     ratio_label: Optional[str] = None
 
+    # new: breakdown
+    queue_per_client_ms: Optional[float] = None
+    queue_global_ms: Optional[float] = None
+    build_ms: Optional[float] = None
+    close_ms: Optional[float] = None
 
 @dataclass
 class LoadLevelResult:
@@ -145,13 +154,22 @@ def log_circuit_attempt(writer: AsyncJsonlWriter, attempt: CircuitAttempt) -> No
             "load_level": attempt.load_level,
             "phase": attempt.phase,
             "seq": attempt.seq,
+
             "start_ts": attempt.start_ts,
             "end_ts": attempt.end_ts,
+
             "latency_ms": attempt.latency_ms,
             "status": attempt.status,
             "reason": attempt.reason,
+
+            # new
+            "queue_per_client_ms": attempt.queue_per_client_ms,
+            "queue_global_ms": attempt.queue_global_ms,
+            "build_ms": attempt.build_ms,
+            "close_ms": attempt.close_ms,
         },
     )
+
 
 
 # ============================================================
@@ -162,34 +180,30 @@ async def build_single_circuit(
     client: LabeledTorClient,
     iso_key: str,
     timeout_s: float,
-) -> None:
-    circuit = await asyncio.wait_for(
-        client.circuit_mgr.get_or_build(
-            iso_key,
-            hops_count=HOPS,
-            extend_routers=None,
-            prefer_new=True,
-        ),
+) -> tuple[float, float]:
+    t0 = time.perf_counter()
+    circuit, timing = await asyncio.wait_for(
+        client.create_circuit(hops_count=HOPS, extend_routers=None),
         timeout=timeout_s,
     )
-    client.circuit_mgr.mark_used(circuit)
-    with contextlib.suppress(Exception):
-        await client.close_circuit(circuit)
 
-def pending_client_tasks(prefix: str) -> List[asyncio.Task]:
-    current = asyncio.current_task()
-    tasks: List[asyncio.Task] = []
-    for t in asyncio.all_tasks():
-        if t is current or t.done():
-            continue
-        name = t.get_name()
-        if name and name.startswith(prefix):
-            tasks.append(t)
-            continue
-        coro = t.get_coro()
-        if coro and prefix in repr(coro):
-            tasks.append(t)
-    return tasks
+    t1 = time.perf_counter()
+
+    client.circuit_mgr.mark_used(circuit)
+
+    close_ms = 0.0
+    try:
+        t2 = time.perf_counter()
+        await client.close_circuit(circuit)
+        t3 = time.perf_counter()
+        close_ms = (t3 - t2) * 1000
+    except Exception:
+        # close 失败不影响 build_ms
+        pass
+
+    build_ms = (t1 - t0) * 1000
+    return build_ms, close_ms
+
 
 async def paced_circuit_builder(
     *,
@@ -209,6 +223,80 @@ async def paced_circuit_builder(
     seq = 0
     next_launch = start_time
 
+    pending: set[asyncio.Task] = set()
+
+    async def _one_attempt(seq_no: int) -> None:
+        wall_start = time.time()
+        perf_start = time.perf_counter()
+
+        status = "fail"
+        reason = None
+
+        queue_per_client_ms = 0.0
+        queue_global_ms = 0.0
+        build_ms = None
+        close_ms = None
+
+        try:
+            # 1) per-client queue
+            t_q0 = time.perf_counter()
+            await per_client_sem.acquire()
+            t_q1 = time.perf_counter()
+            queue_per_client_ms = (t_q1 - t_q0) * 1000
+
+            try:
+                # 2) global queue (optional)
+                if global_sem is not None:
+                    t_g0 = time.perf_counter()
+                    await global_sem.acquire()
+                    t_g1 = time.perf_counter()
+                    queue_global_ms = (t_g1 - t_g0) * 1000
+                    try:
+                        build_ms, close_ms = await build_single_circuit(
+                            client, f"{phase}-{load_level}-{seq_no}", timeout_s
+                        )
+                    finally:
+                        global_sem.release()
+                else:
+                    build_ms, close_ms = await build_single_circuit(
+                        client, f"{phase}-{load_level}-{seq_no}", timeout_s
+                    )
+
+                status = "ok"
+
+            finally:
+                per_client_sem.release()
+
+        except asyncio.TimeoutError:
+            reason = "TimeoutError:circuit_build_timeout"
+        except Exception as exc:
+            reason = f"{type(exc).__name__}:{exc}"
+
+        wall_end = time.time()
+        perf_end = time.perf_counter()
+
+        attempt_total_ms = (perf_end - perf_start) * 1000
+
+        attempt = CircuitAttempt(
+            client=client.name,
+            load_level=load_level,
+            phase=phase,
+            seq=seq_no,
+            start_ts=wall_start,
+            end_ts=wall_end,
+            status=status,
+            latency_ms=attempt_total_ms,
+            reason=reason,
+            ratio_label=getattr(client, "ratio_label", None),
+
+            queue_per_client_ms=queue_per_client_ms,
+            queue_global_ms=queue_global_ms if global_sem is not None else 0.0,
+            build_ms=build_ms,
+            close_ms=close_ms,
+        )
+        results.append(attempt)
+        log_circuit_attempt(writer, attempt)
+
     while True:
         now = time.time()
         if now >= end_time:
@@ -219,39 +307,101 @@ async def paced_circuit_builder(
             await asyncio.sleep(delay)
 
         seq += 1
-        attempt_start = time.time()
-        reason = None
-        status = "fail"
 
-        try:
-            async with per_client_sem:
-                if global_sem is None:
-                    await build_single_circuit(client, f"{phase}-{load_level}-{seq}", timeout_s)
-                else:
-                    async with global_sem:
-                        await build_single_circuit(client, f"{phase}-{load_level}-{seq}", timeout_s)
-            status = "ok"
-        except Exception as exc:  # noqa: PERF203
-            reason = f"{type(exc).__name__}:{exc}"
-        finally:
-            attempt_end = time.time()
-            latency_ms = (attempt_end - attempt_start) * 1000
-            attempt = CircuitAttempt(
-                client=client.name,
-                load_level=load_level,
-                phase=phase,
-                seq=seq,
-                start_ts=attempt_start,
-                end_ts=attempt_end,
-                status=status,
-                latency_ms=latency_ms,
-                reason=reason,
-                ratio_label=getattr(client, "ratio_label", None),
-            )
-            results.append(attempt)
-            log_circuit_attempt(writer, attempt)
+        task = asyncio.create_task(_one_attempt(seq))
+        pending.add(task)
+        task.add_done_callback(lambda t: pending.discard(t))
 
         next_launch += period_s
+
+    # Drain: wait all in-flight attempts before returning
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+class ClientRunner:
+    def __init__(
+        self,
+        *,
+        writer: AsyncJsonlWriter,
+        ratio_label: str,
+        client_idx: int,
+        node_addr: str,
+        port: int,
+        per_client_limit: int,
+        global_sem: Optional[asyncio.Semaphore],
+        tls_sem: Optional[asyncio.Semaphore],
+    ) -> None:
+        self.writer = writer
+        self.ratio_label = ratio_label
+        self.client_idx = client_idx
+        self.node_addr = node_addr
+        self.port = port
+        self.global_sem = global_sem
+
+        self.client = LabeledTorClient(
+            name=f"{CLIENT_NAME_PREFIX}{client_idx}",
+            host=node_addr,
+            port=port,
+            model="sim",
+            ratio_label=ratio_label,
+            writer=writer,
+            tls_sem=tls_sem,
+        )
+        self.client.attach_labeled_bus(role="client", enable_circuit_summary=False)
+
+        self.per_client_sem = asyncio.Semaphore(per_client_limit)
+        self._proto_task: Optional[asyncio.Task] = None
+        self._started = False
+
+    async def start(self) -> None:
+        if self._started:
+            return
+        self._proto_task = asyncio.create_task(self.client.start_protocol())
+        await asyncio.wait_for(self.client.ready_to_send.wait(), timeout=30)
+        self._started = True
+
+    async def run_epoch(
+        self,
+        *,
+        load_level: int,
+        warmup_s: float,
+        measure_s: float,
+        period_s: float,
+        timeout_s: float,
+        results: List[CircuitAttempt],
+    ) -> None:
+        await paced_circuit_builder(
+            client=self.client,
+            load_level=load_level,
+            phase="warmup",
+            duration_s=warmup_s,
+            period_s=period_s,
+            timeout_s=timeout_s,
+            writer=self.writer,
+            per_client_sem=self.per_client_sem,
+            global_sem=self.global_sem,
+            results=results,
+        )
+        await paced_circuit_builder(
+            client=self.client,
+            load_level=load_level,
+            phase="measure",
+            duration_s=measure_s,
+            period_s=period_s,
+            timeout_s=timeout_s,
+            writer=self.writer,
+            per_client_sem=self.per_client_sem,
+            global_sem=self.global_sem,
+            results=results,
+        )
+
+    async def stop(self) -> None:
+        with contextlib.suppress(Exception):
+            await self.client.stop_protocol()
+        if self._proto_task is not None and not self._proto_task.done():
+            self._proto_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._proto_task
 
 
 async def run_client_for_level(
@@ -269,6 +419,7 @@ async def run_client_for_level(
     timeout_s: float,
     per_client_limit: int,
     global_sem: Optional[asyncio.Semaphore],
+    tls_sem: Optional[asyncio.Semaphore],
     seed: int,
 ) -> List[CircuitAttempt]:
     client = LabeledTorClient(
@@ -278,6 +429,7 @@ async def run_client_for_level(
         model="sim",
         ratio_label=ratio_label,
         writer=writer,
+        tls_sem=tls_sem,
     )
     client.attach_labeled_bus(role="client", enable_circuit_summary=False)
 
@@ -313,12 +465,12 @@ async def run_client_for_level(
             results=results,
         )
     finally:
-        await asyncio.gather(proto_task, return_exceptions=True)
-
-        pending = pending_client_tasks(client.name)
-        if pending:
-            print(f"[Diag] pending tasks for {client.name} after shutdown: {len(pending)}")
-        assert not pending, f"client tasks still pending for {client.name}: {pending}"
+        with contextlib.suppress(Exception):
+            await client.stop_protocol()
+        if not proto_task.done():
+            proto_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await proto_task
 
     return results
 
@@ -360,7 +512,7 @@ def compute_subwindow_success(attempts: List[CircuitAttempt], window_s: float) -
 def summarize_load_level(load_level: int, attempts: List[CircuitAttempt], subwindow_s: float) -> LoadLevelResult:
     measurement_attempts = [a for a in attempts if a.phase == "measure"]
     success_rate = 0.0 if not measurement_attempts else sum(1 for a in measurement_attempts if a.status == "ok") / len(measurement_attempts)
-    latencies = [a.latency_ms for a in measurement_attempts if a.status == "ok"]
+    latencies = [a.build_ms for a in measurement_attempts if a.status == "ok" and a.build_ms is not None]
     p50 = compute_percentile(latencies, 50)
     p95 = compute_percentile(latencies, 95)
     subwindow_success = compute_subwindow_success(attempts, subwindow_s)
@@ -411,18 +563,28 @@ def detect_capacity_boundary(results: List[LoadLevelResult], success_threshold: 
 
     return boundary
 
+def excepthook(exc_type, exc, tb):
+    with open("unhandled_errors.log", "a", encoding="utf-8") as f:
+        f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] UNHANDLED\n")
+        f.write("".join(traceback.format_exception(exc_type, exc, tb)))
+        f.flush()
 
 # ============================================================
 # Main
 # ============================================================
 
 async def main():
+    sys.excepthook = excepthook
+
+    tls_limit = env_int("GLOBAL_CONCURRENT_TLS", 64)
+    # tls_sem = asyncio.Semaphore(tls_limit)
+    tls_sem = None
     loop = asyncio.get_running_loop()
 
     ratio_label = "fixed-topology"
     default_log_dir = Path("exp") / "deployment" / "e1_scalability" / "logs"
     base_log_dir = Path(env_str("LOG_DIR", str(default_log_dir)))
-    mode_tag = env_str("MODE_TAG", "default")
+    mode_tag = env_str("MODE_TAG", "tor")
     log_dir = base_log_dir / mode_tag
 
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -457,13 +619,17 @@ async def main():
         "hops": HOPS,
     }
 
-    concurrency_levels = env_csv_int("CONCURRENCY_LEVELS", "140,192,216")
+    concurrency_levels = env_csv_int("CONCURRENCY_LEVELS", "4, 8, 16, 32, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 160, 176, 192, 216, 256")
     warmup_s = env_float("WARMUP_S", 30.0)
-    measure_s = env_float("MEASURE_S", 60.0)
+    measure_s = env_float("MEASURE_S", 120.0)
     cooldown_s = env_float("LOAD_COOLDOWN_S", 5.0)
     period_s = env_float("PER_CLIENT_PERIOD_S", 2.0)
     timeout_s = env_float("CIRCUIT_BUILD_TIMEOUT_S", 5.0)
     per_client_limit = env_int("MAX_CONCURRENT_CIRCUITS", 1)
+
+    user_ramp_mode = env_str("USER_RAMP_MODE", "rebuild").strip().lower()
+    if user_ramp_mode not in ("rebuild", "incremental"):
+        raise ValueError(f"Invalid USER_RAMP_MODE={user_ramp_mode}, expected rebuild or incremental")
 
     global_limit = os.environ.get("GLOBAL_CONCURRENT_CIRCUITS")
     global_sem = None if global_limit in (None, "") else asyncio.Semaphore(int(global_limit))
@@ -515,40 +681,94 @@ async def main():
 
     probe.start()
     await wait_resource_logging_ready(probe, timeout_s=float(os.environ.get("RESOURCE_READY_TIMEOUT_S", "60")))
+    runners: List[ClientRunner] = []
+
     try:
         for level_idx, load_level in enumerate(concurrency_levels):
             print(f"[Load] starting level {load_level} users ({level_idx + 1}/{len(concurrency_levels)})")
-            client_tasks = []
-            for client_idx in range(load_level):
-                port = CLIENT_PORT_BASE + client_idx
-                client_tasks.append(
-                    asyncio.create_task(
-                        run_client_for_level(
+
+            level_attempts: List[CircuitAttempt] = []
+
+            if user_ramp_mode == "rebuild":
+                # Keep old behavior: build N clients, run epoch, tear down all.
+                client_tasks = []
+                for client_idx in range(load_level):
+                    port = CLIENT_PORT_BASE + client_idx
+                    client_tasks.append(
+                        asyncio.create_task(
+                            run_client_for_level(
+                                writer=writer,
+                                ratio_label=ratio_label,
+                                load_level=load_level,
+                                client_idx=client_idx,
+                                node_addr=node_addr,
+                                port=port,
+                                addr=addr,
+                                warmup_s=warmup_s,
+                                measure_s=measure_s,
+                                period_s=period_s,
+                                timeout_s=timeout_s,
+                                per_client_limit=per_client_limit,
+                                global_sem=global_sem,
+                                tls_sem=tls_sem,
+                                seed=seed,
+                            )
+                        )
+                    )
+
+                client_results = await asyncio.gather(*client_tasks, return_exceptions=True)
+                for res in client_results:
+                    if isinstance(res, Exception):
+                        print(f"[Load] client task failed at level {load_level}: {res}")
+                        continue
+                    level_attempts.extend(res)
+
+            else:
+                # incremental: keep existing clients, add delta only
+                current = len(runners)
+                target = load_level
+                if target < current:
+                    # If levels ever decrease, we keep extra clients but make them idle.
+                    # (You can change policy to stop extras if you want.)
+                    print(f"[Load] incremental mode: target {target} < current {current}, keeping extras idle")
+                else:
+                    # create and start only delta clients
+                    for client_idx in range(current, target):
+                        port = CLIENT_PORT_BASE + client_idx
+                        r = ClientRunner(
                             writer=writer,
                             ratio_label=ratio_label,
-                            load_level=load_level,
                             client_idx=client_idx,
                             node_addr=node_addr,
                             port=port,
-                            addr=addr,
-                            warmup_s=warmup_s,
-                            measure_s=measure_s,
-                            period_s=period_s,
-                            timeout_s=timeout_s,
                             per_client_limit=per_client_limit,
                             global_sem=global_sem,
-                            seed=seed,
+                            tls_sem=tls_sem,
+                        )
+                        await r.start()
+                        runners.append(r)
+
+                # run epoch on the first `target` clients
+                active = runners[:target]
+                epoch_tasks = []
+                for r in active:
+                    epoch_tasks.append(
+                        asyncio.create_task(
+                            r.run_epoch(
+                                load_level=load_level,
+                                warmup_s=warmup_s,
+                                measure_s=measure_s,
+                                period_s=period_s,
+                                timeout_s=timeout_s,
+                                results=level_attempts,
+                            )
                         )
                     )
-                )
 
-            level_attempts: List[CircuitAttempt] = []
-            client_results = await asyncio.gather(*client_tasks, return_exceptions=True)
-            for res in client_results:
-                if isinstance(res, Exception):
-                    print(f"[Load] client task failed at level {load_level}: {res}")
-                    continue
-                level_attempts.extend(res)
+                epoch_results = await asyncio.gather(*epoch_tasks, return_exceptions=True)
+                for res in epoch_results:
+                    if isinstance(res, Exception):
+                        print(f"[Load] runner epoch failed at level {load_level}: {res}")
 
             summary = summarize_load_level(load_level, level_attempts, subwindow_s)
             results.append(summary)
@@ -563,12 +783,11 @@ async def main():
             if cooldown_s > 0 and load_level != concurrency_levels[-1]:
                 await asyncio.sleep(cooldown_s)
     finally:
-        await probe.stop()
-        await writer.stop()
-        remaining = pending_client_tasks(CLIENT_NAME_PREFIX)
-        if remaining:
-            print(f"[Diag] pending client tasks after main: {len(remaining)}")
-        assert not remaining, f"client tasks still pending after main shutdown: {remaining}"
+        # Stop incremental clients if used
+        if runners:
+            stop_tasks = [asyncio.create_task(r.stop()) for r in runners]
+            await asyncio.gather(*stop_tasks, return_exceptions=True)
+
         run_meta.update(
             {
                 "finished_at": time.time(),

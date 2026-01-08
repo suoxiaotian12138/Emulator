@@ -44,7 +44,7 @@ class Tor_Client(Tor_base):
             self._register_task(f"{self.name}.listener", self.monitor_tor_socket())
             await self.consensus_init()
 
-            self._register_task(f"{self.name}.prebuild", self.circuit_mgr.maintain_prebuild())
+            # self._register_task(f"{self.name}.prebuild", self.circuit_mgr.maintain_prebuild())
             self._register_task(f"{self.name}.housekeeping", self._circuit_housekeeping())
 
             await asyncio.gather(*self.tasks.values())

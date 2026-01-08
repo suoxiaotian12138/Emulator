@@ -4,6 +4,11 @@ import sys, contextlib
 from typing import Dict, Tuple, Callable
 from typing import Optional
 from tools.Crypt.serialization import decode
+import asyncio
+import contextlib
+import logging
+import ssl
+import traceback
 
 import errno, ssl
 import asyncio, ssl, socket, time
@@ -453,6 +458,15 @@ async def accept_tls_connections(
         await server.serve_forever()
 
 # —— 出站：统一拨号 + 受限握手
+_dial_tls_logger = logging.getLogger("dial_tls")
+if not _dial_tls_logger.handlers:
+    fh = logging.FileHandler("dial_tls_errors.log", encoding="utf-8")
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    fh.setFormatter(fmt)
+    _dial_tls_logger.addHandler(fh)
+    _dial_tls_logger.setLevel(logging.INFO)
+
+
 async def dial_tls(
     remote_addr: tuple[str, int],
     *,
@@ -467,22 +481,45 @@ async def dial_tls(
         ctx.keylog_filename = keylog_path
     nid = node_id or source_ip or "default"
 
-    async with get_global_sem(), get_node_sem(nid):
-        reader, writer = await asyncio.open_connection(
-            remote_addr[0], remote_addr[1],
-            ssl=ctx,
-            server_hostname=None,
-            ssl_handshake_timeout=timeout,
-            local_addr=(source_ip, 0) if source_ip else None
+    try:
+        async with get_global_sem(), get_node_sem(nid):
+            # 给“整个连接流程”加总超时，避免只靠 ssl_handshake_timeout
+            conn_coro = asyncio.open_connection(
+                remote_addr[0],
+                remote_addr[1],
+                ssl=ctx,
+                server_hostname=None,
+                ssl_handshake_timeout=timeout,
+                local_addr=(source_ip, 0) if source_ip else None,
+            )
+            reader, writer = await asyncio.wait_for(conn_coro, timeout=timeout + 5.0)
+
+
+    except Exception as e:
+        import os, time, traceback
+        msg = (
+            f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] open_connection failed\n"
+            f"cwd={os.getcwd()}\n"
+            f"remote={remote_addr} source_ip={source_ip} nid={nid} timeout={timeout}\n"
+            f"exc_type={type(e).__name__} exc={repr(e)}\n"
+            f"traceback:\n{traceback.format_exc()}\n"
         )
+        try:
+            with open("dial_tls_errors.log", "a", encoding="utf-8") as f:
+                f.write(msg)
+                f.flush()
+        except Exception:
+            pass
+        raise
+
     ssl_obj = writer.get_extra_info("ssl_object")
     if ssl_obj:
         if keylog_path:
             with contextlib.suppress(Exception):
                 setattr(ssl_obj, "_keylog_path", keylog_path)
         print(f"[dial_tls] {remote_addr} -> TLS {ssl_obj.version()} {ssl_obj.cipher()}")
-    return reader, writer
 
+    return reader, writer
 async def monitor_connection_tls(
     conn: socket.socket,
     addr: Tuple[str, int],

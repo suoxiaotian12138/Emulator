@@ -31,6 +31,63 @@ async def register_all_guards(guard_configs):
 
     return guards
 
+
+def generate_specific_nodes(n_guard, n_middle, n_exit):
+    """
+    分别指定 Guard, Middle, Exit 的数量生成配置。
+
+    Args:
+        n_guard (int): Guard 节点的数量
+        n_middle (int): Middle 节点的数量
+        n_exit (int): Exit 节点的数量
+
+    Returns:
+        list: 配置元组列表
+    """
+    configs = []
+    base_port = 9000
+
+    # 找出最大数量，决定循环多少轮
+    max_count = max(n_guard, n_middle, n_exit)
+
+    for i in range(1, max_count + 1):
+        suffix = f"{i:02d}"
+        port = base_port + i
+
+        # --- 1. 判断是否生成 Guard ---
+        if i <= n_guard:
+            configs.append((
+                f"guard{suffix}",
+                "192.168.66.242",
+                port,
+                'Guard',
+                ["Running", "Valid", "Guard", "Fast", "Stable"],
+                'reject 1-65535'
+            ))
+
+        # --- 2. 判断是否生成 Middle ---
+        if i <= n_middle:
+            configs.append((
+                f"Middle{suffix}",
+                "192.168.66.244",
+                port,
+                'Middle',
+                ["Running", "Valid", "MiddleOnly", "Fast", "Stable"],
+                'reject 1-65535'
+            ))
+
+        # --- 3. 判断是否生成 Exit ---
+        if i <= n_exit:
+            configs.append((
+                f"Exit{suffix}",
+                "192.168.66.243",
+                port,
+                'Exit',
+                ["Running", "Valid", "Exit", "Fast", "Stable"],
+                'accept 1-65535'
+            ))
+
+    return configs
 async def main():
     # 启动目录服务器
     loop = asyncio.get_running_loop()
@@ -45,22 +102,7 @@ async def main():
     )
     os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
     # 多个 guard 配置
-    guard_configs = [
-        ("guard01", "192.168.66.242", 9001, 'Guard', ["Running", "Valid", "Guard","Fast","Stable"], 'reject 1-65535'),
-        ("Middle01", "192.168.66.244", 9001, 'Middle',["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
-        ("Exit01", "192.168.66.243", 9001, 'Exit',["Running", "Valid", "Exit","Fast","Stable"], 'accept 1-65535'),
-        ("guard02", "192.168.66.242", 9002, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"], 'reject 1-65535'),
-        ("Middle02", "192.168.66.244", 9002, 'Middle', ["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
-        ("Exit02", "192.168.66.243", 9002, 'Exit', ["Running", "Valid", "Exit", "Fast", "Stable"], 'accept 1-65535'),
-        ("guard03", "192.168.66.242", 9003, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"], 'reject 1-65535'),
-        ("Middle03", "192.168.66.244", 9003, 'Middle', ["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
-        ("Exit03", "192.168.66.243", 9003, 'Exit', ["Running", "Valid", "Exit", "Fast", "Stable"], 'accept 1-65535'),
-        ("guard04", "192.168.66.242", 9004, 'Guard', ["Running", "Valid", "Guard", "Fast", "Stable"], 'reject 1-65535'),
-        ("Middle04", "192.168.66.244", 9004, 'Middle', ["Running", "Valid", "MiddleOnly", "Fast", "Stable"], 'reject 1-65535'),
-        ("Exit04", "192.168.66.243", 9004, 'Exit', ["Running", "Valid", "Exit", "Fast", "Stable"], 'accept 1-65535'),
-
-
-    ]
+    guard_configs = generate_specific_nodes(n_guard=4, n_middle=4, n_exit=4)
 
     # 注册所有 guard
     await register_all_guards(guard_configs)
