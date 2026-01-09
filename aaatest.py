@@ -8,7 +8,7 @@ from tools.Log.bus import EventBus
 from tools.Log.resources import resource_probe
 
 if sys.platform.startswith("win"):
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 MAX_TLS_THREADS = 128
 loop = asyncio.get_event_loop()
@@ -102,7 +102,7 @@ async def main():
     )
     os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
     # 多个 guard 配置
-    guard_configs = generate_specific_nodes(n_guard=4, n_middle=4, n_exit=4)
+    guard_configs = generate_specific_nodes(n_guard=40, n_middle=40, n_exit=40)
 
     # 注册所有 guard
     await register_all_guards(guard_configs)

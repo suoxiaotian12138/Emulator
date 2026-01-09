@@ -136,8 +136,15 @@ class LoadLevelResult:
     attempts: List[CircuitAttempt]
     subwindow_success: List[float]
     success_rate: float
-    p50_ms: Optional[float]
-    p95_ms: Optional[float]
+
+    # total latency percentiles (queue + build + close + overhead), ok only
+    p50_total_ms: Optional[float]
+    p95_total_ms: Optional[float]
+
+    # build latency percentiles (ok only)
+    p50_build_ms: Optional[float]
+    p95_build_ms: Optional[float]
+
 
 
 # ============================================================
@@ -218,12 +225,54 @@ async def paced_circuit_builder(
     global_sem: Optional[asyncio.Semaphore],
     results: List[CircuitAttempt],
 ) -> None:
-    start_time = time.time()
-    end_time = start_time + duration_s
+    # New knobs (env, optional)
+    max_pending = env_int("MAX_PENDING_PER_CLIENT", 1)  # 1 means strict backpressure
+    catchup_mode = env_str("PACING_CATCHUP", "drop").strip().lower()  # drop or catchup
+    jitter_frac = env_float("PACING_JITTER_FRAC", 0.0)  # e.g. 0.05
+
+    # Use monotonic clock for scheduling stability
+    t0_wall = time.time()
+    t0 = time.monotonic()
+    t_end = t0 + duration_s
+
     seq = 0
-    next_launch = start_time
+    # Stable phase offset per client to avoid herd effect across thousands of clients
+    phase_offset = (hash(client.name) % 1000) / 1000.0 * period_s
+    next_tick = t0 + phase_offset
 
     pending: set[asyncio.Task] = set()
+
+    def _emit_attempt(
+        *,
+        seq_no: int,
+        wall_start: float,
+        wall_end: float,
+        status: str,
+        reason: Optional[str],
+        total_ms: float,
+        queue_per_client_ms: float,
+        queue_global_ms: float,
+        build_ms: Optional[float],
+        close_ms: Optional[float],
+    ) -> None:
+        attempt = CircuitAttempt(
+            client=client.name,
+            load_level=load_level,
+            phase=phase,
+            seq=seq_no,
+            start_ts=wall_start,
+            end_ts=wall_end,
+            status=status,
+            latency_ms=total_ms,
+            reason=reason,
+            ratio_label=getattr(client, "ratio_label", None),
+            queue_per_client_ms=queue_per_client_ms,
+            queue_global_ms=queue_global_ms if global_sem is not None else 0.0,
+            build_ms=build_ms,
+            close_ms=close_ms,
+        )
+        results.append(attempt)
+        log_circuit_attempt(writer, attempt)
 
     async def _one_attempt(seq_no: int) -> None:
         wall_start = time.time()
@@ -237,6 +286,8 @@ async def paced_circuit_builder(
         build_ms = None
         close_ms = None
 
+        # Important: timeout should include only the build step (as you already do),
+        # but we keep total latency as (queue + build + close + overhead).
         try:
             # 1) per-client queue
             t_q0 = time.perf_counter()
@@ -263,7 +314,6 @@ async def paced_circuit_builder(
                     )
 
                 status = "ok"
-
             finally:
                 per_client_sem.release()
 
@@ -274,47 +324,68 @@ async def paced_circuit_builder(
 
         wall_end = time.time()
         perf_end = time.perf_counter()
+        total_ms = (perf_end - perf_start) * 1000
 
-        attempt_total_ms = (perf_end - perf_start) * 1000
-
-        attempt = CircuitAttempt(
-            client=client.name,
-            load_level=load_level,
-            phase=phase,
-            seq=seq_no,
-            start_ts=wall_start,
-            end_ts=wall_end,
+        _emit_attempt(
+            seq_no=seq_no,
+            wall_start=wall_start,
+            wall_end=wall_end,
             status=status,
-            latency_ms=attempt_total_ms,
             reason=reason,
-            ratio_label=getattr(client, "ratio_label", None),
-
+            total_ms=total_ms,
             queue_per_client_ms=queue_per_client_ms,
-            queue_global_ms=queue_global_ms if global_sem is not None else 0.0,
+            queue_global_ms=queue_global_ms,
             build_ms=build_ms,
             close_ms=close_ms,
         )
-        results.append(attempt)
-        log_circuit_attempt(writer, attempt)
 
     while True:
-        now = time.time()
-        if now >= end_time:
+        now = time.monotonic()
+        if now >= t_end:
             break
 
-        delay = next_launch - now
+        # Sleep until next tick
+        delay = next_tick - now
         if delay > 0:
             await asyncio.sleep(delay)
 
-        seq += 1
+        # Optional small jitter to avoid herd effect
+        if jitter_frac > 0:
+            await asyncio.sleep(random.random() * period_s * jitter_frac)
 
-        task = asyncio.create_task(_one_attempt(seq))
-        pending.add(task)
-        task.add_done_callback(lambda t: pending.discard(t))
+        # If we are behind schedule, decide what to do
+        now2 = time.monotonic()
+        if now2 - next_tick > period_s:
+            if catchup_mode == "drop":
+                # Drop missed ticks: real systems do not "catch up" by bursting
+                skipped = int((now2 - next_tick) // period_s)
+                next_tick += skipped * period_s
+            # else: "catchup" keeps old behavior (not recommended)
 
-        next_launch += period_s
+        # Backpressure: do not allow unbounded pending queue
+        if len(pending) >= max_pending:
+            seq += 1
+            wall = time.time()
+            _emit_attempt(
+                seq_no=seq,
+                wall_start=wall,
+                wall_end=wall,
+                status="drop",
+                reason="pacer_overrun:pending_limit",
+                total_ms=0.0,
+                queue_per_client_ms=0.0,
+                queue_global_ms=0.0,
+                build_ms=None,
+                close_ms=None,
+            )
+        else:
+            seq += 1
+            task = asyncio.create_task(_one_attempt(seq))
+            pending.add(task)
+            task.add_done_callback(lambda t: pending.discard(t))
 
-    # Drain: wait all in-flight attempts before returning
+        next_tick += period_s
+
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
 
@@ -511,19 +582,34 @@ def compute_subwindow_success(attempts: List[CircuitAttempt], window_s: float) -
 
 def summarize_load_level(load_level: int, attempts: List[CircuitAttempt], subwindow_s: float) -> LoadLevelResult:
     measurement_attempts = [a for a in attempts if a.phase == "measure"]
-    success_rate = 0.0 if not measurement_attempts else sum(1 for a in measurement_attempts if a.status == "ok") / len(measurement_attempts)
-    latencies = [a.build_ms for a in measurement_attempts if a.status == "ok" and a.build_ms is not None]
-    p50 = compute_percentile(latencies, 50)
-    p95 = compute_percentile(latencies, 95)
+
+    # Success rate: ok / (ok + fail). Drops are excluded to avoid "pacer artifact".
+    ok = [a for a in measurement_attempts if a.status == "ok"]
+    fail = [a for a in measurement_attempts if a.status == "fail"]
+    denom = (len(ok) + len(fail))
+    success_rate = 0.0 if denom == 0 else (len(ok) / denom)
+
+    total_lat = [a.latency_ms for a in ok]
+    build_lat = [a.build_ms for a in ok if a.build_ms is not None]
+
+    p50_total = compute_percentile(total_lat, 50)
+    p95_total = compute_percentile(total_lat, 95)
+    p50_build = compute_percentile(build_lat, 50)
+    p95_build = compute_percentile(build_lat, 95)
+
     subwindow_success = compute_subwindow_success(attempts, subwindow_s)
+
     return LoadLevelResult(
         load_level=load_level,
         attempts=measurement_attempts,
         subwindow_success=subwindow_success,
         success_rate=success_rate,
-        p50_ms=p50,
-        p95_ms=p95,
+        p50_total_ms=p50_total,
+        p95_total_ms=p95_total,
+        p50_build_ms=p50_build,
+        p95_build_ms=p95_build,
     )
+
 
 
 def detect_capacity_boundary(results: List[LoadLevelResult], success_threshold: float, consecutive_failures: int) -> Optional[int]:
@@ -584,7 +670,7 @@ async def main():
     ratio_label = "fixed-topology"
     default_log_dir = Path("exp") / "deployment" / "e1_scalability" / "logs"
     base_log_dir = Path(env_str("LOG_DIR", str(default_log_dir)))
-    mode_tag = env_str("MODE_TAG", "tor")
+    mode_tag = env_str("MODE_TAG", "torbox")
     log_dir = base_log_dir / mode_tag
 
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -619,7 +705,7 @@ async def main():
         "hops": HOPS,
     }
 
-    concurrency_levels = env_csv_int("CONCURRENCY_LEVELS", "4, 8, 16, 32, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 160, 176, 192, 216, 256")
+    concurrency_levels = env_csv_int("CONCURRENCY_LEVELS", "16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 256")
     warmup_s = env_float("WARMUP_S", 30.0)
     measure_s = env_float("MEASURE_S", 120.0)
     cooldown_s = env_float("LOAD_COOLDOWN_S", 5.0)
@@ -773,11 +859,14 @@ async def main():
             summary = summarize_load_level(load_level, level_attempts, subwindow_s)
             results.append(summary)
 
-            p50_str = f"{summary.p50_ms:.1f}" if summary.p50_ms is not None else "n/a"
-            p95_str = f"{summary.p95_ms:.1f}" if summary.p95_ms is not None else "n/a"
+            p50t = f"{summary.p50_total_ms:.1f}" if summary.p50_total_ms is not None else "n/a"
+            p95t = f"{summary.p95_total_ms:.1f}" if summary.p95_total_ms is not None else "n/a"
+            p50b = f"{summary.p50_build_ms:.1f}" if summary.p50_build_ms is not None else "n/a"
+            p95b = f"{summary.p95_build_ms:.1f}" if summary.p95_build_ms is not None else "n/a"
             print(
                 f"[Load] level={load_level} attempts={len(summary.attempts)} "
-                f"success_rate={summary.success_rate:.4f} p50={p50_str}ms p95={p95_str}ms"
+                f"success_rate={summary.success_rate:.4f} "
+                f"total_p50={p50t}ms total_p95={p95t}ms build_p50={p50b}ms build_p95={p95b}ms"
             )
 
             if cooldown_s > 0 and load_level != concurrency_levels[-1]:
@@ -796,8 +885,10 @@ async def main():
                     {
                         "load_level": r.load_level,
                         "success_rate": r.success_rate,
-                        "p50_ms": r.p50_ms,
-                        "p95_ms": r.p95_ms,
+                        "p50_total_ms": r.p50_total_ms,
+                        "p95_total_ms": r.p95_total_ms,
+                        "p50_build_ms": r.p50_build_ms,
+                        "p95_build_ms": r.p95_build_ms,
                         "subwindow_success": r.subwindow_success,
                         "attempts": len(r.attempts),
                     }
