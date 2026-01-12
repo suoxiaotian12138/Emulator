@@ -477,8 +477,7 @@ async def dial_tls(
     keylog_path: str | None = None,
 ):
     ctx = ssl_ctx or get_client_ctx()
-    if keylog_path:
-        ctx.keylog_filename = keylog_path
+
     nid = node_id or source_ip or "default"
 
     try:
@@ -514,9 +513,7 @@ async def dial_tls(
 
     ssl_obj = writer.get_extra_info("ssl_object")
     if ssl_obj:
-        if keylog_path:
-            with contextlib.suppress(Exception):
-                setattr(ssl_obj, "_keylog_path", keylog_path)
+        # 不在这里 pop。EXPORTER_SECRET 由 keylog_cb 到达时直接写入 ssl_obj._exporter_line
         print(f"[dial_tls] {remote_addr} -> TLS {ssl_obj.version()} {ssl_obj.cipher()}")
 
     return reader, writer

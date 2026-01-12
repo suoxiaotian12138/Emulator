@@ -32,9 +32,47 @@ def yaml_list_inline(items: List[str]) -> str:
 
 def node_ip(third_octet_base: int, index_1based: int, host_last_octet: int = 2) -> str:
     # Example: base=64, i=1 => 198.64.0.2; i=2 => 198.65.0.2
-    third = third_octet_base + (index_1based - 1)
-    return f"198.{third}.0.{host_last_octet}"
+    third = host_last_octet + (index_1based - 1)
+    return f"198.{third_octet_base}.0.{third}"
 
+
+
+class PortAllocator:
+    """Allocate unique, safe host ports for docker port mappings.
+
+    Goals:
+      1) Avoid collisions across all generated services.
+      2) Avoid privileged/well-known ports and a small set of commonly-used ports.
+      3) Keep deterministic, index-based growth (no random).
+    """
+
+    def __init__(self) -> None:
+        self.used: set[int] = set()
+        self.forbidden: set[int] = set()
+        # Privileged ports
+        self.forbidden.update(range(0, 1024))
+        # Commonly used / problematic ports to avoid on the host
+        self.forbidden.update({
+            22, 23, 25, 53, 67, 68, 69, 80, 110, 111, 123, 135, 137, 138, 139,
+            143, 161, 389, 443, 445, 465, 587, 631, 993, 995, 1080, 1433, 1521,
+            2049, 2375, 2376, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 9001,
+            9050, 9051, 11211, 27017,
+        })
+
+    def alloc(self, base: int, index_1based: int) -> int:
+        if index_1based <= 0:
+            raise ValueError("index_1based must be >= 1")
+
+        port = base + (index_1based - 1)
+        # Linear probe to find the next free & allowed port.
+        while port in self.used or port in self.forbidden:
+            port += 1
+        self.used.add(port)
+        return port
+
+
+# Global allocator shared across all generated services
+PORTS = PortAllocator()
 
 def build_common_service_block(
     service_name: str,
@@ -70,7 +108,7 @@ def gen_guard(i: int, authority_ip: str, fp: str, v3ident: str) -> Tuple[List[st
     service_name = f"tor-guard{i}"
     container_name = service_name
 
-    ports = [f"901{i}:9001", f"910{i}:9051"]
+    ports = [f"{PORTS.alloc(20000, i)}:9001", f"{PORTS.alloc(30000, i)}:9051"]
     env = {
         "TOR_NICKNAME": f"guard{i}",
         "TOR_CONTACT": f"guard{i}@local.net",
@@ -90,7 +128,7 @@ def gen_exit(i: int, authority_ip: str, fp: str, v3ident: str) -> Tuple[List[str
     service_name = f"tor-exit{i}"
     container_name = service_name
 
-    ports = [f"902{i}:9001", f"912{i}:9051"]
+    ports = [f"{PORTS.alloc(21000, i)}:9001", f"{PORTS.alloc(31000, i)}:9051"]
     env = {
         "TOR_NICKNAME": f"Exit{i}",
         "TOR_CONTACT": f"Exit{i}@local.net",
@@ -101,7 +139,7 @@ def gen_exit(i: int, authority_ip: str, fp: str, v3ident: str) -> Tuple[List[str
     }
 
     volume_name = f"tor-exit{i}-data"
-    ipv4 = node_ip(80, i, 2)  # UPDATED
+    ipv4 = node_ip(96, i, 2)  # UPDATED
     block = build_common_service_block(service_name, container_name, ports, env, volume_name, ipv4)
     return block, volume_name
 
@@ -110,7 +148,7 @@ def gen_middle(i: int, authority_ip: str, fp: str, v3ident: str) -> Tuple[List[s
     service_name = f"tor-middle{i}"
     container_name = service_name
 
-    ports = [f"903{i}:9001", f"913{i}:9051"]
+    ports = [f"{PORTS.alloc(22000, i)}:9001", f"{PORTS.alloc(32000, i)}:9051"]
     env = {
         "TOR_NICKNAME": f"middle{i}",
         "TOR_CONTACT": f"middle{i}@local.net",
@@ -124,7 +162,7 @@ def gen_middle(i: int, authority_ip: str, fp: str, v3ident: str) -> Tuple[List[s
     }
 
     volume_name = f"tor-middle{i}-data"
-    ipv4 = node_ip(90, i, 2)  # UPDATED
+    ipv4 = node_ip(100, i, 2)  # UPDATED
     block = build_common_service_block(service_name, container_name, ports, env, volume_name, ipv4)
     return block, volume_name
 
@@ -189,9 +227,9 @@ def generate_compose(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--guards", type=int, default=4)
+    parser.add_argument("--guards", type=int, default=3)
+    parser.add_argument("--middles", type=int, default=3)
     parser.add_argument("--exits", type=int, default=4)
-    parser.add_argument("--middles", type=int, default=4)
     parser.add_argument("--authority-ip", default="192.168.66.241")
     parser.add_argument("--fingerprint", default="4CF9BD2D85C9D484BBB817E2F927B502C8EEFCA6")
     parser.add_argument("--v3ident", default="4CF9BD2D85C9D484BBB817E2F927B502C8EEFCA6")

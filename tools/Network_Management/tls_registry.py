@@ -4,6 +4,7 @@ import asyncio
 # 全局信号量
 _global_sem = asyncio.Semaphore(512)
 _node_sems = {}
+from tools.Network_Management.tls_keylog_cache import keylog_cb
 
 def get_global_sem():
     return _global_sem
@@ -18,6 +19,11 @@ _server_ctxs = {}
 
 def make_server_ctx(certfile, keyfile):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    try:
+        ctx.set_keylog_callback(keylog_cb)
+    except Exception:
+        pass
+
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.set_ciphers("ALL:@SECLEVEL=1")
     ctx.options |= ssl.OP_NO_COMPRESSION | ssl.OP_NO_RENEGOTIATION

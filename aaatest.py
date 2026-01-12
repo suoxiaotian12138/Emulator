@@ -102,7 +102,7 @@ async def main():
     )
     os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
     # 多个 guard 配置
-    guard_configs = generate_specific_nodes(n_guard=40, n_middle=40, n_exit=40)
+    guard_configs = generate_specific_nodes(n_guard=20, n_middle=20, n_exit=20)
 
     # 注册所有 guard
     await register_all_guards(guard_configs)

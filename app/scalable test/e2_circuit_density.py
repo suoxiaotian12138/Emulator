@@ -67,6 +67,24 @@ HOPS = 3
 CLIENT_NAME_PREFIX = "client"
 CLIENT_PORT_BASE = 9102
 
+class TaggedWriter:
+    def __init__(self, base: AsyncJsonlWriter, *, concurrency: int, ratio_label: str):
+        self._base = base
+        self._concurrency = concurrency
+        self._ratio_label = ratio_label
+
+    def emit_nowait(self, stream: str, obj) -> None:
+        if stream == "resources" and isinstance(obj, dict):
+            payload = dict(obj)
+            payload.setdefault("concurrency", self._concurrency)
+            payload.setdefault("ratio_label", self._ratio_label)
+            self._base.emit_nowait(stream, payload)
+            return
+        self._base.emit_nowait(stream, obj)
+
+    def __getattr__(self, name):
+        # forward everything else, e.g. files, close(), etc.
+        return getattr(self._base, name)
 
 # ============================================================
 # Helper utilities
@@ -195,17 +213,18 @@ async def paced_circuit_builder(
     results: List[CircuitAttempt],
 ) -> None:
     max_pending = env_int("MAX_PENDING_PER_CLIENT", 1)
-    catchup_mode = env_str("PACING_CATCHUP", "drop").strip().lower()
-    jitter_frac = env_float("PACING_JITTER_FRAC", 0.0)
 
-    t0 = time.monotonic()
-    t_end = t0 + duration_s
+    # New knobs
+    retry_backoff_s = env_float("CIRCUIT_RETRY_BACKOFF_S", 0.2)
+    retry_backoff_max_s = env_float("CIRCUIT_RETRY_BACKOFF_MAX_S", 2.0)
+    max_retries_raw = os.environ.get("CIRCUIT_MAX_RETRIES", "").strip()
+    max_retries = None if max_retries_raw == "" else int(max_retries_raw)
 
-    seq = 0
-    phase_offset = (hash(client.name) % 1000) / 1000.0 * period_s
-    next_tick = t0 + phase_offset
+    # Hard target: build exactly this many circuits for this phase
+    target = int(duration_s // period_s) if period_s > 0 else 0
 
     pending: set[asyncio.Task] = set()
+    seq = 0
 
     def _emit_attempt(
         *,
@@ -239,106 +258,121 @@ async def paced_circuit_builder(
         results.append(attempt)
         log_circuit_attempt(writer, attempt)
 
-    async def _one_attempt(seq_no: int) -> None:
+    async def _one_attempt_until_ok(seq_no: int) -> None:
         wall_start = time.time()
         perf_start = time.perf_counter()
 
-        status = "fail"
-        reason = None
+        tries = 0
+        backoff = retry_backoff_s
 
-        queue_per_client_ms = 0.0
-        queue_global_ms = 0.0
-        build_ms = None
-        close_ms = None
+        # We'll keep the latest failure reason if it takes multiple tries
+        last_reason = None
 
-        try:
-            t_q0 = time.perf_counter()
-            await per_client_sem.acquire()
-            t_q1 = time.perf_counter()
-            queue_per_client_ms = (t_q1 - t_q0) * 1000.0
+        while True:
+            tries += 1
+
+            status = "fail"
+            reason = None
+
+            queue_per_client_ms = 0.0
+            queue_global_ms = 0.0
+            build_ms = None
+            close_ms = None
+
             try:
-                if global_sem is not None:
-                    t_g0 = time.perf_counter()
-                    await global_sem.acquire()
-                    t_g1 = time.perf_counter()
-                    queue_global_ms = (t_g1 - t_g0) * 1000.0
-                    try:
+                t_q0 = time.perf_counter()
+                await per_client_sem.acquire()
+                t_q1 = time.perf_counter()
+                queue_per_client_ms = (t_q1 - t_q0) * 1000.0
+
+                try:
+                    if global_sem is not None:
+                        t_g0 = time.perf_counter()
+                        await global_sem.acquire()
+                        t_g1 = time.perf_counter()
+                        queue_global_ms = (t_g1 - t_g0) * 1000.0
+                        try:
+                            build_ms, close_ms = await build_single_circuit(
+                                client, f"{phase}-{concurrency}-{seq_no}", timeout_s
+                            )
+                        finally:
+                            global_sem.release()
+                    else:
                         build_ms, close_ms = await build_single_circuit(
                             client, f"{phase}-{concurrency}-{seq_no}", timeout_s
                         )
-                    finally:
-                        global_sem.release()
-                else:
-                    build_ms, close_ms = await build_single_circuit(
-                        client, f"{phase}-{concurrency}-{seq_no}", timeout_s
-                    )
-                status = "ok"
-            finally:
-                per_client_sem.release()
-        except asyncio.TimeoutError:
-            reason = "TimeoutError:circuit_build_timeout"
-        except Exception as exc:  # noqa: BLE001
-            reason = f"{type(exc).__name__}:{exc}"
 
-        wall_end = time.time()
-        perf_end = time.perf_counter()
-        total_ms = (perf_end - perf_start) * 1000.0
+                    status = "ok"
+                    reason = None
+                finally:
+                    per_client_sem.release()
 
-        _emit_attempt(
-            seq_no=seq_no,
-            wall_start=wall_start,
-            wall_end=wall_end,
-            status=status,
-            reason=reason,
-            total_ms=total_ms,
-            queue_per_client_ms=queue_per_client_ms,
-            queue_global_ms=queue_global_ms,
-            build_ms=build_ms,
-            close_ms=close_ms,
-        )
+            except asyncio.TimeoutError:
+                reason = "TimeoutError:circuit_build_timeout"
+            except Exception as exc:  # noqa: BLE001
+                reason = f"{type(exc).__name__}:{exc}"
 
-    while True:
-        now = time.monotonic()
-        if now >= t_end:
-            break
+            if status == "ok":
+                wall_end = time.time()
+                perf_end = time.perf_counter()
+                total_ms = (perf_end - perf_start) * 1000.0
 
-        delay = next_tick - now
-        if delay > 0:
-            await asyncio.sleep(delay)
+                _emit_attempt(
+                    seq_no=seq_no,
+                    wall_start=wall_start,
+                    wall_end=wall_end,
+                    status="ok",
+                    reason=None,
+                    total_ms=total_ms,
+                    queue_per_client_ms=queue_per_client_ms,
+                    queue_global_ms=queue_global_ms,
+                    build_ms=build_ms,
+                    close_ms=close_ms,
+                )
+                return
 
-        if jitter_frac > 0:
-            await asyncio.sleep(random.random() * period_s * jitter_frac)
+            # failed, decide retry
+            last_reason = reason
+            if max_retries is not None and tries >= max_retries:
+                wall_end = time.time()
+                perf_end = time.perf_counter()
+                total_ms = (perf_end - perf_start) * 1000.0
+                _emit_attempt(
+                    seq_no=seq_no,
+                    wall_start=wall_start,
+                    wall_end=wall_end,
+                    status="fail",
+                    reason=f"{last_reason} (retries_exhausted={tries})",
+                    total_ms=total_ms,
+                    queue_per_client_ms=queue_per_client_ms,
+                    queue_global_ms=queue_global_ms,
+                    build_ms=None,
+                    close_ms=None,
+                )
+                return
 
-        now2 = time.monotonic()
-        if now2 - next_tick > period_s and catchup_mode == "drop":
-            skipped = int((now2 - next_tick) // period_s)
-            next_tick += skipped * period_s
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2.0, retry_backoff_max_s)
 
-        if len(pending) >= max_pending:
-            seq += 1
-            wall = time.time()
-            _emit_attempt(
-                seq_no=seq,
-                wall_start=wall,
-                wall_end=wall,
-                status="drop",
-                reason="pacer_overrun:pending_limit",
-                total_ms=0.0,
-                queue_per_client_ms=0.0,
-                queue_global_ms=0.0,
-                build_ms=None,
-                close_ms=None,
-            )
-        else:
-            seq += 1
-            task = asyncio.create_task(_one_attempt(seq))
-            pending.add(task)
-            task.add_done_callback(lambda t: pending.discard(t))
+    # Produce exactly `target` circuits, never drop.
+    while seq < target:
+        # Enforce pending cap by waiting for one completion, instead of dropping a tick.
+        while len(pending) >= max_pending:
+            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                pending.discard(t)
 
-        next_tick += period_s
+        seq += 1
+        task = asyncio.create_task(_one_attempt_until_ok(seq))
+        pending.add(task)
+        task.add_done_callback(lambda t: pending.discard(t))
+
+        # Keep pacing intention: wait period before scheduling next one
+        await asyncio.sleep(period_s)
 
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
+
 
 
 class ClientRunner:
@@ -526,7 +560,7 @@ async def main() -> None:
     default_log_dir = Path("exp") / "deployment" / "e2_density" / "logs"
     base_log_dir = Path(env_str("LOG_DIR", str(default_log_dir)))
     mode_tag = env_str("MODE_TAG", "torbox")
-    relay_tier = env_str("RELAY_TIER", "120")
+    relay_tier = env_str("RELAY_TIER", "60")
     # sanitize path segment
     relay_tier = re.sub(r"[^A-Za-z0-9_.-]+", "_", relay_tier).strip("_") or "default"
     log_dir = base_log_dir / mode_tag / relay_tier
@@ -544,11 +578,11 @@ async def main() -> None:
     )
 
     seed = ensure_seed()
-    writer = build_writer(str(log_dir))
+
 
     exp_label = env_str("EXP_LABEL", "E2_Circuit_Density_FixedConcurrency")
 
-    concurrency = env_int("CONCURRENCY", 32)
+    concurrency = env_int("CONCURRENCY", 64)
     warmup_s = env_float("WARMUP_S", 30.0)
     measure_s = env_float("MEASURE_S", 120.0)
     period_s = env_float("PER_CLIENT_PERIOD_S", 2.0)
@@ -557,6 +591,8 @@ async def main() -> None:
 
     global_limit_raw = os.environ.get("GLOBAL_CONCURRENT_CIRCUITS")
     global_sem = None if global_limit_raw in (None, "") else asyncio.Semaphore(int(global_limit_raw))
+    writer_raw = build_writer(str(log_dir))
+    writer = TaggedWriter(writer_raw, concurrency=concurrency, ratio_label=ratio_label)
 
     run_meta_path = log_dir / "run_meta.json"
     run_meta: Dict[str, object] = {

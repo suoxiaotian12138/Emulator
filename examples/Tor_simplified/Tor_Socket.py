@@ -6,6 +6,8 @@ import contextlib
 import hashlib
 import hmac
 import os
+import sslkeylog
+
 from pathlib import Path
 from enum import Enum, auto
 from typing import Optional, Callable, Awaitable, Any
@@ -40,6 +42,7 @@ from tools.Crypt.crypt_common import (
     rsa_identity_x509_der,
     hours_since_epoch,
 )
+from tools.Network_Management.tls_keylog_cache import pop_exporter_line
 
 def _hkdf_expand(prk: bytes, info: bytes, length: int, hashmod=hashlib.sha256) -> bytes:
     hash_len = hashmod().digest_size
@@ -103,22 +106,13 @@ def _sanitize_keylog_component(value: str) -> str:
     return "".join(ch if ch in allowed else "_" for ch in value)
 
 def tor_tls_export_key_material(writer_or_sslobj, label: bytes, context: bytes, length: int) -> bytes:
-    """Return exporter output of ``length`` bytes using given label and context."""
-
     ssl_obj = None
-    keylog_path = None
     if isinstance(writer_or_sslobj, ssl.SSLObject):
         ssl_obj = writer_or_sslobj
-        keylog_path = getattr(ssl_obj, "_keylog_path", None)
     else:
         get_extra = getattr(writer_or_sslobj, "get_extra_info", None)
         if callable(get_extra):
             ssl_obj = get_extra("ssl_object")
-            keylog_path = getattr(ssl_obj, "_keylog_path", None) if ssl_obj else None
-
-
-    if keylog_path is None and hasattr(writer_or_sslobj, "_keylog_path"):
-        keylog_path = getattr(writer_or_sslobj, "_keylog_path", None)
 
     if ssl_obj is None:
         raise RuntimeError("ssl_object is None; TLS not established")
@@ -126,57 +120,22 @@ def tor_tls_export_key_material(writer_or_sslobj, label: bytes, context: bytes, 
     if ssl_obj.version() != "TLSv1.3":
         raise RuntimeError("TLS exporter is only supported for TLS 1.3 sessions")
 
-    if keylog_path is None:
-        raise RuntimeError("Keylog path not recorded for TLS connection")
+    # Normalize label/context types
+    if isinstance(label, str):
+        label = label.encode("utf-8")
+    if context is None:
+        context = b""
+    elif isinstance(context, str):
+        context = context.encode("utf-8")
 
-    cipher_info = None
-    with contextlib.suppress(Exception):
-        cipher_info = ssl_obj.cipher()
-    hashmod = hashlib.sha256
-    if cipher_info and isinstance(cipher_info, (list, tuple)) and cipher_info:
-        cipher_name = cipher_info[0]
-        # Pick HKDF hash based on the TLS 1.3 cipher suite hash component.
-        if isinstance(cipher_name, str):
-            if cipher_name.endswith("SHA384"):
-                hashmod = hashlib.sha384
-            elif cipher_name.endswith("SHA256"):
-                hashmod = hashlib.sha256
+    # 关键：直接用 OpenSSL exporter API（不依赖 EXPORTER_SECRET 行）
+    # sslkeylog.export_keying_material(sock, length, label, context=None)
+    out = sslkeylog.export_keying_material(ssl_obj, length, label, context)
 
-    # EXPORTER_SECRET from keylog corresponds to the TLS 1.3 exporter_master_secret.
-    exporter_master_secret = _read_exporter_secret_from_keylog(keylog_path)
+    if not isinstance(out, (bytes, bytearray)) or len(out) != length:
+        raise RuntimeError("TLS exporter returned wrong length")
+    return bytes(out)
 
-    hash_len = hashmod().digest_size
-
-    # RFC8446 7.5:
-    # TLS-Exporter(label, context_value, key_length) =
-    #   HKDF-Expand-Label(Derive-Secret(Secret, label, ""),
-    #                     "exporter", Hash(context_value), key_length)
-    #
-    # Derive-Secret(Secret, label, "") uses Hash("") as the context.
-    empty_hash = hashmod(b"").digest()
-
-    # Step 1: secret1 = Derive-Secret(exporter_master_secret, label, "")
-    secret1 = _hkdf_expand_label_tls13(
-        exporter_master_secret,
-        label,               # e.g. b"EXPORTER FOR TOR TLS CLIENT BINDING AUTH0003"
-        empty_hash,          # Hash("")
-        hash_len,            # output length = HashLen
-        hashmod=hashmod,
-    )
-
-    # Step 2: out = HKDF-Expand-Label(secret1, "exporter", Hash(context_value), length)
-    context_hash = hashmod(context).digest()
-    out = _hkdf_expand_label_tls13(
-        secret1,
-        b"exporter",
-        context_hash,
-        length,
-        hashmod=hashmod,
-    )
-
-    if len(out) != length:
-        raise RuntimeError("TLS-Exporter returned wrong length")
-    return out
 
 
 
@@ -397,17 +356,13 @@ class Tor_Socket():
 
     async def setup_socket(self, remote_addr: tuple[str, int]):
         """通过 tools.dial_tls 拿到 (reader, writer)，保持分层。"""
-        keylog_dir = Path("temp") / "keylogs"
-        keylog_dir.mkdir(parents=True, exist_ok=True)
-        host_component = _sanitize_keylog_component(remote_addr[0] or "unknown")
-        keylog_path = keylog_dir / f"tls_{host_component}_{remote_addr[1]}_{int(time.monotonic_ns())}.log"
-        self._keylog_path = str(keylog_path)
+        self._keylog_path = None
         reader, writer = await dial_tls(
             remote_addr,
             source_ip=self.source_ip,
             node_id=self.node_id,
             timeout=15.0,
-            keylog_path=self._keylog_path,
+            keylog_path=None,
         )
         # 搬运
         self.reader, self.writer = reader, writer
@@ -447,16 +402,12 @@ class Tor_Socket():
                    debug_transcript: bool = False
                    ):
         # 1) 先做 TLS 拨号（保持你 tools.dial_tls 的封装）
-        keylog_dir = Path("temp") / "keylogs"
-        keylog_dir.mkdir(parents=True, exist_ok=True)
-        host_component = _sanitize_keylog_component(remote_addr[0] or "unknown")
-        keylog_path = keylog_dir / f"tls_{host_component}_{remote_addr[1]}_{int(time.monotonic_ns())}.log"
         reader, writer = await dial_tls(
             remote_addr,
             source_ip=source_ip,
             node_id=node_id,
             timeout=15.0,
-            keylog_path=str(keylog_path),
+            keylog_path=None,
         )
 
         # 2) 用现成的 reader/writer 构造 Tor_Socket
@@ -480,7 +431,7 @@ class Tor_Socket():
             debug_transcript=debug_transcript,
         )
         self.handshake_initiator = True
-        self._keylog_path = str(keylog_path)
+        self._keylog_path = None
 
         # 3) 和 setup_socket() 一致，把底层 transport / socket / peer / local 补齐
         try:
