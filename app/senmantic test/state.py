@@ -29,10 +29,10 @@ from matplotlib.ticker import FuncFormatter
 # Global style knobs
 # =====================================================
 FONT = {
-    "base": 12,
-    "tick": 11,
-    "title": 14,
-    "event_info": 9,
+    "base": 16,
+    "tick": 15,
+    "title": 18,
+    "event_info": 11,
 }
 
 VIS = {
@@ -120,6 +120,34 @@ state_colors = {
     "ERROR": "#EF4444",
 }
 
+def _shift_events_to_create2(events):
+    """
+    Make CREATE2 the new time origin (0ms).
+    Drop START and any events before CREATE2.
+    """
+    t_create2 = None
+    for t, _, name in events:
+        if name == "CREATE2":
+            t_create2 = t
+            break
+
+    if t_create2 is None:
+        # Fallback: no CREATE2 found, keep as is
+        return events, 0.0
+
+    shifted = []
+    for t, state, name in events:
+        if name == "START":
+            continue
+        if t < t_create2:
+            continue
+        shifted.append((t - t_create2, state, name))
+
+    if not shifted:
+        return [(0.0, "OPENING", "NO_DATA")], t_create2
+
+    shifted.sort(key=lambda x: x[0])
+    return shifted, t_create2
 
 def _resolve_metrics_file(base: Path, filename: str) -> Path:
     if base.is_file():
@@ -145,13 +173,13 @@ def _build_events(label_data: dict):
     """
     Use absolute timestamps from file:
       t_ms = ts_seconds * 1000
-    START stays at 0ms to cover initial idle.
+    Timeline is truncated at the moment the first byte is received (events after are dropped).
 
     Keep only the FIRST occurrence for RELAY_DATA and SENDME.
     """
     events = []
     for key, info in label_data.items():
-        if key == "DESTROY_TS":
+        if key in ("DESTROY_TS", "RELAY_CONNECTED"):
             continue
         times = info.get("times", []) if isinstance(info, dict) else []
         if not times:
@@ -173,6 +201,47 @@ def _build_events(label_data: dict):
     events_sorted = sorted(events, key=lambda x: x[0])
     return [(0.0, "CLOSED", "START")] + events_sorted
 
+
+
+
+def _infer_first_byte_ms(label_data: dict) -> float | None:
+    """Return t0 in milliseconds for 'first byte received'.
+
+    Preferred: label_data['FIRST_BYTE_RECV_TS'] (seconds).
+    Fallback: first RELAY_DATA time in label_data['RELAY_DATA']['times'] (seconds).
+    """
+    fb = label_data.get("FIRST_BYTE_RECV_TS")
+    if fb is not None:
+        try:
+            return float(fb) * 1000.0
+        except (TypeError, ValueError):
+            pass
+
+    relay = label_data.get("RELAY_DATA")
+    if isinstance(relay, dict):
+        times = relay.get("times", [])
+        if times:
+            try:
+                return float(times[0]) * 1000.0
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _shift_events_to_t0(events, t0_ms: float):
+    """Shift events helper (unused in v5)."""
+    shifted = []
+    for t, state, name in events:
+        if name == "START":
+            continue
+        if t >= t0_ms:
+            shifted.append((t - t0_ms, state, name))
+
+    if not shifted:
+        return [(0.0, "CLOSED", "START"), (50.0, "ERROR", "NO_DATA")]
+
+    shifted.sort(key=lambda x: x[0])
+    return [(0.0, "CLOSED", "START")] + shifted
 
 def _build_phases(tor_events, torbox_events):
     all_events = tor_events + torbox_events
@@ -360,7 +429,7 @@ def add_event_markers(ax, events, state_y, y_offset, color):
         if event_label in ("EXTEND2", "EXTENDED2"):
             suffix = f"#{occ[event_label]}"
 
-        info_text = f"{t:.0f}ms"
+        info_text = f"{t:.1f}ms"
         display_text = f"{event_label}{suffix}\n{info_text}"
 
         txt = ax.text(
@@ -477,6 +546,86 @@ def plot_timeline_two_breaks(tor_events, torbox_events, phases, output_dir: Path
     fig.savefig(output_dir / "protocol_timeline_comparison.png", dpi=300)
     plt.show()
 
+def _trim_events_to_end(events, end_ms: float | None):
+    """
+    Keep events up to and including end_ms.
+    Also ensures the state rectangle tail does not extend past end_ms.
+    """
+    if end_ms is None:
+        return events
+
+    trimmed = []
+    for t, state, name in events:
+        # Always keep START at 0ms
+        if name == "START":
+            trimmed.append((t, state, name))
+            continue
+
+        # Keep events at or before cutoff
+        if t <= end_ms:
+            trimmed.append((t, state, name))
+
+    # If nothing left besides START, add a placeholder so plotting won't be empty
+    if len(trimmed) <= 1:
+        return [(0.0, "CLOSED", "START"), (max(end_ms, 1.0), "OPEN", "NO_DATA")]
+
+    # Ensure last point is exactly at end_ms so bars don't extend beyond cutoff
+    last_t, last_state, last_name = trimmed[-1]
+    if last_t < end_ms:
+        trimmed.append((end_ms, last_state, "CUTOFF"))
+
+    return trimmed
+def plot_timeline_until_first_byte(tor_events, torbox_events, phases, output_dir: Path) -> None:
+    # Global end: stop at the earlier cutoff among the two rows to keep layout aligned
+    tor_end = max((t for t, _, _ in tor_events), default=0.0)
+    tb_end = max((t for t, _, _ in torbox_events), default=0.0)
+    x_end = max(tor_end, tb_end)
+
+    # Small right padding for aesthetics
+    x_end = x_end + 0.0
+
+    ms_fmt = FuncFormatter(lambda v, pos: f"{v:.0f}ms")
+
+    fig, (ax_tor, ax_tb) = plt.subplots(2, 1, figsize=(10.5, 7.2), sharex=True)
+
+    # X limits: single continuous axis
+    ax_tor.set_xlim(0.0, x_end)
+    ax_tb.set_xlim(0.0, x_end)
+
+    ax_tor.xaxis.set_major_formatter(ms_fmt)
+    ax_tb.xaxis.set_major_formatter(ms_fmt)
+
+    _setup_axis_common(ax_tor, title="Tor Protocol", title_color=COLORS["tor_blue"], show_ylabel=True)
+    _setup_axis_common(ax_tb, title="TorBox Protocol", title_color=COLORS["torbox_orange"], show_ylabel=True)
+
+    ax_tb.set_xlabel("Time (ms)", fontsize=FONT["title"], weight="bold")
+
+    # Phases (optional): only draw spans that intersect [0, x_end]
+    for ax in (ax_tor, ax_tb):
+        for ph in phases:
+            if ph["end"] <= 0.0 or ph["start"] >= x_end:
+                continue
+            ax.axvspan(max(ph["start"], 0.0), min(ph["end"], x_end),
+                       facecolor=ph["color"], alpha=VIS["phase_alpha"], zorder=0)
+
+    # State rectangles
+    state_y_tor = plot_state_timeline(ax_tor, tor_events, timeline_end=x_end)
+    state_y_tb = plot_state_timeline(ax_tb, torbox_events, timeline_end=x_end)
+
+    # Markers
+    add_event_markers(ax_tor, tor_events, state_y_tor, 0.0, COLORS["tor_blue"])
+    add_event_markers(ax_tb, torbox_events, state_y_tb, 0.0, COLORS["torbox_orange"])
+
+    _force_y_labels(ax_tor)
+    _force_y_labels(ax_tb)
+
+    fig.subplots_adjust(left=0.11, right=0.99, top=0.95, bottom=0.08, hspace=0.22)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_dir / "protocol_timeline_comparison.pdf", format="pdf")
+    fig.savefig(output_dir / "protocol_timeline_comparison.png", dpi=300)
+    plt.show()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Protocol timeline with TWO broken x-axis gaps (v4.1).")
@@ -487,11 +636,35 @@ def main():
     args = parser.parse_args()
 
     stage_payload = _load_stage_metrics(args.metrics)
-    tor_events = _build_events(stage_payload.get("Tor", {}))
-    torbox_events = _build_events(stage_payload.get("TorBox", {}))
+    tor_end_ms_abs = _infer_first_byte_ms(stage_payload.get("Tor", {}))
+    torbox_end_ms_abs = _infer_first_byte_ms(stage_payload.get("TorBox", {}))
+
+    tor_events_abs = _trim_events_to_end(_build_events(stage_payload.get("Tor", {})), tor_end_ms_abs)
+    torbox_events_abs = _trim_events_to_end(_build_events(stage_payload.get("TorBox", {})), torbox_end_ms_abs)
+
+    # Shift origin to CREATE2
+    tor_events, tor_create2_abs = _shift_events_to_create2(tor_events_abs)
+    torbox_events, torbox_create2_abs = _shift_events_to_create2(torbox_events_abs)
+
+    # Also shift cutoff (first byte) to the new origin, so x_end is correct
+    if tor_end_ms_abs is not None:
+        tor_end_ms = max(0.0, tor_end_ms_abs - tor_create2_abs)
+    else:
+        tor_end_ms = None
+
+    if torbox_end_ms_abs is not None:
+        torbox_end_ms = max(0.0, torbox_end_ms_abs - torbox_create2_abs)
+    else:
+        torbox_end_ms = None
+
+    # Re-trim again in the new coordinate system (ensures last bar ends at cutoff)
+    tor_events = _trim_events_to_end(tor_events, tor_end_ms)
+    torbox_events = _trim_events_to_end(torbox_events, torbox_end_ms)
 
     phases = _build_phases(tor_events, torbox_events)
-    plot_timeline_two_breaks(tor_events, torbox_events, phases, args.out_dir)
+
+    # Use your single-axis version if you already switched to it
+    plot_timeline_until_first_byte(tor_events, torbox_events, phases, args.out_dir)
 
 
 if __name__ == "__main__":

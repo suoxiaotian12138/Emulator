@@ -42,7 +42,7 @@ DEFAULT_ENV = {
     "NODE_ADDR": "192.168.66.242",
     "TARGET_HOST": "192.168.66.243",
     "TARGET_PORT": "8000",
-    "PAYLOAD_MB": "10",
+    "PAYLOAD_MB": "5",
     # Optional knobs (safe defaults)
     "CLIENTS_PER_BATCH": "1",
     "TOTAL_BATCHES": "1",

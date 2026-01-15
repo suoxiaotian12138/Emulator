@@ -670,7 +670,7 @@ async def main():
     ratio_label = "fixed-topology"
     default_log_dir = Path("exp") / "deployment" / "e1_scalability" / "logs"
     base_log_dir = Path(env_str("LOG_DIR", str(default_log_dir)))
-    mode_tag = env_str("MODE_TAG", "torbox")
+    mode_tag = env_str("MODE_TAG", "tor")
     log_dir = base_log_dir / mode_tag
 
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -705,7 +705,7 @@ async def main():
         "hops": HOPS,
     }
 
-    concurrency_levels = env_csv_int("CONCURRENCY_LEVELS", "16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 256")
+    concurrency_levels = env_csv_int("CONCURRENCY_LEVELS", "16,24,32,48,64,80,96,112,128,160,196,256")
     warmup_s = env_float("WARMUP_S", 30.0)
     measure_s = env_float("MEASURE_S", 120.0)
     cooldown_s = env_float("LOAD_COOLDOWN_S", 5.0)

@@ -181,7 +181,7 @@ class Tor_base:
             await handle
 
         except asyncio.TimeoutError:
-            self._ev("conn_listen_not_started", peer=f"{addr[0]}:{addr[1]}")
+            # self._ev("conn_listen_not_started", peer=f"{addr[0]}:{addr[1]}")
             with contextlib.suppress(Exception):
                 await tor_sock._abort()
 

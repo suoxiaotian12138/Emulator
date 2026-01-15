@@ -196,6 +196,7 @@ class RoundSummary:
     sendme: Dict[str, SendmeStats]
     destroy_ts: Dict[str, float | None]
     base_ts: Dict[str, float | None]
+    first_byte_recv_ts: Dict[str, float | None]
 
 
 # ===================== Log Loading =====================
@@ -512,6 +513,22 @@ def infer_destroy(events: List[LogEvent]) -> float | None:
     return max(ev.timestamp for ev in events)
 
 
+def infer_first_byte_recv(events: List[LogEvent]) -> float | None:
+    """Infer the timestamp when the first application byte is received.
+
+    We approximate this as the earliest RELAY_DATA event with direction == 'recv'
+    on the selected primary circuit.
+    """
+    _, circ_events = _select_circuit(events)
+    candidates = [
+        ev.timestamp
+        for ev in circ_events
+        if ev.cell_cmd in RELAY_DATA_NAMES and ev.direction in {"recv","in","inbound","rx","read","r"}
+    ]
+    return min(candidates) if candidates else None
+
+
+
 def build_report(tor_events: List[LogEvent], torbox_events: List[LogEvent]) -> RoundSummary:
     """Build analysis report for one round."""
     base_ts = {
@@ -532,7 +549,12 @@ def build_report(tor_events: List[LogEvent], torbox_events: List[LogEvent]) -> R
         "TorBox": infer_destroy(torbox_events),
     }
 
-    return RoundSummary(stages=stages, sendme=sendme, destroy_ts=destroy_ts, base_ts=base_ts)
+    first_byte_recv_ts = {
+        "Tor": infer_first_byte_recv(tor_events),
+        "TorBox": infer_first_byte_recv(torbox_events),
+    }
+
+    return RoundSummary(stages=stages, sendme=sendme, destroy_ts=destroy_ts, base_ts=base_ts, first_byte_recv_ts=first_byte_recv_ts)
 
 
 # ===================== Output Functions =====================
@@ -586,6 +608,7 @@ def _write_stage_summary(report: RoundSummary, output_dir: Path, title: str) -> 
             destroy_val = _fmt_ts(report.destroy_ts.get(label))
             f.write(f"  Inferred DESTROY time={destroy_val}\n")
             stage_payload[label]["DESTROY_TS"] = report.destroy_ts.get(label)
+            stage_payload[label]["FIRST_BYTE_RECV_TS"] = report.first_byte_recv_ts.get(label)
 
         f.write(f"# RAW_STAGE_JSON {json.dumps(stage_payload, ensure_ascii=False)}\n")
 
@@ -723,6 +746,10 @@ def main(
                     _offset(r.destroy_ts.get(label), r.base_ts.get(label)) for r in round_reports
                 ])
 
+                first_byte_mean = _nanmean([
+                    _offset(r.first_byte_recv_ts.get(label), r.base_ts.get(label)) for r in round_reports
+                ])
+
                 for key in STAGE_KEYS:
                     mean_count = _nanmean([float(r.stages[label].counts.get(key, 0)) for r in round_reports])
 
@@ -765,6 +792,7 @@ def main(
 
                 f.write(f"  Avg inferred DESTROY={_fmt_ts(destroy_mean)}\n")
                 aggregated_payload[label]["DESTROY_TS"] = _clean(destroy_mean)
+                aggregated_payload[label]["FIRST_BYTE_RECV_TS"] = _clean(first_byte_mean)
 
             f.write(f"# RAW_STAGE_JSON {json.dumps(aggregated_payload, ensure_ascii=False)}\n")
 

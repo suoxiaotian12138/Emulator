@@ -560,7 +560,7 @@ async def main() -> None:
     default_log_dir = Path("exp") / "deployment" / "e2_density" / "logs"
     base_log_dir = Path(env_str("LOG_DIR", str(default_log_dir)))
     mode_tag = env_str("MODE_TAG", "torbox")
-    relay_tier = env_str("RELAY_TIER", "60")
+    relay_tier = env_str("RELAY_TIER", "90")
     # sanitize path segment
     relay_tier = re.sub(r"[^A-Za-z0-9_.-]+", "_", relay_tier).strip("_") or "default"
     log_dir = base_log_dir / mode_tag / relay_tier

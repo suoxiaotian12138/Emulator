@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import random
+import heapq
 import time
 from collections import deque
 import math
@@ -116,6 +117,7 @@ class GeoDelayModel:
     新增：可选“人工附加延迟”功能（保持兼容，默认不生效）
       - manual_offset_ms: 对所有路径附加的单向固定 OWD（默认 0ms）
       - per_pair_offset: 对特定 (src_sim, dst_sim) 路径附加的单向固定 OWD（默认无）
+      - fixed_owd_ms: 忽略地理计算，固定单向 OWD（默认无）
     """
     def __init__(
         self,
@@ -126,6 +128,7 @@ class GeoDelayModel:
         *,
         manual_offset_ms: float = 0.0,
         per_pair_offset: Optional[dict[tuple[str, str], float]] = None,
+        fixed_owd_ms: Optional[float] = None,
     ):
         """
         latency_fn: Callable(src_sim_ip:str, dst_sim_ip:str) -> base_ms
@@ -134,6 +137,7 @@ class GeoDelayModel:
         floor_ms: 同地最低 1ms
         manual_offset_ms: 对所有路径附加的单向固定延迟（默认 0ms）
         per_pair_offset: 对特定 (src_sim, dst_sim) 路径附加的单向固定延迟（ms）
+        fixed_owd_ms: 固定单向 OWD（ms），优先级高于 latency_fn
         """
         self.latency_fn = latency_fn or self._default_latency
         self.jitter_ratio = float(jitter_ratio)
@@ -143,6 +147,7 @@ class GeoDelayModel:
         # 新增：可选人工偏置（不传即为 0，不影响旧逻辑）
         self.manual_offset_ms = float(manual_offset_ms)
         self.per_pair_offset = dict(per_pair_offset or {})
+        self.fixed_owd_ms = float(fixed_owd_ms) if fixed_owd_ms is not None else None
 
     @staticmethod
     def _default_latency(src_sim: str, dst_sim: str) -> float:
@@ -151,6 +156,8 @@ class GeoDelayModel:
         return 40.0  # 你可以换成基于区域/AS 的 lookup
 
     def base_owd_ms(self, src_sim: str, dst_sim: str) -> float:
+        if self.fixed_owd_ms is not None:
+            return max(self.floor_ms, self.fixed_owd_ms)
         return max(self.floor_ms, float(self.latency_fn(src_sim, dst_sim)))
 
     def _pair_extra_ms(self, src_sim: str, dst_sim: str) -> float:
@@ -177,17 +184,18 @@ class GeoDelayModel:
         base = self.base_owd_ms(src_sim, dst_sim)
         return base + self.jitter_ms(base) + self.extra_offset_ms(src_sim, dst_sim)
 
+    def has_fixed_owd(self) -> bool:
+        return self.fixed_owd_ms is not None
 
 # ========= 写端注入器（只做地理延迟；不做带宽/排队） =========
 
 class DelayInjectorWriter:
     """
-    包装底层 writer，把“地理传播延迟 + 抖动 (+可选人工偏置)”注入到 *首批* 数据：
-      - 当队列从 empty -> non-empty：等待 base_owd + jitter (+ extra_offset) 后 flush 一次（“预热”）
-      - 队列持续非空时：立即 flush（不再叠加传播延迟），直到清空
-      - 队列再次从空 -> 非空：重复“预热”
+    包装底层 writer，支持两种延迟模式：
+      - burst（默认）：当队列从 empty -> non-empty 时等待一次 base_owd + jitter (+ extra_offset)
+      - scheduled：每个 chunk 计算 t_send=now+owd，按到期时间排队发送
 
-    这样可让握手/首包体现地理 RTT，而不会把连续数据人为限速。
+    scheduled 模式可模拟长期存在的传播时延，不会把 flush 频率变成“限速惩罚”。
     """
 
     def __init__(
@@ -197,13 +205,15 @@ class DelayInjectorWriter:
         src_sim_ip: str,
         dst_sim_ip: str,
         model: GeoDelayModel,
-        max_batch_bytes: int = 64 * 1024
+        max_batch_bytes: int = 64 * 1024,
+        mode: str = "burst",
     ):
         self._w = writer
         self._loop = asyncio.get_running_loop()
         self._src = src_sim_ip
         self._dst = dst_sim_ip
         self._model = model
+        self._mode = mode if mode in {"burst", "scheduled"} else "burst"
 
         # 旧字段保留（兼容），但实际预热时会重新计算
         self._base_s = (
@@ -213,6 +223,8 @@ class DelayInjectorWriter:
         ) / 1000.0
 
         self._q: deque[bytes] = deque()
+        self._heap: list[tuple[float, int, bytes]] = []
+        self._seq = 0
         self._wake = asyncio.Event()
         self._closed = False
         self._task: Optional[asyncio.Task] = None
@@ -232,15 +244,20 @@ class DelayInjectorWriter:
         peer_addr: Optional[Tuple[str, int]],
         mapping: MappingCache,
         model: GeoDelayModel,
-        max_batch_bytes: int = 64 * 1024
+        max_batch_bytes: int = 64 * 1024,
+        mode: str = "burst",
     ) -> "DelayInjectorWriter":
-        dst_sim = await mapping.resolve_peer(peer_fingerprint, peer_addr)
+        if mapping is not None:
+            dst_sim = await mapping.resolve_peer(peer_fingerprint, peer_addr)
+        else:
+            dst_sim = "0.0.0.0"
         inst = cls(
             writer,
-            src_sim_ip=local_sim_ip,
+            src_sim_ip=local_sim_ip or "0.0.0.0",
             dst_sim_ip=dst_sim,
             model=model,
-            max_batch_bytes=max_batch_bytes
+            max_batch_bytes=max_batch_bytes,
+            mode=mode,
         )
         await inst.start()
         return inst
@@ -257,15 +274,23 @@ class DelayInjectorWriter:
                 await self._task
 
     async def send(self, blob: bytes):
-        if self._closed:
-            return
-        self._q.append(blob)
+        if self._mode == "scheduled":
+            owd_ms = self._model.composed_owd_ms(self._src, self._dst)
+            t_send = self._loop.time() + (owd_ms / 1000.0)
+            self._seq += 1
+            heapq.heappush(self._heap, (t_send, self._seq, blob))
+        else:
+            self._q.append(blob)
         self._wake.set()
 
     # -------- 内部：写循环 --------
     async def _writer_loop(self):
         try:
             while not self._closed:
+                if self._mode == "scheduled":
+                    await self._writer_loop_scheduled()
+                    return
+
                 # 没数据就等待
                 if not self._q:
                     self._pipeline_hot = False  # 队列空了，回到 cold 状态
@@ -302,14 +327,53 @@ class DelayInjectorWriter:
         finally:
             # 尝试把剩余写掉
             try:
-                while self._q:
-                    out = bytearray()
-                    while self._q and len(out) < self._max_batch:
-                        out += self._q.popleft()
-                    self._w.write(out)
-                    await self._w.drain()
+                if self._mode == "scheduled":
+                    await self._flush_scheduled(force=True)
+                else:
+                    while self._q:
+                        out = bytearray()
+                        while self._q and len(out) < self._max_batch:
+                            out += self._q.popleft()
+                        self._w.write(out)
+                        await self._w.drain()
             except Exception:
                 pass
+
+    async def _writer_loop_scheduled(self):
+        try:
+            while not self._closed:
+                if not self._heap:
+                    self._wake.clear()
+                    try:
+                        await asyncio.wait_for(self._wake.wait(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    continue
+
+                now = self._loop.time()
+                next_due = self._heap[0][0]
+                if now < next_due:
+                    self._wake.clear()
+                    try:
+                        await asyncio.wait_for(self._wake.wait(), timeout=next_due - now)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+
+                await self._flush_scheduled()
+        except asyncio.CancelledError:
+            pass
+
+    async def _flush_scheduled(self, *, force: bool = False):
+        now = self._loop.time()
+        while self._heap and (force or self._heap[0][0] <= now):
+            out = bytearray()
+            while self._heap and (force or self._heap[0][0] <= now) and len(out) < self._max_batch:
+                _, _, blob = heapq.heappop(self._heap)
+                out += blob
+            if out:
+                self._w.write(out)
+                await self._w.drain()
 
 
 # ======== GeoIP 驱动：经纬度 -> 大圆距离 -> OWD(ms) ========

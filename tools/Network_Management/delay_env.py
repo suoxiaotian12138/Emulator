@@ -6,12 +6,14 @@ from .geo_delay_injector import MappingCache, GeoDelayModel
 _ENABLED: bool = False
 _MAPPING: Optional[MappingCache] = None
 _MODEL: Optional[GeoDelayModel] = None
+_MODE: str = "burst"
 
-def configure(*, enabled: bool, mapping: MappingCache, model: GeoDelayModel) -> None:
-    global _ENABLED, _MAPPING, _MODEL
+def configure(*, enabled: bool, mapping: Optional[MappingCache], model: Optional[GeoDelayModel], delay_mode: str = "burst") -> None:
+    global _ENABLED, _MAPPING, _MODEL, _MODE
     _ENABLED = bool(enabled)
     _MAPPING = mapping
     _MODEL = model
+    _MODE = delay_mode
 
 def get_args(sim_ip: Optional[str]):
     """
@@ -25,4 +27,5 @@ def get_args(sim_ip: Optional[str]):
         sim_ip=sim_ip,
         delay_mapping=_MAPPING,
         delay_model=_MODEL,
+        delay_mode=_MODE,
     )

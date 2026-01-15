@@ -6,6 +6,8 @@ import asyncio, threading, psutil, os
 from tools.Log.writer import AsyncJsonlWriter
 from tools.Log.bus import EventBus
 from tools.Log.resources import resource_probe
+from tools.Network_Management.delay_env import configure
+from tools.Network_Management.geo_delay_injector import GeoDelayModel
 
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -93,6 +95,9 @@ async def main():
     loop = asyncio.get_running_loop()
     print("event-loop =>", type(loop))
 
+    # 固定延迟注入（仅启用此选项时生效）
+    model = GeoDelayModel(fixed_owd_ms=100.0, jitter_ratio=0.0, jitter_cap=0.0, floor_ms=1.0)
+    configure(enabled=False, mapping=None, model=model, delay_mode="scheduled")
 
     # 3. 其他初始化（线程池、任务等）
     max_workers = 128
@@ -102,7 +107,7 @@ async def main():
     )
     os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
     # 多个 guard 配置
-    guard_configs = generate_specific_nodes(n_guard=3, n_middle=3, n_exit=3)
+    guard_configs = generate_specific_nodes(n_guard=1, n_middle=1, n_exit=1)
 
     # 注册所有 guard
     await register_all_guards(guard_configs)

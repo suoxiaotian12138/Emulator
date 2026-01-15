@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import os
 import sslkeylog
+import socket
 
 from pathlib import Path
 from enum import Enum, auto
@@ -209,6 +210,7 @@ class Tor_Socket():
         sim_ip: Optional[str] = None,                   # ★ 本端仿真IP
         delay_mapping: Optional[MappingCache] = None,   # ★ 指纹/IP -> sim_ip 的映射缓存
         delay_model: Optional[GeoDelayModel] = None,    # ★ 地理延迟模型
+        delay_mode: str = "burst",
         debug_transcript: bool = False,
     ):
         self.protocol = TorProtocol()
@@ -242,6 +244,7 @@ class Tor_Socket():
         self.sim_ip = sim_ip
         self.delay_mapping = delay_mapping
         self.delay_model = delay_model
+        self.delay_mode = delay_mode
         self._inj = None
 
         # 异步I/O组件
@@ -257,6 +260,11 @@ class Tor_Socket():
         self._wakeup = asyncio.Event()  # 有新数据时唤醒 writer
         self._writer_task = None
         self._last_queue_log = 0.0
+        self._pending_bytes = 0
+        self._drain_threshold_bytes = 512 * 1024
+        self._max_pending_bytes = 2 * 1024 * 1024
+        self._data_batch_limit_bytes = 256 * 1024
+        self._data_batch_limit_cells = 512
 
         self.role = role
         if self.role not in {"client", "relay"}:
@@ -299,6 +307,7 @@ class Tor_Socket():
                 self.local = self.socket.getsockname()
                 self.local_str = f"{self.local[0]}:{self.local[1]}"
                 self.channel.channel_id = self.peer_str
+                self._set_tcp_nodelay()
             except:
                 self.peer = None
                 self.peer_str = "unknown"
@@ -322,6 +331,14 @@ class Tor_Socket():
         self._wakeup.set()
         await fut
 
+    def _set_tcp_nodelay(self):
+        if self.socket is None:
+            return
+        try:
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
+
     def update_link_protocol_version(self, version: int):
         """Synchronize negotiated link protocol version across components."""
         self.protocol.version = version
@@ -337,9 +354,12 @@ class Tor_Socket():
             return
         if self.writer is None or self.peer is None:
             return
-        if not (self.sim_ip and self.delay_mapping and self.delay_model):
-            # 依赖不齐，跳过注入（保持直写）
+        if self.delay_model is None:
             return
+        if not self.delay_model.has_fixed_owd():
+            if not (self.sim_ip and self.delay_mapping):
+                # 依赖不齐，跳过注入（保持直写）
+                return
         try:
             # 这里没有对端指纹，可用地址回退（mapping 会优先用 addr 命中，否则 default）
             self._inj = await DelayInjectorWriter.create(
@@ -348,7 +368,8 @@ class Tor_Socket():
                 peer_fingerprint=None,
                 peer_addr=self.peer,
                 mapping=self.delay_mapping,
-                model=self.delay_model
+                model=self.delay_model,
+                mode=self.delay_mode,
             )
         except Exception as e:
             self.print(f"[DelayInjector:init-fail] {self.peer} {e}")
@@ -399,6 +420,7 @@ class Tor_Socket():
                    sim_ip: Optional[str] = None,
                    delay_mapping: Optional[MappingCache] = None,
                    delay_model: Optional[GeoDelayModel] = None,
+                   delay_mode: str = "burst",
                    debug_transcript: bool = False
                    ):
         # 1) 先做 TLS 拨号（保持你 tools.dial_tls 的封装）
@@ -427,6 +449,7 @@ class Tor_Socket():
             sim_ip=sim_ip,
             delay_mapping=delay_mapping,
             delay_model=delay_model,
+            delay_mode=delay_mode,
             limiter=limiter,
             debug_transcript=debug_transcript,
         )
@@ -901,7 +924,8 @@ class Tor_Socket():
                     # Barrier: flush all pending ctrl bytes then resolve the future
                     if flags & self._CTRL_BARRIER:
                         if out:
-                            await self._write_once(bytes(out))
+                            await self._write_once(bytes(out), drain=True)
+                            self._pending_bytes = 0
                             out.clear()
                         if fut is not None and not fut.done():
                             fut.set_result(True)
@@ -910,9 +934,11 @@ class Tor_Socket():
                     # SOLO: flush pending ctrl, then write this buf alone
                     if flags & self._CTRL_SOLO:
                         if out:
-                            await self._write_once(bytes(out))
+                            await self._write_once(bytes(out), drain=True)
+                            self._pending_bytes = 0
                             out.clear()
-                        await self._write_once(buf)
+                        await self._write_once(buf, drain=True)
+                        self._pending_bytes = 0
                         continue
 
                     out.extend(buf)
@@ -922,7 +948,8 @@ class Tor_Socket():
                         break
 
                 if out:
-                    await self._write_once(bytes(out))
+                    await self._write_once(bytes(out), drain=True)
+                    self._pending_bytes = 0
                     continue
 
                 # Data plane (keep your existing logic)
@@ -936,12 +963,26 @@ class Tor_Socket():
                     total += len(buf)
                     self._maybe_log_queue("data", enqueued_at, self._q_data.qsize())
                     cells += 1
-                    if (loop.time() - t0) > 0.002 or total >= 64 * 1024 or cells >= 128:
+                    if (
+                        (loop.time() - t0) > 0.002
+                        or total >= self._data_batch_limit_bytes
+                        or cells >= self._data_batch_limit_cells
+                    ):
                         break
                 if out:
                     if self._limiter is not None:
                         await self._limiter.consume(len(out))
-                    await self._write_once(bytes(out))
+                    should_drain = (
+                        self._pending_bytes + len(out) >= self._drain_threshold_bytes
+                        or self._q_data.qsize() <= 1
+                        or (loop.time() - t0) > 0.002
+                        or self._pending_bytes + len(out) >= self._max_pending_bytes
+                    )
+                    await self._write_once(bytes(out), drain=should_drain)
+                    if should_drain:
+                        self._pending_bytes = 0
+                    else:
+                        self._pending_bytes += len(out)
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -962,6 +1003,7 @@ class Tor_Socket():
             else:
                 self.writer.write(raw)
                 await self.writer.drain()
+                self._pending_bytes = 0
 
             if update_transcript:
                 self.link_transcript.update_sent(raw)
@@ -969,7 +1011,7 @@ class Tor_Socket():
             await self._abort()
             raise
 
-    async def _write_once(self, blob: bytes):
+    async def _write_once(self, blob: bytes, *, drain: bool = True):
         if self._closing.is_set() or self.writer is None:
             return
         try:
@@ -977,7 +1019,8 @@ class Tor_Socket():
                 await self._inj.send(blob)
             else:
                 self.writer.write(blob)
-                await self.writer.drain()
+                if drain:
+                    await self.writer.drain()
 
             # Update transcript only after the write has completed
             self.link_transcript.update_sent(blob)

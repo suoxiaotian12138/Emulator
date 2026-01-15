@@ -23,10 +23,10 @@ def _set_defaults():
     os.environ.setdefault("START_TIMEOUT_S", "30")
     os.environ.setdefault("INTER_CHUNK_SLEEP_MS", "0")
     os.environ.setdefault("RUN_ROUNDS", "5")
-    os.environ.setdefault("LOG_DIR", "exp/semantic_logs/torbox/")
-    os.environ.setdefault("EXP_LABEL", "torbox")
-    # os.environ.setdefault("LOG_DIR", "exp/semantic_logs/tor")
-    # os.environ.setdefault("EXP_LABEL", "tor")
+    # os.environ.setdefault("LOG_DIR", "exp/semantic_logs/torbox/")
+    # os.environ.setdefault("EXP_LABEL", "torbox")
+    os.environ.setdefault("LOG_DIR", "exp/semantic_logs/tor")
+    os.environ.setdefault("EXP_LABEL", "tor")
 
 
 async def _run_once():
