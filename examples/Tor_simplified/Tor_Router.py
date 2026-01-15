@@ -56,6 +56,12 @@ class Tor_Router:
     def decrypt_backward(self, relay_cell):
         self._crypto_state.decrypt_backward(relay_cell)
 
+    def snapshot_forward_digest(self) -> bytes:
+        return self._crypto_state.snapshot_forward_digest()
+
+    def snapshot_backward_digest(self) -> bytes:
+        return self._crypto_state.snapshot_backward_digest()
+
     @property
     def descriptor(self):
         descriptor_info = self.parse(self.descriptor_str)
@@ -141,6 +147,12 @@ class Tor_Router_simple:
 
     def decrypt_backward(self, relay_cell):
         self._crypto_state.decrypt_backward(relay_cell)
+
+    def snapshot_forward_digest(self) -> bytes:
+        return self._crypto_state.snapshot_forward_digest()
+
+    def snapshot_backward_digest(self) -> bytes:
+        return self._crypto_state.snapshot_backward_digest()
 
 def b64_desc_to_hex(desc_b64: str) -> str:
     """

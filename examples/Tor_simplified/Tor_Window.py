@@ -21,8 +21,6 @@ class TorWindow:
         self.send_window = int(start)
         self.recv_window = int(start)
 
-        self._recv_since_sendme = 0
-
         self.credit_event = asyncio.Event()
         self.credit_event.set()  # initial credit exists
         self._send_lock = asyncio.Lock()
@@ -55,6 +53,10 @@ class TorWindow:
         if self.send_window <= 0:
             self.credit_event.clear()
 
+    def should_record_sendme_sent(self) -> bool:
+        sent = self.start - self.send_window
+        return sent > 0 and (sent % self.increment) == 0
+
     async def acquire_send(self, cells: int = 1, timeout: float | None = None):
         """
         Atomically: wait for credit, then decrement send_window.
@@ -79,14 +81,14 @@ class TorWindow:
 
     def on_recv_data_cell(self, cells: int = 1):
         self.recv_window -= cells
-        self._recv_since_sendme += cells
 
     def should_send_sendme(self) -> bool:
         """
         Every `increment` received DATA cells -> emit one SENDME and restore recv_window by increment.
         """
-        if self._recv_since_sendme >= self.increment:
-            self._recv_since_sendme -= self.increment
+        # Tor-like behavior: when deliver window drops below start - increment,
+        # emit SENDME and restore recv_window by increment.
+        if self.recv_window <= (self.start - self.increment):
             self.recv_window += self.increment
             return True
         return False

@@ -14,7 +14,6 @@ from torpy.cells import (
     CellCreatedFast,
     CellRelayEnd,
     CellRelayData,
-    CellRelaySendMe,
     CellRelayConnected,
     CellRelayExtended2,
     CellRelayTruncated,
@@ -461,6 +460,34 @@ class CellRelayBegin(TorCell):
     def _args_str(self):
         return 'address = {!r}, port = {!r}, flags = {!r}'.format(self.address, self.port, self.flags)
 
+class CellRelaySendMe(TorCell):
+    NUM = 5
+
+    def __init__(self, circuit_id=0, *, version: int = 0, digest: bytes | None = None):
+        super().__init__(circuit_id)
+        self.version = int(version)
+        self.digest = digest or b""
+
+    def _serialize_payload(self):
+        if self.version <= 0:
+            return b""
+        if self.version != 1:
+            return b""
+        if len(self.digest) != 20:
+            raise ValueError("SENDME v1 digest must be 20 bytes")
+        data_len = len(self.digest)
+        return bytes([self.version, data_len]) + self.digest
+
+    @staticmethod
+    def _deserialize_payload(payload: bytes, proto_version: int):
+        if not payload:
+            return {"version": 0, "digest": b""}
+        if len(payload) < 2:
+            return {"version": 0, "digest": b""}
+        version = payload[0]
+        data_len = payload[1]
+        digest = payload[2:2 + data_len]
+        return {"version": version, "digest": digest}
 
 class CellCerts(TorCell):
     NUM = 129  # 注意是 129，不是 128（CERTS cell 是 129）

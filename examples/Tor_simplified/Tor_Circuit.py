@@ -14,6 +14,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Dict, Set, Optional, Any
 import time, asyncio
+
 from examples.Tor_simplified.Tor_Cell import CellDestroy  # 若类名不同，替换为你项目里的 DESTROY cell
 from examples.Tor_simplified.Tor_Window import TorWindow
 
@@ -29,6 +30,8 @@ BUILD_TIMEOUT_S = 60
 EXTEND_TIMEOUT_S = 30
 CIRC_WINDOW_INIT = 1000   # 电路级窗口初始值
 CIRC_WINDOW_INC  = 100    # 电路级每次 SENDME 增量（这步先只用来初始化）
+SENDME_EMIT_MIN_VERSION_DEFAULT = 1
+SENDME_ACCEPT_MIN_VERSION_DEFAULT = 0
 
 @dataclass
 class RelayQueueItem:
@@ -92,10 +95,13 @@ class CircuitRoleOps:
 
 class ClientCircuitOps(CircuitRoleOps):
     def encrypt(self, relay_cell):
-        for node in reversed(self.circuit.circuit_nodes):
+        last_snapshot = None
+        for idx, node in enumerate(reversed(self.circuit.circuit_nodes)):
             if getattr(node, "_crypto_state", None) is None:
                 continue
             node.encrypt_forward(relay_cell)
+            if idx == 0:
+                relay_cell._sendme_digest_forward = node.snapshot_forward_digest()
 
     def decrypt(self, relay_cell):
         for node in self.circuit.circuit_nodes:
@@ -104,7 +110,9 @@ class ClientCircuitOps(CircuitRoleOps):
             if getattr(relay_cell, "_checked", False):
                 break
             node.decrypt_backward(relay_cell)
-
+            if getattr(relay_cell, "_checked", False):
+                relay_cell._sendme_digest_backward = node.snapshot_backward_digest()
+                break
         if not getattr(relay_cell, "_checked", False):
             raise ValueError("RELAY decrypt failed: no hop recognized (checked=False)")
 
@@ -116,7 +124,9 @@ class ClientCircuitOps(CircuitRoleOps):
 
 class ServerCircuitOps(CircuitRoleOps):
     def encrypt(self, relay_cell):
-        self.circuit.circuit_nodes[0].encrypt_forward(relay_cell)
+        node = self.circuit.circuit_nodes[0]
+        node.encrypt_forward(relay_cell)
+        relay_cell._sendme_digest_forward = node.snapshot_forward_digest()
 
     def decrypt(self, relay_cell):
         node = self.circuit.circuit_nodes[0]
@@ -129,6 +139,7 @@ class ServerCircuitOps(CircuitRoleOps):
             return relay_cell
 
         # Recognized and decrypted
+        relay_cell._sendme_digest_backward = node.snapshot_backward_digest()
         return relay_cell.get_decrypted()
 
     def handle_relay(self, cell):
@@ -154,11 +165,52 @@ class TorCircuit(CircuitRef):
 
         self.circ_window_down = TorWindow(start=CIRC_WINDOW_INIT, increment=CIRC_WINDOW_INC)
         self.circ_window_up   = TorWindow(start=CIRC_WINDOW_INIT, increment=CIRC_WINDOW_INC)
+        self.sendme_emit_min_version = SENDME_EMIT_MIN_VERSION_DEFAULT
+        self.sendme_accept_min_version = SENDME_ACCEPT_MIN_VERSION_DEFAULT
+        self._sendme_expected_up = deque()
+        self._sendme_expected_down = deque()
         self.upstream_sock = None    # towards client
         self.downstream_sock = None  # towards exit
         self.sendq = {}
         self.sendq_stats = {"dequeued": 0, "wait_total_s": 0.0, "avg_wait_s": 0.0}
         self.scheduler = None
+
+    def apply_sendme_params(self, params: dict):
+        if not params:
+            return
+        sendme_inc = params.get("sendme_inc")
+        if sendme_inc is not None:
+            try:
+                inc = int(sendme_inc)
+                self.circ_window_down.increment = inc
+                self.circ_window_up.increment = inc
+            except (TypeError, ValueError):
+                pass
+        emit_min = params.get("sendme_emit_min_version")
+        if emit_min is not None:
+            try:
+                self.sendme_emit_min_version = int(emit_min)
+            except (TypeError, ValueError):
+                pass
+        accept_min = params.get("sendme_accept_min_version")
+        if accept_min is not None:
+            try:
+                self.sendme_accept_min_version = int(accept_min)
+            except (TypeError, ValueError):
+                pass
+
+    def record_sendme_expected(self, direction: str, digest: bytes | None):
+        if not digest:
+            return
+        queue = self._sendme_expected_up if direction == "up" else self._sendme_expected_down
+        queue.append(bytes(digest))
+
+    def pop_sendme_expected(self, direction: str) -> bytes | None:
+        queue = self._sendme_expected_up if direction == "up" else self._sendme_expected_down
+        if not queue:
+            return None
+        return queue.popleft()
+
 
     def make_create2_cell_to_guard(self, guard):
         key_agreement_cls = NtorKeyAgreement

@@ -200,6 +200,7 @@ class Tor_Node(Tor_base):
                         self._ev("tor_handshake_fail", peer=f"{ip}:{port}", side="client", fail_reason=FailReason.NTOR_FAIL.value, error=str(e), version=getattr(sock.protocol, "version", None), ms=(time.perf_counter() - t_tor) * 1000.0)
                         raise
 
+
         async def _send_extend():
             await sock.ensure_handshake_complete()
 
@@ -232,6 +233,11 @@ class Tor_Node(Tor_base):
         else:
             sock.enqueue_circuit_op(_send_extend)
             self._ev("circuit_extend_queued", circ_id=circuit_id, target=f"{ip}:{port}")
+
+
+    def _sendme_direction_for_out_sock(self, circuit, out_sock: Tor_Socket) -> str:
+        upstream = circuit.circuit_nodes[0].sock
+        return "up" if out_sock == upstream else "down"
 
     async def reply_extend(self, cell: CellCreated2, sock):
         circuit_id = cell.circuit_id
@@ -398,7 +404,6 @@ class Tor_Node(Tor_base):
             await self.handle_cell_relay(inner_cell, circuit, cell, sock)
         elif isinstance(cell, CellDestroy):
             circuit = sock.channel.recv_map.get(cell.circuit_id) or self.circuit_list.get_by_id(cell.circuit_id)
-            self._ev("circuit_destroy_forwarded", circ_id=cell.circuit_id, from_side=("upstream" if sock == circuit.circuit_nodes[0].sock else "downstream"))
             if sock == circuit.circuit_nodes[0].sock:
                 next_hop_sock = circuit.circuit_nodes[-1].sock
             else:
@@ -557,7 +562,16 @@ class Tor_Node(Tor_base):
 
             if cw.should_send_sendme():
                 # circuit-level SENDME: stream_id = 0, send back toward the sender on this link
-                sendme_inner = CellRelaySendMe(circuit_id=cid)
+                sendme_digest = getattr(origin_cell, "_sendme_digest_backward", None)
+                emit_version = circuit.sendme_emit_min_version
+                if emit_version >= 1 and sendme_digest:
+                    sendme_inner = CellRelaySendMe(
+                        circuit_id=cid,
+                        version=1,
+                        digest=sendme_digest,
+                    )
+                else:
+                    sendme_inner = CellRelaySendMe(circuit_id=cid)
                 circ_sendme = circuit.make_relay(inner_cell=sendme_inner, relay_type=CellRelay, stream_id=0)
                 circuit.enqueue_relay(circ_sendme, out_sock=sock, is_data=False)
 
@@ -607,7 +621,13 @@ class Tor_Node(Tor_base):
 
             if sid == 0:
                 cw = self._cw_send(circuit, out_sock=sock)
-                cw.on_recv_sendme()
+                direction = self._sendme_direction_for_out_sock(circuit, sock)
+                if circuit.sendme_accept_min_version <= getattr(cell, "version", 0):
+                    if getattr(cell, "version", 0) == 1:
+                        expected = circuit.pop_sendme_expected(direction)
+                        if expected and expected != getattr(cell, "digest", b""):
+                            return
+                    cw.on_recv_sendme()
 
                 st = self._relay_agg.get((cid, sid))
                 if not st:

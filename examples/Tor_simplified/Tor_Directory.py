@@ -54,7 +54,7 @@ class TorDirectoryServer:
         self._micro_map = {}
         self._network_ready_flag = False
         self._start_time = time.time()
-        self._min_uptime = 60  # seconds, 可改参数
+        self._min_uptime = 0  # seconds, 可改参数
 
         # static config
         self._server_cfg = {
@@ -337,7 +337,7 @@ recommended-client-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSInt
 recommended-relay-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=2 Link=4-5 LinkAuth=3 Microdesc=2 Relay=2-4
 required-client-protocols Cons=2 Desc=2 FlowCtrl=1 Link=4 Microdesc=2 Relay=2
 required-relay-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=2 Link=4-5 LinkAuth=3 Microdesc=2 Relay=2-4
-params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000 UseGuardFraction=0
+params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000 UseGuardFraction=0 sendme_accept_min_version=1 sendme_emit_min_version=1 sendme_inc=100
 {self._build_authority_block("0" * 40)}
 """
 
@@ -401,7 +401,7 @@ recommended-client-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSInt
 recommended-relay-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=2 Link=4-5 LinkAuth=3 Microdesc=2 Relay=2-4
 required-client-protocols Cons=2 Desc=2 FlowCtrl=1 Link=4 Microdesc=2 Relay=2
 required-relay-protocols Cons=2 Desc=2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=2 Link=4-5 LinkAuth=3 Microdesc=2 Relay=2-4
-params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000 UseGuardFraction=0
+params AuthDirMaxServersPerAddr=2 CircuitPriorityHalflifeMsec=30000 UseGuardFraction=0 sendme_accept_min_version=1 sendme_emit_min_version=1 sendme_inc=100
 {self._build_authority_block("0" * 40)}
 """
 

@@ -136,6 +136,9 @@ class Tor_Client(Tor_base):
                 off += len(chunk)
 
                 data_cell = stream.make_relay(CellRelayData(chunk, circuit.id))
+                if hasattr(circuit, "circ_window_up") and circuit.circ_window_up.should_record_sendme_sent():
+                    digest = getattr(data_cell, "_sendme_digest_forward", None)
+                    circuit.record_sendme_expected("up", digest)
                 self._ev(
                     "cell_trace", circ_id=circuit.id, stream_id=stream.id,
                     peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}", side="client", dir="send",
@@ -236,7 +239,11 @@ class Tor_Client(Tor_base):
                 peer=f"{self.guard.addr[0]}:{self.guard.addr[1]}", side="client", dir="send",
                 cell_cmd="RELAY_DATA"
             )
-            await socket.send_cell(stream.make_relay(CellRelayData(chunk, circuit.id)))
+            relay_cell = stream.make_relay(CellRelayData(chunk, circuit.id))
+            if hasattr(circuit, "circ_window_up") and circuit.circ_window_up.should_record_sendme_sent():
+                digest = getattr(relay_cell, "_sendme_digest_forward", None)
+                circuit.record_sendme_expected("up", digest)
+            await socket.send_cell(relay_cell)
             if (not sent_first) and (stream.id is not None):
                 stream_uid = self._sid2uid.get(stream.id)
                 if stream_uid:
@@ -250,6 +257,7 @@ class Tor_Client(Tor_base):
 
         # print(f"[create_circuit] begin -> guard {self.guard.addr} hops={hops_count}")
         circuit = await self.circuit_list.create_new_client(socket.channel)
+        circuit.apply_sendme_params(self.consensus.params)
         #guard选择记录
         snap = self.consensus.get_consensus_snapshot()
         t0_total = time.perf_counter()
@@ -428,7 +436,16 @@ class Tor_Client(Tor_base):
                 circuit.circ_window_down.on_recv_data_cell(1)
                 if circuit.circ_window_down.should_send_sendme():
                     # 电路级 SENDME：stream_id = 0
-                    sendme_inner = CellRelaySendMe(circuit_id=circuit.id)
+                    sendme_digest = getattr(origin_cell, "_sendme_digest_backward", None)
+                    emit_version = circuit.sendme_emit_min_version
+                    if emit_version >= 1 and sendme_digest:
+                        sendme_inner = CellRelaySendMe(
+                            circuit_id=circuit.id,
+                            version=1,
+                            digest=sendme_digest,
+                        )
+                    else:
+                        sendme_inner = CellRelaySendMe(circuit_id=circuit.id)
                     circ_sendme = circuit.make_relay(inner_cell=sendme_inner, relay_type=CellRelay, stream_id=0)
                     socket = self.socket_map.get(self.guard.addr, None)
                     if socket is not None:
@@ -461,7 +478,12 @@ class Tor_Client(Tor_base):
             if sid == 0:
                 # ---- circuit-level SENDME ----
                 if hasattr(circuit, "circ_window_up"):
-                    circuit.circ_window_up.on_recv_sendme()
+                    if circuit.sendme_accept_min_version <= getattr(cell, "version", 0):
+                        if getattr(cell, "version", 0) == 1:
+                            expected = circuit.pop_sendme_expected("up")
+                            if expected and expected != getattr(cell, "digest", b""):
+                                return
+                        circuit.circ_window_up.on_recv_sendme()
             else:
                 # ---- stream-level SENDME ----
                 stream = circuit.streams.get_by_id(sid)

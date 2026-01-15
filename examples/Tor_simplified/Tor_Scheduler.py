@@ -83,6 +83,10 @@ class CircuitSendScheduler:
                     continue
                 circuit.pop_sendq(out_sock)
                 cw.on_send_data_cell(1)
+                if cw.should_record_sendme_sent():
+                    direction = self.node._sendme_direction_for_out_sock(circuit, out_sock)
+                    digest = getattr(entry.cell, "_sendme_digest_forward", None)
+                    circuit.record_sendme_expected(direction, digest)
                 if entry.stream is not None:
                     entry.stream.window.on_send_data_cell(1)
             else:

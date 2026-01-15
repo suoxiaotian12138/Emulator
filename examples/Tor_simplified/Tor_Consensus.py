@@ -23,6 +23,7 @@ class Tor_Consensus:
         self.consensus_id: Optional[str] = None  # 稳定ID
         self.fetched_at: Optional[float] = None  # time.time()
         self.meta: Dict = {}  # 摘要统计（数量/旗标/带宽）
+        self.params: Dict[str, str] = {}
         # （real 模式下你可以后续再填 valid_after/valid_until）
 
     def setup_model(self, model):
@@ -71,6 +72,7 @@ class Tor_Consensus:
         async with sess.get(url, timeout=10) as resp:
             resp.raise_for_status()
             text = await resp.text()
+        self.params = parse_consensus_params(text)
         consensus = split_tor_descriptors(text)
         return self._relays_parse(consensus)
 
@@ -90,6 +92,7 @@ class Tor_Consensus:
     def __fetch_consensus_real_sync(self, endpoints):
         from stem.descriptor.remote import get_consensus
         consensus = get_consensus(endpoints=endpoints, timeout=300).run()
+        self.params = {}
         return self._relays_parse(consensus)
 
     async def _fetch_descriptor_real(self, fingerprint: str, timeout: int = 30):
@@ -409,3 +412,14 @@ def hex_to_base64_fingerprint(hex_fp):
         return None
 
 
+def parse_consensus_params(text: str) -> Dict[str, str]:
+    params: Dict[str, str] = {}
+    for line in text.splitlines():
+        if line.startswith("params "):
+            parts = line[len("params "):].strip().split()
+            for part in parts:
+                if "=" in part:
+                    key, value = part.split("=", 1)
+                    params[key] = value
+            break
+    return params

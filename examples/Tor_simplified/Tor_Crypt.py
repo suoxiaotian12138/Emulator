@@ -300,6 +300,14 @@ class _BaseCryptoState:
             relay_cell.prepare(self._digesting_func)
         relay_cell.encrypt(self._encrypting_func)
 
+    def snapshot_forward_digest(self) -> bytes:
+        clone = sha1_stream_clone(self._forward_digest)
+        return sha1_stream_finalize(clone)
+
+    def snapshot_backward_digest(self) -> bytes:
+        clone = sha1_stream_clone(self._backward_digest)
+        return sha1_stream_finalize(clone)
+
     def decrypt_backward(self, relay_cell):
         encrypted = relay_cell.get_encrypted()
         payload = self._decrypting_func(encrypted)
