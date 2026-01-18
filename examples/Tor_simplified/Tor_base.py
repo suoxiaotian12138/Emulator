@@ -16,7 +16,7 @@ from tools.Log.LogPrinter import LogPrinter
 from tools.Log.bus import EventBus, NoOpBus, GlobalBus
 from tools.Packet.packet_TCP import accept_tls_connections, TLSConnector
 from tools.Crypt.key_generator import create_server_context, ed25519_setup, rsa_setup, generate_cert_and_key_from_ed25519, generate_tls_rsa_cert
-from tools.Network_Management.bandwidth_limiter import init_global_limiter_from_env
+from tools.Network_Management.bandwidth_env import get_limiter
 
 from examples.Tor_simplified.Tor_Socket import Tor_Socket
 from tools.Network_Management.delay_env import get_args
@@ -73,7 +73,7 @@ class Tor_base:
 
         self.sim_ip = sim_ip
         self._bg_tasks: set[asyncio.Task] = set()
-        self.limiter = init_global_limiter_from_env()
+        self.limiter = get_limiter(self.node_id)
         self._stopping = False
         self._stopped = asyncio.Event()
 
@@ -87,6 +87,9 @@ class Tor_base:
         self._path = bus.path
         self._stream = bus.stream
 
+    def refresh_limiter(self):
+        self.limiter = get_limiter(self.node_id)
+        return self.limiter
 
     def sign_message(self, private_key, message):
         signature = private_key.sign(message)
@@ -128,6 +131,7 @@ class Tor_base:
     from tools.Network_Management.delay_env import get_args  # 顶部已有就不用再加
 
     async def monitor_tor_socket(self):
+        limiter = self.refresh_limiter()
         async def on_accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
             tor_sock = Tor_Socket(
                 reader=reader,
@@ -141,7 +145,7 @@ class Tor_base:
                 ed_signing_key=getattr(self, "ed_sign_sk", None),
                 link_auth_key=getattr(self, "link_auth_sk", None),
                 tls_cert_der=getattr(self, "tls_cert_der", None),
-                limiter=self.limiter,
+                limiter=limiter,
                 **get_args(sim_ip=self.sim_ip)
             )
 

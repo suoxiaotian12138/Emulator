@@ -211,6 +211,17 @@ class TorCircuit(CircuitRef):
             return None
         return queue.popleft()
 
+    def consume_sendme_expected(self, direction: str, digest: bytes) -> tuple[bool, int]:
+        queue = self._sendme_expected_up if direction == "up" else self._sendme_expected_down
+        if not queue:
+            return False, 0
+        skipped = 0
+        while queue:
+            expected = queue.popleft()
+            if expected == digest:
+                return True, skipped
+            skipped += 1
+        return False, skipped
 
     def make_create2_cell_to_guard(self, guard):
         key_agreement_cls = NtorKeyAgreement

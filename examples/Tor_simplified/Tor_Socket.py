@@ -586,6 +586,8 @@ class Tor_Socket():
                     if not data:  # EOF
                         print(f"[PeerClose] {self.peer_str} connection closed by peer")
                         break
+                    if self._limiter is not None:
+                        await self._limiter.consume(len(data))
                     await self.buffer.add(data)
                 except asyncio.TimeoutError:
                     print(f"[Timeout] {self.peer_str} >600s no data")

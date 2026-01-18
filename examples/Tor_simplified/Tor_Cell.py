@@ -460,6 +460,8 @@ class CellRelayBegin(TorCell):
     def _args_str(self):
         return 'address = {!r}, port = {!r}, flags = {!r}'.format(self.address, self.port, self.flags)
 
+import struct
+
 class CellRelaySendMe(TorCell):
     NUM = 5
 
@@ -469,25 +471,48 @@ class CellRelaySendMe(TorCell):
         self.digest = digest or b""
 
     def _serialize_payload(self):
+        # v0: empty payload
         if self.version <= 0:
             return b""
-        if self.version != 1:
-            return b""
-        if len(self.digest) != 20:
-            raise ValueError("SENDME v1 digest must be 20 bytes")
-        data_len = len(self.digest)
-        return bytes([self.version, data_len]) + self.digest
+
+        # v1: VERSION(1) + DATA_LEN(2) + DIGEST(20)
+        if self.version == 1:
+            if len(self.digest) != 20:
+                raise ValueError("SENDME v1 digest must be 20 bytes")
+            return bytes([1]) + struct.pack("!H", 20) + self.digest
+
+        # unknown versions: be conservative
+        return b""
 
     @staticmethod
     def _deserialize_payload(payload: bytes, proto_version: int):
+        # v0: empty payload
         if not payload:
             return {"version": 0, "digest": b""}
-        if len(payload) < 2:
-            return {"version": 0, "digest": b""}
+
+        # need at least VERSION(1) + DATA_LEN(2)
+        if len(payload) < 3:
+            return {"version": -1, "digest": b""}
+
         version = payload[0]
-        data_len = payload[1]
-        digest = payload[2:2 + data_len]
-        return {"version": version, "digest": digest}
+        data_len = struct.unpack("!H", payload[1:3])[0]
+        data = payload[3:]
+
+        # v0: ignore rest
+        if version == 0:
+            return {"version": 0, "digest": b""}
+
+        # v1: authenticated SENDME, need at least 20 bytes
+        if version == 1:
+            if data_len < 20:
+                return {"version": -1, "digest": b""}
+            if len(data) < data_len:
+                return {"version": -1, "digest": b""}
+            digest = data[:20]
+            return {"version": 1, "digest": digest}
+
+        # unknown version: 建议先按 v0 忽略，避免兼容性炸电路
+        return {"version": 0, "digest": b""}
 
 class CellCerts(TorCell):
     NUM = 129  # 注意是 129，不是 128（CERTS cell 是 129）

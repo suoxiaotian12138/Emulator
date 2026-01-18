@@ -42,7 +42,7 @@ DEFAULT_ENV = {
     "NODE_ADDR": "192.168.66.242",
     "TARGET_HOST": "192.168.66.243",
     "TARGET_PORT": "8000",
-    "PAYLOAD_MB": "5",
+    "PAYLOAD_MB": "10",
     # Optional knobs (safe defaults)
     "CLIENTS_PER_BATCH": "1",
     "TOTAL_BATCHES": "1",
@@ -156,7 +156,7 @@ async def run_one_client(client: Tor_Client, addr, hop: int,
 
 async def main():
     loop = asyncio.get_running_loop()
-    log_dir = env_str("LOG_DIR", "exp/semantic_logs")
+    log_dir = env_str("LOG_DIR", "exp/e2")
     exp_label = env_str("EXP_LABEL", "Tor")
     seed = ensure_seed()
     log_dir_path = Path(log_dir)

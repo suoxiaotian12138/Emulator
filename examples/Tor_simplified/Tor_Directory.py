@@ -154,7 +154,7 @@ class TorDirectoryServer:
         else:
             if m_bw:
                 avg_bandwidth = int(m_bw.group(1))  # 这是平均带宽，单位字节/秒
-                if avg_bandwidth >= 250_0000:  # 250 KB/s ≈ 2000 Kbps（官方最低要求）
+                if avg_bandwidth >= 600_0000:  # 250 KB/s ≈ 2000 Kbps（官方最低要求）
                     base.append("Guard")
                     base.append("Stable")
                     base.append("Fast")

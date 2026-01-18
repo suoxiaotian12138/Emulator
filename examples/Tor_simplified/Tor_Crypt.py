@@ -284,7 +284,9 @@ class _BaseCryptoState:
         """
         IMPORTANT:
         - If relay_cell is already encrypted (inner_cell=None, has _encrypted),
-          we must NOT call prepare() or touch digest.
+          we must NOT call prepare() but we still must advance the forward
+          digest with the relay payload (digest field zeroed) so SENDME v1
+          digests stay in sync for forwarded cells.
           We only add one AES layer on the existing encrypted payload.
         - If relay_cell is plaintext (inner_cell exists), we prepare digest once,
           then encrypt.
@@ -292,6 +294,10 @@ class _BaseCryptoState:
         if relay_cell.is_encrypted:
             # add a layer on existing ciphertext, do NOT recompute digest
             payload = relay_cell._serialize_payload()  # returns current ciphertext
+            payload_for_digest = RelayedTorCell.set_header_digest(
+                payload, b'\0' * DIGEST_LEN
+            )
+            sha1_stream_update(self._forward_digest, payload_for_digest)
             relay_cell.set_encrypted(self._encrypting_func(payload))
             return
 

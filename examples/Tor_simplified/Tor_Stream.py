@@ -6,7 +6,7 @@ from enum import unique, Enum, auto
 from examples.Tor_simplified.Tor_Cell import *
 from examples.Tor_simplified.Tor_Window import TorWindow
 import socket
-
+from collections import deque
 logger = logging.getLogger(__name__)
 
 
@@ -66,7 +66,8 @@ class Tor_Stream:
         self._close_lock = asyncio.Lock()
 
         # --- Client 专用: Buffer 模式 ---
-        self._buffer = bytearray()
+        self._buffer = deque()
+        self._buffer_size = 0
         self.data_event = asyncio.Event()
 
         # --- Server 专用: Exit Node 转发模式 ---
@@ -91,23 +92,20 @@ class Tor_Stream:
 
     def append(self, data):
         """Client端使用：收到 RelayData 后存入缓冲区"""
-        self._buffer.extend(data)
+        if not data:
+            return
+        self._buffer.append(data)
+        self._buffer_size += len(data)
         self.data_event.set()
 
     async def recv(self, bufsize):
         """Client端使用：从缓冲区读取数据"""
         await self.data_event.wait()
         if bufsize == -1:
-            to_read = len(self._buffer)
+            to_read = self._buffer_size
         else:
-            to_read = min(len(self._buffer), bufsize)
-
-        result = self._buffer[:to_read]
-        self._buffer = self._buffer[to_read:]
-
-        if not self._buffer:
-            self.data_event.clear()
-        return result
+            to_read = min(self._buffer_size, bufsize)
+        return self._read_from_buffer(to_read)
 
     def set_end(self, cell_end):
         """Client端使用：收到 RelayEnd"""
@@ -115,6 +113,27 @@ class Tor_Stream:
         self.end_event.set()
         # wake recv() if it is waiting
         self.data_event.set()
+
+    def _read_from_buffer(self, max_bytes: int) -> bytes:
+        if max_bytes <= 0 or self._buffer_size == 0:
+            return b""
+        to_read = min(max_bytes, self._buffer_size)
+        out = bytearray()
+        while to_read > 0 and self._buffer:
+            chunk = self._buffer[0]
+            if len(chunk) <= to_read:
+                out.extend(chunk)
+                self._buffer.popleft()
+                self._buffer_size -= len(chunk)
+                to_read -= len(chunk)
+            else:
+                out.extend(chunk[:to_read])
+                self._buffer[0] = chunk[to_read:]
+                self._buffer_size -= to_read
+                to_read = 0
+        if self._buffer_size == 0:
+            self.data_event.clear()
+        return bytes(out)
 
     def mark_end_sent(self):
         """Server端使用：发送 RelayEnd 前先标记，保证只发一次"""
@@ -170,8 +189,24 @@ class Tor_Stream:
                             p.cancel()
                         if not self._remote_writer:
                             break
-                    self._remote_writer.write(data)
+                    batch = [data]
+                    batch_bytes = len(data)
+                    stop_after = False
+                    while batch_bytes < 262144:
+                        try:
+                            next_data = self._to_remote.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if next_data is None:
+                            stop_after = True
+                            break
+                        batch.append(next_data)
+                        batch_bytes += len(next_data)
+                    for chunk in batch:
+                        self._remote_writer.write(chunk)
                     await self._remote_writer.drain()
+                    if stop_after:
+                        break
             except asyncio.CancelledError:
                 pass
             except Exception:
@@ -243,20 +278,16 @@ class Tor_Stream:
 
         while True:
             # drain what we already have
-            if self._buffer:
+            if self._buffer_size:
                 if max_bytes != -1:
                     need = max_bytes - len(out)
                     if need <= 0:
                         return bytes(out)
-                    take = min(len(self._buffer), need)
+                    take = min(self._buffer_size, need)
                 else:
-                    take = len(self._buffer)
+                    take = self._buffer_size
 
-                out.extend(self._buffer[:take])
-                del self._buffer[:take]
-
-                if not self._buffer:
-                    self.data_event.clear()
+                out.extend(self._read_from_buffer(take))
 
                 if max_bytes != -1 and len(out) >= max_bytes:
                     return bytes(out)
@@ -346,10 +377,8 @@ class Tor_Stream:
         return self._circuit.make_relay(inner_cell, stream_id=self.id)
 
     def make_relays_server(self, data):
-        cell_list = []
         for chunk in self.chunks(data, RelayedTorCell.MAX_PAYLOD_SIZE):
-            cell_list.append(self.make_relay_server(CellRelayData(chunk, self._circuit.id)))
-        return cell_list
+            yield self.make_relay_server(CellRelayData(chunk, self._circuit.id))
 
     def make_relay_server(self, inner_cell):
         return self._circuit.make_relay(inner_cell, stream_id=self.id)

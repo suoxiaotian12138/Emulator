@@ -8,6 +8,7 @@ from tools.Log.bus import EventBus
 from tools.Log.resources import resource_probe
 from tools.Network_Management.delay_env import configure
 from tools.Network_Management.geo_delay_injector import GeoDelayModel
+from tools.Network_Management.bandwidth_registry import register_bandwidth_env
 
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -20,9 +21,19 @@ loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(
 ))
 
 
-async def register_all_guards(guard_configs):
+async def register_all_guards(guard_configs, *, bandwidth_profiles=None):
     guards = []
     for name, ip, port, role, flags, exit_policy in guard_configs:
+        if bandwidth_profiles:
+            profile = bandwidth_profiles.get(name) or bandwidth_profiles.get(role)
+            if profile:
+                rate_bps, burst_bytes = profile
+                node_id = f"{name}@{ip}:{port}"
+                register_bandwidth_env(
+                    node_id,
+                    rate_bps=rate_bps,
+                    burst_bytes=burst_bytes,
+                )
         guard = Tor_Node(name, ip, port, flags, exit_policy=exit_policy)
         guards.append(guard)
 
@@ -96,8 +107,8 @@ async def main():
     print("event-loop =>", type(loop))
 
     # 固定延迟注入（仅启用此选项时生效）
-    model = GeoDelayModel(fixed_owd_ms=100.0, jitter_ratio=0.0, jitter_cap=0.0, floor_ms=1.0)
-    configure(enabled=False, mapping=None, model=model, delay_mode="scheduled")
+    model = GeoDelayModel(fixed_owd_ms=20.0, jitter_ratio=0.0, jitter_cap=0.0, floor_ms=1.0)
+    configure(enabled=True, mapping=None, model=model, delay_mode="scheduled")
 
     # 3. 其他初始化（线程池、任务等）
     max_workers = 128
@@ -110,7 +121,14 @@ async def main():
     guard_configs = generate_specific_nodes(n_guard=1, n_middle=1, n_exit=1)
 
     # 注册所有 guard
-    await register_all_guards(guard_configs)
+    bandwidth_profiles = {
+        "Guard": (20_000_000, 20_000_000),
+        "Middle": (1_000_000, 1_000_000),
+        "Exit": (20_000_000, 20_000_000),
+    }
+    print("band width test:")
+    await register_all_guards(guard_configs, bandwidth_profiles=bandwidth_profiles)
+    # await register_all_guards(guard_configs)
 
     try:
         await asyncio.sleep(30000)

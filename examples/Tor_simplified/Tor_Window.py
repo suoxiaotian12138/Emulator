@@ -54,8 +54,22 @@ class TorWindow:
             self.credit_event.clear()
 
     def should_record_sendme_sent(self) -> bool:
-        sent = self.start - self.send_window
-        return sent > 0 and (sent % self.increment) == 0
+        """
+        Record digest only for the DATA cell that is right before we expect a SENDME.
+        Tor logic: record only every `increment` DATA cells, not every cell.
+        """
+        sent = self.start - self.send_window  # how many DATA cells have been sent so far
+        if sent <= 0:
+            return False
+        return (sent % self.increment) == 0
+
+    def sent_cell_for_sendme(self) -> bool:
+        """
+        Tor-like: return True iff the cell we just sent is the one that should trigger
+        an incoming SENDME from the other side.
+        """
+        return self.should_record_sendme_sent()
+
 
     async def acquire_send(self, cells: int = 1, timeout: float | None = None):
         """

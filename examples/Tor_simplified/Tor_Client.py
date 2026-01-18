@@ -68,6 +68,7 @@ class Tor_Client(Tor_base):
 
         desc = await self.consensus.fetch_descriptor(self.guard.fingerprint_str)
         self.guard.set_descriptor(desc)
+        self.refresh_limiter()
         socket = Tor_Socket(
             self.host,
             on_cell=self.handle_cell,
@@ -478,12 +479,38 @@ class Tor_Client(Tor_base):
             if sid == 0:
                 # ---- circuit-level SENDME ----
                 if hasattr(circuit, "circ_window_up"):
-                    if circuit.sendme_accept_min_version <= getattr(cell, "version", 0):
-                        if getattr(cell, "version", 0) == 1:
-                            expected = circuit.pop_sendme_expected("up")
-                            if expected and expected != getattr(cell, "digest", b""):
-                                return
-                        circuit.circ_window_up.on_recv_sendme()
+                    version = getattr(cell, "version", 0)
+                    accept_min = circuit.sendme_accept_min_version
+                    if version < 0:
+                        self.print(f"[client] invalid SENDME payload circ={circuit.id} sid={sid}")
+                        await self.close_circuit(circuit)
+                        return
+                    if version < accept_min:
+                        self.print(
+                            f"[client] unacceptable SENDME version={version} "
+                            f"min={accept_min} circ={circuit.id} sid={sid}"
+                        )
+                        await self.close_circuit(circuit)
+                        return
+                    if version == 1:
+                        digest = getattr(cell, "digest", b"")
+                        expected = circuit.pop_sendme_expected("up")
+                        if not digest:
+                            self.print(f"[client] SENDME v1 missing digest circ={circuit.id}")
+                            await self.close_circuit(circuit)
+                            return
+                        if digest != expected:
+                            self.print(f"[client] SENDME v1 digest mismatch circ={circuit.id}")
+                            await self.close_circuit(circuit)
+                            return
+                    elif version == 0:
+                        # Keep expected digest queue in sync even without validation.
+                        circuit.pop_sendme_expected("up")
+                    else:
+                        self.print(f"[client] unsupported SENDME version={version} circ={circuit.id}")
+                        await self.close_circuit(circuit)
+                        return
+                    circuit.circ_window_up.on_recv_sendme()
             else:
                 # ---- stream-level SENDME ----
                 stream = circuit.streams.get_by_id(sid)
