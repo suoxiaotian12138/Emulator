@@ -15,7 +15,7 @@ from examples.Tor_simplified.Tor_Cell import *
 
 from examples.Tor_simplified.Tor_Circuit import CircuitManager, MAX_CIRCUIT_AGE_S, \
     MAX_STREAMS_PER_CIRCUIT, IDLE_TIMEOUT_S, PREBUILD_OPEN, compute_isolation_key
-
+from tools.Network_Management.bandwidth_env import get_limiter
 from tools.Network_Management.delay_env import get_args
 class Tor_Client(Tor_base):
     def __init__(self, name: str, host: str, port: int, model: Literal["sim", "real"] = "sim", sim_ip: str | None = None):
@@ -68,12 +68,12 @@ class Tor_Client(Tor_base):
 
         desc = await self.consensus.fetch_descriptor(self.guard.fingerprint_str)
         self.guard.set_descriptor(desc)
-        self.refresh_limiter()
+        limiter = get_limiter(self.node_id)
         socket = Tor_Socket(
             self.host,
             on_cell=self.handle_cell,
             node_id=self.node_id,
-            limiter=self.limiter,
+            limiter=limiter,
             **get_args(sim_ip=self.sim_ip)
         )
 

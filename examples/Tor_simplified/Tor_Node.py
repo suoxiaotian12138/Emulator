@@ -17,7 +17,7 @@ from examples.Tor_simplified.Tor_Router import Tor_Router_simple
 from examples.Tor_simplified.Tor_Crypt import NtorServerKeyAgreement
 from examples.Tor_simplified.Tor_Socket import Tor_Socket
 from examples.Tor_simplified.Tor_Scheduler import CircuitSendScheduler
-
+from tools.Network_Management.bandwidth_env import get_limiter
 from cryptography.hazmat.primitives import serialization, hashes
 from tools.Crypt.crypt_common import (
     build_ed25519_cert, build_rsa_to_ed_crosscert,
@@ -166,7 +166,7 @@ class Tor_Node(Tor_base):
                 if sock is None:
                     t_tls = time.perf_counter()
                     try:
-                        self.refresh_limiter()
+                        limiter = get_limiter(self.node_id)
                         sock = await Tor_Socket.dial(
                             remote_addr=addr,
                             source_ip=self.host,
@@ -178,7 +178,7 @@ class Tor_Node(Tor_base):
                             ed_signing_key=self.ed_sign_sk,
                             link_auth_key=self.link_auth_sk,
                             tls_cert_der=self.tls_cert_der,
-                            limiter=self.limiter,
+                            limiter=limiter,
                             **get_args(sim_ip=self.sim_ip)
                         )
                         print("build a new socket from: ", addr)

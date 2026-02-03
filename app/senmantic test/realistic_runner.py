@@ -27,7 +27,7 @@ REALISTIC_DEFAULTS = {
     "STREAMS_PER_CIRCUIT": "1",
     "TOTAL_ROUNDS": "100",
     "ROUND_INTERVAL_S": "2",
-    "LOG_DIR": "exp/e2/torbox",
+    "LOG_DIR": "exp/e1/torbox",
     "EXP_LABEL": "20mb",
     "PAYLOAD_MB": "1",
 }

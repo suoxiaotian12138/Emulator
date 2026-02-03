@@ -5,10 +5,46 @@ from typing import List, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
-
 import matplotlib
 
 matplotlib.use("TkAgg")
+
+
+# -----------------------------
+# Global font configuration
+# -----------------------------
+
+def setup_global_font(base_size: int):
+    """
+    配置全局 matplotlib 字体，强制加粗所有元素。
+    """
+    plt.rcParams.update({
+        'font.family': 'Arial',
+        'font.size': base_size,
+        'font.weight': 'bold',  # 全局字体加粗
+
+        # 坐标轴标题与标签加粗
+        'axes.titleweight': 'bold',
+        'axes.labelweight': 'bold',
+        'axes.titlesize': base_size * 1.3,
+        'axes.labelsize': base_size * 1.2,
+
+        # 刻度数字加粗
+        'xtick.labelsize': base_size * 1.1,
+        'ytick.labelsize': base_size * 1.1,
+
+        # 图例加粗
+        'legend.fontsize': base_size * 1.1,
+        'legend.frameon': True,
+
+        # 边框加粗
+        'axes.linewidth': 1.5,
+
+        'lines.antialiased': True,
+        'text.antialiased': True,
+    })
+
+
 # -----------------------------
 # Log parsing
 # -----------------------------
@@ -134,6 +170,133 @@ def find_sink_log(root: str, system_name: str) -> str:
 
 
 # -----------------------------
+# Enhanced plotting function
+# -----------------------------
+
+def plot_enhanced_ccdf(t_real, ccdf_real, t_sim, ccdf_sim, metrics, out_path):
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=300)
+
+    color_real = '#2E86AB'
+    color_sim = '#A23B72'
+
+    ax.plot(t_real, ccdf_real,
+            label=f'Tor (n={metrics["real_n"]:,})',
+            color=color_real,
+            linewidth=2.5,
+            alpha=0.9)
+
+    ax.plot(t_sim, ccdf_sim,
+            label=f'Torbox (n={metrics["sim_n"]:,})',
+            color=color_sim,
+            linewidth=2.5,
+            alpha=0.9,
+            linestyle='--')
+
+    ax.set_yscale('log')
+
+    all_times = np.concatenate([t_real, t_sim])
+    x_min = np.percentile(all_times, 1)
+    x_max = np.percentile(all_times, 99)
+    x_range = x_max - x_min
+    ax.set_xlim(x_min - 0.05 * x_range, x_max + 0.05 * x_range)
+
+    ax.set_xlabel('Completion Time (s)', fontweight='medium')
+    ax.set_ylabel('P(T > t)', fontweight='medium')
+    ax.set_title('Completion Time Distribution under Contention (CCDF)',
+                 pad=15, fontweight='bold')
+
+    ax.grid(True, which='major', linestyle='-', linewidth=0.8, alpha=0.3, color='gray')
+    ax.grid(True, which='minor', linestyle=':', linewidth=0.5, alpha=0.2, color='gray')
+    ax.minorticks_on()
+
+    legend = ax.legend(loc='upper right', framealpha=0.95,
+                       edgecolor='gray', fancybox=True, shadow=False)
+    legend.get_frame().set_linewidth(0.8)
+
+    text = (
+        f"Median Rel. Error: {metrics['median_rel_err'] * 100:.2f}%\n"
+        f"IQR Rel. Error: {metrics['iqr_rel_err'] * 100:.2f}%\n"
+        f"KS Distance: {metrics['ks']:.4f}\n"
+        f"Wasserstein-1: {metrics['w1']:.4f} s"
+    )
+
+    bbox_props = dict(boxstyle='round,pad=0.6',
+                      facecolor='white',
+                      edgecolor='gray',
+                      alpha=0.95,
+                      linewidth=1.2)
+
+    ax.text(0.02, 0.02, text,
+            transform=ax.transAxes,
+            verticalalignment='bottom',
+            horizontalalignment='left',
+            bbox=bbox_props,
+            family='monospace')
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+        spine.set_color('gray')
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches='tight', facecolor='white')
+    print(f"✓ Saved high-quality CCDF: {out_path}")
+    plt.show()
+
+
+def plot_enhanced_cdf(t_real, cdf_real, t_sim, cdf_sim, metrics, out_path):
+    fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
+
+    color_real = '#2E86AB'
+    color_sim = '#A23B72'
+
+    ax.plot(t_real, cdf_real,
+            label='Tor',
+            color=color_real,
+            linewidth=2.5,
+            alpha=0.9)
+
+    ax.plot(t_sim, cdf_sim,
+            label='Torbox',
+            color=color_sim,
+            linewidth=2.5,
+            alpha=0.9,
+            linestyle='--')
+
+    all_times = np.concatenate([t_real, t_sim])
+    x_min = np.percentile(all_times, 1)
+    x_max = np.percentile(all_times, 99)
+    x_range = x_max - x_min
+    ax.set_xlim(x_min - 0.05 * x_range, x_max + 0.05 * x_range)
+
+    ax.set_ylim(-0.02, 1.02)
+
+    ax.set_xlabel('Completion Time (s)', fontweight='bold')
+    ax.set_ylabel('F(T ≤ t)', fontweight='bold')
+
+    ax.grid(True, which='major', linestyle='-', linewidth=0.8, alpha=0.3, color='gray')
+    ax.grid(True, which='minor', linestyle=':', linewidth=0.5, alpha=0.2, color='gray')
+    ax.minorticks_on()
+
+    legend = ax.legend(loc='lower right', framealpha=0.95,
+                       edgecolor='gray', fancybox=True, shadow=False)
+    legend.get_frame().set_linewidth(0.8)
+
+    ax.axhline(y=0.5, color='gray', linestyle=':', linewidth=1, alpha=0.5)
+    ax.text(ax.get_xlim()[1] * 0.98, 0.5, 'Median',
+            va='bottom', ha='right',
+            color='gray', fontweight='bold')
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+        spine.set_color('gray')
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches='tight', facecolor='white')
+    print(f"✓ Saved high-quality CDF: {out_path}")
+    plt.show()
+
+
+# -----------------------------
 # Main
 # -----------------------------
 
@@ -145,24 +308,34 @@ def main() -> None:
         default=".",
         help="Experiment root, e.g. .../app/semantic test/exp/e2",
     )
-    parser.add_argument("--drop_ratio", type=float, default=0.10, help="Drop first ratio of samples.")
-    parser.add_argument("--out_prefix", type=str, default="exp2", help="Output filename prefix.")
+    parser.add_argument("--drop_ratio", type=float, default=0.10,
+                        help="Drop first ratio of samples.")
+    parser.add_argument("--out_prefix", type=str, default="transport",
+                        help="Output filename prefix.")
+    parser.add_argument("--fontsize", type=int, default=15,
+                        help="Base font size for plots.")
     args = parser.parse_args()
+
+    # Apply global font configuration
+    setup_global_font(args.fontsize)
 
     root = os.path.abspath(args.root)
 
+    print("🔍 Searching for log files...")
     tor_path = find_sink_log(root, "tor")
     torbox_path = find_sink_log(root, "torbox")
 
+    print("\n📂 Resolved paths:")
+    print(f"  Tor:    {tor_path}")
+    print(f"  Torbox: {torbox_path}")
+
+    print("\n📊 Parsing log files...")
     real_raw = read_completion_times(tor_path)
     sim_raw = read_completion_times(torbox_path)
 
     if real_raw.size == 0 or sim_raw.size == 0:
         raise RuntimeError("Empty data parsed from sink.log.")
 
-    # --------------------------------------------------
-    # Drop first N% samples (time order, not value order)
-    # --------------------------------------------------
     def drop_head(x: np.ndarray, ratio: float) -> np.ndarray:
         n_drop = int(len(x) * ratio)
         return x[n_drop:] if n_drop < len(x) else x
@@ -170,80 +343,43 @@ def main() -> None:
     real = drop_head(real_raw, args.drop_ratio)
     sim = drop_head(sim_raw, args.drop_ratio)
 
-    print(f"Dropped {args.drop_ratio * 100:.1f}% samples:")
-    print(f"  Tor:    {len(real_raw)} -> {len(real)}")
-    print(f"  Torbox: {len(sim_raw)}  -> {len(sim)}")
+    print(f"\n✂️  Dropped first {args.drop_ratio * 100:.1f}% samples (warm-up):")
+    print(f"  Tor:    {len(real_raw):,} → {len(real):,}")
+    print(f"  Torbox: {len(sim_raw):,} → {len(sim):,}")
 
-    # Metrics computed on trimmed data
+    print("\n📈 Computing distribution metrics...")
     metrics = summary_metrics(real, sim)
 
-    # Curves
     t_real_cdf, F_real = cdf_points(real)
     t_sim_cdf, F_sim = cdf_points(sim)
-
     t_real_ccdf, CCDF_real = ccdf_points(real)
     t_sim_ccdf, CCDF_sim = ccdf_points(sim)
 
-    # -----------------------------
-    # Figure 1: CCDF
-    # -----------------------------
-    plt.figure()
-    plt.plot(t_real_ccdf, CCDF_real, label=f"Tor (n={metrics['real_n']})")
-    plt.plot(t_sim_ccdf, CCDF_sim, label=f"Torbox (n={metrics['sim_n']})")
-    plt.yscale("log")
-    plt.xlabel("Completion Time (s)")
-    plt.ylabel("P(T > t)")
-    plt.title("Completion Time Distribution under Contention (CCDF)")
-    plt.grid(True, which="both", linestyle=":")
-    plt.legend()
-
-    text = (
-        f"Median rel. error: {metrics['median_rel_err'] * 100:.2f}%\n"
-        f"IQR rel. error: {metrics['iqr_rel_err'] * 100:.2f}%\n"
-        f"KS distance: {metrics['ks']:.4f}\n"
-        f"Wasserstein (W1): {metrics['w1']:.4f} s"
-    )
-    plt.gca().text(
-        0.98,
-        0.98,
-        text,
-        transform=plt.gca().transAxes,
-        ha="right",
-        va="top",
-        bbox=dict(boxstyle="round", alpha=0.85),
-    )
-
+    print("\n🎨 Generating enhanced visualizations...")
     ccdf_path = f"{args.out_prefix}_ccdf.png"
-    plt.tight_layout()
-    plt.savefig(ccdf_path, dpi=200)
-    plt.show()
-
-    # -----------------------------
-    # Figure 2: CDF
-    # -----------------------------
-    plt.figure()
-    plt.plot(t_real_cdf, F_real, label="Tor")
-    plt.plot(t_sim_cdf, F_sim, label="Torbox")
-    plt.xlabel("Completion Time (s)")
-    plt.ylabel("F(T ≤ t)")
-    plt.title("Completion Time Distribution under Contention (CDF)")
-    plt.grid(True, linestyle=":")
-    plt.legend()
-
     cdf_path = f"{args.out_prefix}_cdf.png"
-    plt.tight_layout()
-    plt.savefig(cdf_path, dpi=200)
-    plt.show()
 
-    print("\nResolved paths:")
-    print(f"  Tor:    {tor_path}")
-    print(f"  Torbox: {torbox_path}")
-    print("Metrics (after trimming):")
-    for k, v in metrics.items():
-        print(f"  {k}: {v}")
-    print("\nSaved figures:")
-    print(f"  {ccdf_path}")
-    print(f"  {cdf_path}")
+    plot_enhanced_ccdf(
+        t_real_ccdf, CCDF_real,
+        t_sim_ccdf, CCDF_sim,
+        metrics, ccdf_path
+    )
+
+    plot_enhanced_cdf(
+        t_real_cdf, F_real,
+        t_sim_cdf, F_sim,
+        metrics, cdf_path
+    )
+
+    print("\n📊 Distribution Metrics (after trimming):")
+    print(f"  Median Rel. Error:  {metrics['median_rel_err'] * 100:>6.2f}%")
+    print(f"  IQR Rel. Error:     {metrics['iqr_rel_err'] * 100:>6.2f}%")
+    print(f"  KS Distance:        {metrics['ks']:>6.4f}")
+    print(f"  Wasserstein-1:      {metrics['w1']:>6.4f} s")
+    print(f"  Real samples (n):   {metrics['real_n']:>6,}")
+    print(f"  Sim samples (n):    {metrics['sim_n']:>6,}")
+
+    print("\n✅ Analysis complete!")
 
 
 if __name__ == "__main__":

@@ -54,7 +54,7 @@ class TorDirectoryServer:
         self._micro_map = {}
         self._network_ready_flag = False
         self._start_time = time.time()
-        self._min_uptime = 0  # seconds, 可改参数
+        self._min_uptime = 60  # seconds, 可改参数
 
         # static config
         self._server_cfg = {

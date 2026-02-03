@@ -11,7 +11,7 @@ BACKLOG = int(os.environ.get("SINK_BACKLOG", "1024"))
 RECV_BUF = int(os.environ.get("SINK_RECV_BUF", "65536"))
 PRINT_EVERY_MB = int(os.environ.get("SINK_PRINT_EVERY_MB", "10"))
 
-LOG_DIR = os.environ.get("SINK_LOG_DIR", "./exp/e2/torbox/stream_time")
+LOG_DIR = os.environ.get("SINK_LOG_DIR", "./exp/e2/tor/stream_time")
 LOG_FILE_NAME = os.environ.get("SINK_LOG_FILE", "sink.log")
 
 # Concurrency controls

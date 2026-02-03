@@ -131,8 +131,8 @@ class Tor_base:
     from tools.Network_Management.delay_env import get_args  # 顶部已有就不用再加
 
     async def monitor_tor_socket(self):
-        limiter = self.refresh_limiter()
         async def on_accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            limiter = get_limiter(self.node_id)
             tor_sock = Tor_Socket(
                 reader=reader,
                 writer=writer,

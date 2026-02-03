@@ -43,9 +43,9 @@ if sys.platform.startswith("win"):
 # -------------------------------
 # Workload constants (fixed by spec)
 # -------------------------------
-CONCURRENT_USERS = 5
-CIRCUITS_PER_USER =2
-STREAMS_PER_CIRCUIT = 2
+CONCURRENT_USERS = 10
+CIRCUITS_PER_USER =1
+STREAMS_PER_CIRCUIT = 10
 STREAM_CONCURRENCY = 2
 PAYLOAD_BYTES_PER_STREAM = 64 * 1024
 HOPS = 3

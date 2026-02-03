@@ -227,9 +227,9 @@ def generate_compose(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--guards", type=int, default=1)
-    parser.add_argument("--middles", type=int, default=1)
-    parser.add_argument("--exits", type=int, default=1)
+    parser.add_argument("--guards", type=int, default=4)
+    parser.add_argument("--middles", type=int, default=4)
+    parser.add_argument("--exits", type=int, default=4)
     parser.add_argument("--authority-ip", default="192.168.66.241")
     parser.add_argument("--fingerprint", default="4CF9BD2D85C9D484BBB817E2F927B502C8EEFCA6")
     parser.add_argument("--v3ident", default="4CF9BD2D85C9D484BBB817E2F927B502C8EEFCA6")

@@ -31,19 +31,19 @@ from examples.Tor_simplified.Tor_Circuit import compute_isolation_key
 from tools.Log.bus import EventBus
 
 REALISTIC_DEFAULTS = {
-    "USERS": "5",
+    "USERS": "10",
     "CIRCUITS_PER_USER": "1",
     "STREAMS_PER_CIRCUIT": "1",  # kept for compatibility, but no longer used as a loop multiplier
-    "LOG_DIR": "exp/e2/torbox",
+    "LOG_DIR": "exp/e2/tor",
     "EXP_LABEL": "20mb",
-    "PAYLOAD_MB": "10",
+    "PAYLOAD_MB": "1",
 
     # New: fixed duration (seconds). Example: 600 = 10 minutes
-    "RUN_DURATION_S": "400",
+    "RUN_DURATION_S": "300",
 
     # New: wait range before starting each stream, in seconds
     # Example: "0.2,2.0" means sleep randomly in [0.2, 2.0]
-    "WAIT_INTERVAL_RANGE_S": "5.0,15.0",
+    "WAIT_INTERVAL_RANGE_S": "2.0,5.0",
 
     # New: per-user max inflight streams (existing key kept, now actually enforced)
     "MAX_INFLIGHT_STREAMS_PER_USER": "1",

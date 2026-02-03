@@ -658,6 +658,66 @@ def excepthook(exc_type, exc, tb):
 # ============================================================
 # Main
 # ============================================================
+async def wait_resource_logging_ready(probe, timeout_s: float = 60.0, poll_s: float = 0.2) -> None:
+    """
+    Gate execution until resource logging is actually ready.
+    Tries multiple probe APIs for compatibility.
+    """
+    deadline = time.monotonic() + timeout_s
+
+    wait_ready = getattr(probe, "wait_ready", None)
+    if callable(wait_ready):
+        try:
+            await wait_ready(timeout_s=timeout_s)
+            return
+        except TypeError:
+            await wait_ready(timeout_s)
+            return
+
+    for ev_name in ("ready_event", "connected_event"):
+        ev = getattr(probe, ev_name, None)
+        if ev is not None and hasattr(ev, "wait"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Resource logging not ready within {timeout_s}s (event: {ev_name})")
+            await asyncio.wait_for(ev.wait(), timeout=remaining)
+            return
+
+    for flag_name in ("ready", "connected", "is_ready", "is_connected"):
+        if hasattr(probe, flag_name):
+            while time.monotonic() < deadline:
+                try:
+                    if bool(getattr(probe, flag_name)):
+                        return
+                except Exception:
+                    pass
+                await asyncio.sleep(poll_s)
+            raise TimeoutError(f"Resource logging not ready within {timeout_s}s (flag: {flag_name})")
+
+    for fn_name in ("snapshot", "sample", "get_snapshot", "collect_once"):
+        fn = getattr(probe, fn_name, None)
+        if callable(fn):
+            while time.monotonic() < deadline:
+                try:
+                    res = fn()
+                    if asyncio.iscoroutine(res):
+                        await res
+                    return
+                except Exception:
+                    await asyncio.sleep(poll_s)
+            raise TimeoutError(f"Resource logging not ready within {timeout_s}s (method: {fn_name})")
+
+    while time.monotonic() < deadline:
+        await asyncio.sleep(poll_s)
+        if time.monotonic() + 1.0 >= deadline:
+            break
+
+    raise TimeoutError(
+        "Resource logging readiness could not be detected (no known API found). "
+        "Please expose probe.ready/connected or an asyncio Event, or implement probe.wait_ready()."
+    )
+
+
 
 async def main():
     sys.excepthook = excepthook
@@ -704,12 +764,12 @@ async def main():
         "log_dir": str(log_dir.resolve()),
         "hops": HOPS,
     }
-
+    #16,24,32,48,64,80,96,112,128,160,196,256
     concurrency_levels = env_csv_int("CONCURRENCY_LEVELS", "16,24,32,48,64,80,96,112,128,160,196,256")
     warmup_s = env_float("WARMUP_S", 30.0)
     measure_s = env_float("MEASURE_S", 120.0)
     cooldown_s = env_float("LOAD_COOLDOWN_S", 5.0)
-    period_s = env_float("PER_CLIENT_PERIOD_S", 2.0)
+    period_s = env_float("PER_CLIENT_PERIOD_S", 10.0)
     timeout_s = env_float("CIRCUIT_BUILD_TIMEOUT_S", 5.0)
     per_client_limit = env_int("MAX_CONCURRENT_CIRCUITS", 1)
 
@@ -901,64 +961,6 @@ async def main():
         print(f"[Main] run metadata written to {run_meta_path}")
 
 
-async def wait_resource_logging_ready(probe, timeout_s: float = 60.0, poll_s: float = 0.2) -> None:
-    """
-    Gate execution until resource logging is actually ready.
-    Tries multiple probe APIs for compatibility.
-    """
-    deadline = time.monotonic() + timeout_s
-
-    wait_ready = getattr(probe, "wait_ready", None)
-    if callable(wait_ready):
-        try:
-            await wait_ready(timeout_s=timeout_s)
-            return
-        except TypeError:
-            await wait_ready(timeout_s)
-            return
-
-    for ev_name in ("ready_event", "connected_event"):
-        ev = getattr(probe, ev_name, None)
-        if ev is not None and hasattr(ev, "wait"):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"Resource logging not ready within {timeout_s}s (event: {ev_name})")
-            await asyncio.wait_for(ev.wait(), timeout=remaining)
-            return
-
-    for flag_name in ("ready", "connected", "is_ready", "is_connected"):
-        if hasattr(probe, flag_name):
-            while time.monotonic() < deadline:
-                try:
-                    if bool(getattr(probe, flag_name)):
-                        return
-                except Exception:
-                    pass
-                await asyncio.sleep(poll_s)
-            raise TimeoutError(f"Resource logging not ready within {timeout_s}s (flag: {flag_name})")
-
-    for fn_name in ("snapshot", "sample", "get_snapshot", "collect_once"):
-        fn = getattr(probe, fn_name, None)
-        if callable(fn):
-            while time.monotonic() < deadline:
-                try:
-                    res = fn()
-                    if asyncio.iscoroutine(res):
-                        await res
-                    return
-                except Exception:
-                    await asyncio.sleep(poll_s)
-            raise TimeoutError(f"Resource logging not ready within {timeout_s}s (method: {fn_name})")
-
-    while time.monotonic() < deadline:
-        await asyncio.sleep(poll_s)
-        if time.monotonic() + 1.0 >= deadline:
-            break
-
-    raise TimeoutError(
-        "Resource logging readiness could not be detected (no known API found). "
-        "Please expose probe.ready/connected or an asyncio Event, or implement probe.wait_ready()."
-    )
 
 
 if __name__ == "__main__":

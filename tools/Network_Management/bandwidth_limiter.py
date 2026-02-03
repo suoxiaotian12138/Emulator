@@ -112,10 +112,7 @@ def _env_float(name: str) -> Optional[float]:
         return None
 
 
-def init_global_limiter_from_env() -> Optional[BandwidthLimiter]:
-    global _GLOBAL_LIMITER
-    if _GLOBAL_LIMITER is not None:
-        return _GLOBAL_LIMITER
+def build_limiter_from_env() -> Optional[BandwidthLimiter]:
 
     rate = _env_float("GLOBAL_RATE_BPS")
     if rate is None or rate <= 0:
@@ -125,7 +122,18 @@ def init_global_limiter_from_env() -> Optional[BandwidthLimiter]:
     if burst is None or burst <= 0:
         burst = rate
 
-    _GLOBAL_LIMITER = BandwidthLimiter(rate_bps=rate, burst_bytes=burst)
+    return BandwidthLimiter(rate_bps=rate, burst_bytes=burst)
+
+def init_global_limiter_from_env() -> Optional[BandwidthLimiter]:
+    global _GLOBAL_LIMITER
+    if _GLOBAL_LIMITER is not None:
+        return _GLOBAL_LIMITER
+
+    limiter = build_limiter_from_env()
+    if limiter is None:
+        return None
+
+    _GLOBAL_LIMITER = limiter
     return _GLOBAL_LIMITER
 
 

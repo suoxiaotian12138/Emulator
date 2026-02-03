@@ -108,7 +108,7 @@ async def main():
 
     # 固定延迟注入（仅启用此选项时生效）
     model = GeoDelayModel(fixed_owd_ms=20.0, jitter_ratio=0.0, jitter_cap=0.0, floor_ms=1.0)
-    configure(enabled=True, mapping=None, model=model, delay_mode="scheduled")
+    configure(enabled=False, mapping=None, model=model, delay_mode="scheduled")
 
     # 3. 其他初始化（线程池、任务等）
     max_workers = 128
@@ -123,7 +123,7 @@ async def main():
     # 注册所有 guard
     bandwidth_profiles = {
         "Guard": (20_000_000, 20_000_000),
-        "Middle": (1_000_000, 1_000_000),
+        "Middle": (1_000_000, 5_000_000),
         "Exit": (20_000_000, 20_000_000),
     }
     print("band width test:")

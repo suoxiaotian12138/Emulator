@@ -255,8 +255,7 @@ class Tor_Socket():
         self._q_ctrl = asyncio.Queue()
         self._CTRL_SOLO = 1 << 0
         self._CTRL_BARRIER = 1 << 1
-        self._q_data = asyncio.Queue(maxsize=4096)  # 数据面队列
-        self._q_data_backpressure = 3072  # 触发背压阈值
+        self._q_data = asyncio.Queue(maxsize=256)  # 数据面队列（连接级仅保留小 outbuf）
         self._wakeup = asyncio.Event()  # 有新数据时唤醒 writer
         self._writer_task = None
         self._last_queue_log = 0.0
@@ -265,6 +264,11 @@ class Tor_Socket():
         self._max_pending_bytes = 2 * 1024 * 1024
         self._data_batch_limit_bytes = 256 * 1024
         self._data_batch_limit_cells = 512
+        self._outbuf_bytes = 0
+        self._outbuf_high_bytes = 256 * 1024
+        self._outbuf_low_bytes = 64 * 1024
+        self._outbuf_low_event = asyncio.Event()
+        self._outbuf_low_event.set()
 
         self.role = role
         if self.role not in {"client", "relay"}:
@@ -338,6 +342,28 @@ class Tor_Socket():
             self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except Exception:
             pass
+
+    def can_accept_data(self) -> bool:
+        return not self._closing.is_set() and self._outbuf_bytes < self._outbuf_high_bytes
+
+    async def wait_for_outbuf_low(self) -> None:
+        await self._outbuf_low_event.wait()
+
+    def _increase_outbuf(self, nbytes: int) -> None:
+        if nbytes <= 0:
+            return
+        self._outbuf_bytes += nbytes
+        if self._outbuf_bytes >= self._outbuf_high_bytes:
+            self._outbuf_low_event.clear()
+
+    def _apply_outbuf_drain(self, nbytes: int) -> None:
+        if nbytes <= 0:
+            return
+        drained = nbytes + self._pending_bytes
+        self._pending_bytes = 0
+        self._outbuf_bytes = max(0, self._outbuf_bytes - drained)
+        if self._outbuf_bytes <= self._outbuf_low_bytes:
+            self._outbuf_low_event.set()
 
     def update_link_protocol_version(self, version: int):
         """Synchronize negotiated link protocol version across components."""
@@ -529,6 +555,9 @@ class Tor_Socket():
 
         self.reader = None
         self.writer = None
+        self._pending_bytes = 0
+        self._outbuf_bytes = 0
+        self._outbuf_low_event.set()
 
     # ★ 新增：运行时动态开/关
     async def set_delay_enabled(self, enabled: bool):
@@ -862,11 +891,13 @@ class Tor_Socket():
         # It must not be merged with other ctrl cells into a single blob.
         if isinstance(cell, CellAuthenticate) and cell.auth_type == 0x0003:
             await self._q_ctrl.put((buf, now, self._CTRL_SOLO, None))
+            self._increase_outbuf(len(buf))
             self._wakeup.set()
             return False
 
         if self._is_control_cell(cell):
             await self._q_ctrl.put((buf, now, 0, None))
+            self._increase_outbuf(len(buf))
             self._wakeup.set()
             return False
         else:
@@ -927,7 +958,6 @@ class Tor_Socket():
                     if flags & self._CTRL_BARRIER:
                         if out:
                             await self._write_once(bytes(out), drain=True)
-                            self._pending_bytes = 0
                             out.clear()
                         if fut is not None and not fut.done():
                             fut.set_result(True)
@@ -937,7 +967,6 @@ class Tor_Socket():
                     if flags & self._CTRL_SOLO:
                         if out:
                             await self._write_once(bytes(out), drain=True)
-                            self._pending_bytes = 0
                             out.clear()
                         await self._write_once(buf, drain=True)
                         self._pending_bytes = 0
@@ -951,7 +980,6 @@ class Tor_Socket():
 
                 if out:
                     await self._write_once(bytes(out), drain=True)
-                    self._pending_bytes = 0
                     continue
 
                 # Data plane (keep your existing logic)
@@ -972,8 +1000,6 @@ class Tor_Socket():
                     ):
                         break
                 if out:
-                    if self._limiter is not None:
-                        await self._limiter.consume(len(out))
                     should_drain = (
                         self._pending_bytes + len(out) >= self._drain_threshold_bytes
                         or self._q_data.qsize() <= 1
@@ -981,10 +1007,7 @@ class Tor_Socket():
                         or self._pending_bytes + len(out) >= self._max_pending_bytes
                     )
                     await self._write_once(bytes(out), drain=should_drain)
-                    if should_drain:
-                        self._pending_bytes = 0
-                    else:
-                        self._pending_bytes += len(out)
+
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -997,6 +1020,7 @@ class Tor_Socket():
             raise RuntimeError("Socket closed; cannot send raw bytes")
 
         try:
+            self._increase_outbuf(len(raw))
             if self._limiter is not None:
                 await self._limiter.consume(len(raw))
 
@@ -1005,11 +1029,12 @@ class Tor_Socket():
             else:
                 self.writer.write(raw)
                 await self.writer.drain()
-                self._pending_bytes = 0
+                self._apply_outbuf_drain(len(raw))
 
             if update_transcript:
                 self.link_transcript.update_sent(raw)
         except Exception:
+            self._apply_outbuf_drain(len(raw))
             await self._abort()
             raise
 
@@ -1017,6 +1042,8 @@ class Tor_Socket():
         if self._closing.is_set() or self.writer is None:
             return
         try:
+            if self._limiter is not None:
+                await self._limiter.consume(len(blob))
             if self._inj is not None:
                 await self._inj.send(blob)
             else:
@@ -1026,8 +1053,13 @@ class Tor_Socket():
 
             # Update transcript only after the write has completed
             self.link_transcript.update_sent(blob)
+            if drain:
+                self._apply_outbuf_drain(len(blob))
+            else:
+                self._pending_bytes += len(blob)
         except Exception as e:
             self.print(f"[WriteErr] {self.peer_str} {e}")
+            self._apply_outbuf_drain(len(blob))
             await self._abort()
 
     async def _enqueue_data(self, buf: bytes) -> bool:
@@ -1036,25 +1068,24 @@ class Tor_Socket():
         loop = asyncio.get_running_loop()
         enqueued_at = loop.time()
         blocked = False
-        if self._q_data.qsize() >= self._q_data_backpressure:
+        while not self._closing.is_set() and self._outbuf_bytes >= self._outbuf_high_bytes:
             blocked = True
-            self.print(
-                f"[Backpressure] {self.peer_str} data_q={self._q_data.qsize()} "
-                f"limit={self._q_data_backpressure}"
-            )
+            self._outbuf_low_event.clear()
+            await self._outbuf_low_event.wait()
+        if self._closing.is_set():
+            return False
+        try:
+            self._q_data.put_nowait((buf, enqueued_at))
+        except asyncio.QueueFull:
+            blocked = True
             await self._q_data.put((buf, enqueued_at))
-        else:
-            try:
-                self._q_data.put_nowait((buf, enqueued_at))
-            except asyncio.QueueFull:
-                blocked = True
-                await self._q_data.put((buf, enqueued_at))
+        self._increase_outbuf(len(buf))
         return blocked
 
     def _maybe_log_queue(self, kind: str, enqueued_at: float, qsize: int):
         now = asyncio.get_running_loop().time()
         delay = now - enqueued_at
-        if delay < 0.05 and qsize < self._q_data_backpressure:
+        if delay < 0.05 and self._outbuf_bytes < self._outbuf_high_bytes:
             return
         if (now - self._last_queue_log) < 1.0:
             return

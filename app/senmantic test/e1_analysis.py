@@ -19,10 +19,11 @@ import matplotlib.pyplot as plt
 # ============================================================================
 # Font settings
 FONT_FAMILY = 'Arial'
-FONT_SIZE_LABEL = 14  # Axis labels
-FONT_SIZE_TICK = 12  # Tick labels
-FONT_SIZE_LEGEND = 11  # Legend text
-FONT_SIZE_ANNOTATION = 9  # Sample size annotations
+FONT_WEIGHT = 'bold'
+FONT_SIZE_LABEL = 18  # Axis labels
+FONT_SIZE_TICK = 16  # Tick labels
+FONT_SIZE_LEGEND = 14  # Legend text
+FONT_SIZE_ANNOTATION = 13  # Sample size annotations
 
 # Figure settings
 FIG_WIDTH = 8.0
@@ -238,6 +239,7 @@ def series_stats(series: Dict[float, List[float]], order: List[float]) -> Tuple[
 def setup_plot_style():
     """Configure global matplotlib settings"""
     plt.rcParams['font.family'] = FONT_FAMILY
+    plt.rcParams['font.weight'] = FONT_WEIGHT
     plt.rcParams['font.size'] = FONT_SIZE_TICK
     plt.rcParams['axes.labelsize'] = FONT_SIZE_LABEL
     plt.rcParams['axes.titlesize'] = FONT_SIZE_LABEL
@@ -246,6 +248,10 @@ def setup_plot_style():
     plt.rcParams['legend.fontsize'] = FONT_SIZE_LEGEND
     plt.rcParams['axes.linewidth'] = 1.2
     plt.rcParams['grid.alpha'] = GRID_ALPHA
+    plt.rcParams['axes.titleweight'] = 'bold'
+    plt.rcParams['axes.labelweight'] = 'bold'  # 坐标轴标签 (X/Y label) 加粗
+    plt.rcParams['axes.titleweight'] = 'bold'  # 图表标题加粗
+    plt.rcParams['figure.titleweight'] = 'bold'  # 总标题加粗
 
 
 def main() -> None:
@@ -263,7 +269,7 @@ def main() -> None:
     sim_mu, sim_ci, sim_n = series_stats(sim_series, B)
 
     print("=== Sanity ===")
-    for label, series in [("Real Tor", tor_series), ("Simulator", sim_series)]:
+    for label, series in [("Naive Tor", tor_series), ("Torbox", sim_series)]:
         for b in B:
             vals = series.get(b, [])
             if vals:
@@ -282,14 +288,14 @@ def main() -> None:
         fmt='o-', capsize=CAPSIZE, capthick=CAPTHICK,
         linewidth=LINE_WIDTH, markersize=MARKER_SIZE,
         color=COLOR_TOR, ecolor=COLOR_TOR,
-        label="Real Tor (mean ± 95% CI)"
+        label="Naive Tor (mean ± 95% CI)"
     )
     ax.errorbar(
         B, sim_mu, yerr=sim_ci,
         fmt='s--', capsize=CAPSIZE, capthick=CAPTHICK,
         linewidth=LINE_WIDTH, markersize=MARKER_SIZE,
         color=COLOR_SIM, ecolor=COLOR_SIM,
-        label="Simulator (mean ± 95% CI)"
+        label="Torbox (mean ± 95% CI)"
     )
 
     # Ideal line
