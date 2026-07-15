@@ -1,5 +1,5 @@
 
-from examples.Tor_simplified.Tor_Client import Tor_Client
+from network_src.TorCore.Tor_Client import Tor_Client
 import signal, faulthandler, sys, traceback
 import asyncio, concurrent.futures, os, logging
 import asyncio, threading, psutil, os

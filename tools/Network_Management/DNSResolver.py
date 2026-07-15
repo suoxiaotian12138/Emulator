@@ -1,53 +1,69 @@
 import asyncio
 import time
-from typing import Optional, Dict, Tuple, Any
+from typing import Any, Dict, Optional, Tuple
+
 import dns.asyncresolver
 import dns.exception
-import dns.name
 import dns.rdatatype
+import dns.resolver
+
+
+class DNSResolveError(Exception):
+    """Stable DNS error exposed to Tor relay code.
+
+    transient=True maps to RESOLVED type 0xF0; transient=False maps to 0xF1.
+    code is suitable for metrics/logging and negative-cache reconstruction.
+    """
+
+    def __init__(self, message: str, *, transient: bool, code: str):
+        super().__init__(message)
+        self.transient = bool(transient)
+        self.code = code
+
 
 class _CacheEntry:
     __slots__ = ("value", "expire_at", "neg")
-    def __init__(self, value: Any, expire_at: float, neg: bool=False):
+
+    def __init__(self, value: Any, expire_at: float, neg: bool = False):
         self.value = value
         self.expire_at = expire_at
-        self.neg = neg  # negative cache flag
+        self.neg = neg
+
 
 class AsyncDNSCache:
-    """TTL/负缓存/LRU(可选) 的简单实现。"""
+    """Simple TTL cache with negative-cache support."""
+
     def __init__(self, max_size: int = 10000):
+        if max_size <= 0:
+            raise ValueError("max_size must be positive")
         self._cache: Dict[str, _CacheEntry] = {}
         self._lock = asyncio.Lock()
         self._max_size = max_size
 
     async def get(self, key: str) -> Optional[_CacheEntry]:
-        now = time.time()
+        now = time.monotonic()
         entry = self._cache.get(key)
-        if not entry:
+        if entry is None:
             return None
         if entry.expire_at <= now:
-            # 过期直接删（懒删除）
             async with self._lock:
-                self._cache.pop(key, None)
+                current = self._cache.get(key)
+                if current is entry:
+                    self._cache.pop(key, None)
             return None
         return entry
 
-    async def set(self, key: str, value: Any, ttl: float, neg: bool=False):
-        expire_at = time.time() + ttl
+    async def set(self, key: str, value: Any, ttl: float, neg: bool = False):
+        expire_at = time.monotonic() + max(0.0, float(ttl))
         async with self._lock:
-            if len(self._cache) >= self._max_size:
-                # 简易淘汰：随机/任意弹一项（够用就好；要更精细可换成 OrderedDict/LRU）
-                self._cache.pop(next(iter(self._cache)))
+            if key not in self._cache and len(self._cache) >= self._max_size:
+                self._cache.pop(next(iter(self._cache)), None)
             self._cache[key] = _CacheEntry(value=value, expire_at=expire_at, neg=neg)
 
+
 class DNSResolver:
-    """
-    高并发优化：
-      - in-flight de-dup
-      - TTL 缓存（正/负）
-      - 多 nameserver 并发竞速
-      - stale-while-revalidate
-    """
+    """Asynchronous IPv4 resolver with cache, de-duplication and NS racing."""
+
     def __init__(
         self,
         use_cache: bool = True,
@@ -56,9 +72,14 @@ class DNSResolver:
         lifetime: float = 2.5,
         min_ttl: int = 5,
         max_ttl: int = 1800,
-        neg_ttl: int = 20,  # 负缓存 TTL
+        neg_ttl: int = 20,
         parallel_ns: bool = True,
     ):
+        if min_ttl < 0 or max_ttl < min_ttl:
+            raise ValueError("invalid TTL bounds")
+        if neg_ttl < 0:
+            raise ValueError("neg_ttl must be non-negative")
+
         self.use_cache = use_cache
         self.cache = AsyncDNSCache() if use_cache else None
         self.min_ttl = min_ttl
@@ -66,114 +87,211 @@ class DNSResolver:
         self.neg_ttl = neg_ttl
         self.parallel_ns = parallel_ns
 
-        # 主 resolver（也可让它带 nameservers）
         self.resolver = dns.asyncresolver.Resolver(configure=True)
         self.resolver.timeout = timeout
         self.resolver.lifetime = lifetime
         if nameservers:
             self.resolver.nameservers = nameservers
 
-        # in-flight map: domain -> Task
-        self._inflight: Dict[str, asyncio.Task] = {}
+        self._inflight: Dict[str, asyncio.Task[Tuple[str, int]]] = {}
         self._inflight_lock = asyncio.Lock()
 
-        # 预生成并发 resolvers（每个 nameserver 一个）
         self._per_ns_resolvers: list[dns.asyncresolver.Resolver] = []
         if nameservers:
             for ns in nameservers:
-                r = dns.asyncresolver.Resolver(configure=False)
-                r.nameservers = [ns]
-                r.timeout = timeout
-                r.lifetime = lifetime
-                self._per_ns_resolvers.append(r)
+                resolver = dns.asyncresolver.Resolver(configure=False)
+                resolver.nameservers = [ns]
+                resolver.timeout = timeout
+                resolver.lifetime = lifetime
+                self._per_ns_resolvers.append(resolver)
 
     def _clamp_ttl(self, ttl: int) -> int:
         return max(self.min_ttl, min(self.max_ttl, int(ttl)))
 
+    @staticmethod
+    def _classify_exception(domain: str, exc: BaseException) -> DNSResolveError:
+        if isinstance(exc, DNSResolveError):
+            return exc
+        if isinstance(exc, dns.resolver.NXDOMAIN):
+            return DNSResolveError(
+                f"DNS name does not exist: {domain}", transient=False, code="NXDOMAIN"
+            )
+        if isinstance(exc, dns.resolver.NoAnswer):
+            return DNSResolveError(
+                f"DNS response has no A record: {domain}", transient=False, code="NO_ANSWER"
+            )
+        if isinstance(exc, dns.resolver.YXDOMAIN):
+            return DNSResolveError(
+                f"DNS name is too long after substitution: {domain}",
+                transient=False,
+                code="YXDOMAIN",
+            )
+        if isinstance(exc, dns.exception.Timeout):
+            return DNSResolveError(
+                f"DNS query timed out: {domain}", transient=True, code="TIMEOUT"
+            )
+        if isinstance(exc, dns.resolver.NoNameservers):
+            return DNSResolveError(
+                f"No usable DNS nameserver for: {domain}",
+                transient=True,
+                code="NO_NAMESERVERS",
+            )
+        if isinstance(exc, dns.exception.DNSException):
+            return DNSResolveError(
+                f"DNS protocol failure for {domain}: {exc}",
+                transient=True,
+                code="DNS_FAILURE",
+            )
+        return DNSResolveError(
+            f"Unexpected resolver failure for {domain}: {exc}",
+            transient=True,
+            code="INTERNAL",
+        )
+
     async def _query_A(self, domain: str) -> Tuple[str, int]:
-        """
-        真实做查询：返回 (ip, ttl)。可能抛异常。
-        - 如果设置了并行 nameserver，则并发竞速。
-        """
-        qname = domain  # 保持原样；需要的话可规范化 punycode：dns.name.from_text(domain).to_unicode()
-        async def _do_resolve(res: dns.asyncresolver.Resolver):
-            ans = await res.resolve(qname, 'A')
-            # 取第一个 A 与对应 TTL
-            ip = ans[0].address
-            ttl = getattr(ans.rrset, "ttl", self.min_ttl)
+        async def _do_resolve(resolver: dns.asyncresolver.Resolver) -> Tuple[str, int]:
+            answer = await resolver.resolve(domain, dns.rdatatype.A)
+            if not answer:
+                raise dns.resolver.NoAnswer(response=getattr(answer, "response", None))
+            ip = answer[0].address
+            ttl = getattr(answer.rrset, "ttl", self.min_ttl)
             return ip, self._clamp_ttl(ttl)
 
-        if self.parallel_ns and self._per_ns_resolvers:
-            tasks = [asyncio.create_task(_do_resolve(r)) for r in self._per_ns_resolvers]
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for p in pending:
-                p.cancel()
-            # 拿到最先成功的结果；若全失败，重新抛出第一个异常
-            for d in done:
-                if d.exception() is None:
-                    return d.result()
-            # 全失败，抛第一个的异常
-            raise list(done)[0].exception()
-        else:
-            return await _do_resolve(self.resolver)
+        if not self.parallel_ns or not self._per_ns_resolvers:
+            try:
+                return await _do_resolve(self.resolver)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise self._classify_exception(domain, exc) from exc
 
-    async def resolve_ipv4(self, domain: str) -> str:
-        """
-        高性能版本：带缓存、去重、并发 NS、负缓存。
-        """
-        key = f"A:{domain}"
+        tasks = {
+            asyncio.create_task(_do_resolve(resolver))
+            for resolver in self._per_ns_resolvers
+        }
+        errors: list[DNSResolveError] = []
 
-        # 命中（正/负）
+        try:
+            while tasks:
+                done, pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+                tasks = pending
+
+                for task in done:
+                    try:
+                        result = task.result()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        errors.append(self._classify_exception(domain, exc))
+                        continue
+
+                    for pending_task in tasks:
+                        pending_task.cancel()
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                    return result
+
+            if not errors:
+                raise DNSResolveError(
+                    f"No DNS resolver completed for {domain}",
+                    transient=True,
+                    code="NO_RESULT",
+                )
+
+            # A definitive negative answer wins over temporary transport failures.
+            definitive = next((error for error in errors if not error.transient), None)
+            raise definitive or errors[-1]
+        finally:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _resolve_and_fill_cache(self, key: str, domain: str) -> Tuple[str, int]:
+        try:
+            result = await self._query_A(domain)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = self._classify_exception(domain, exc)
+            if self.use_cache:
+                await self.cache.set(
+                    key,
+                    (error.code, str(error), error.transient),
+                    ttl=self.neg_ttl,
+                    neg=True,
+                )
+            raise error from exc
+
+        ip, ttl = result
+        if self.use_cache:
+            await self.cache.set(key, result, ttl=ttl, neg=False)
+        return result
+
+    async def resolve_ipv4_with_ttl(self, domain: str) -> Tuple[str, int]:
+        if not isinstance(domain, str):
+            raise ValueError("domain must be a string")
+        normalized = domain.strip().rstrip(".").lower()
+        if not normalized:
+            raise ValueError("domain must not be empty")
+
+        key = f"A:{normalized}"
         if self.use_cache:
             entry = await self.cache.get(key)
-            if entry:
+            if entry is not None:
                 if entry.neg:
-                    raise RuntimeError(f"DNS negative-cached for {domain}")
-                return entry.value
+                    code, message, transient = entry.value
+                    raise DNSResolveError(
+                        message, transient=transient, code=code
+                    )
+                ip, _original_ttl = entry.value
+                remaining_ttl = max(0, int(entry.expire_at - time.monotonic()))
+                return ip, remaining_ttl
 
-        # 去重：同一个域名同时只有一个真正的查询
         async with self._inflight_lock:
             task = self._inflight.get(key)
-            if not task:
-                task = asyncio.create_task(self._resolve_and_fill_cache(key, domain))
+            if task is None:
+                task = asyncio.create_task(
+                    self._resolve_and_fill_cache(key, normalized)
+                )
                 self._inflight[key] = task
 
-        try:
-            return await task
-        finally:
-            # 清理 in-flight
-            async with self._inflight_lock:
-                self._inflight.pop(key, None)
+                def _cleanup(done_task: asyncio.Task, *, cache_key: str = key):
+                    if self._inflight.get(cache_key) is done_task:
+                        self._inflight.pop(cache_key, None)
 
-    async def _resolve_and_fill_cache(self, key: str, domain: str) -> str:
-        try:
-            ip, ttl = await self._query_A(domain)
-            if self.use_cache:
-                await self.cache.set(key, ip, ttl=ttl, neg=False)
-            return ip
-        except (dns.exception.DNSException, Exception) as e:
-            # 负缓存，短 TTL
-            if self.use_cache:
-                await self.cache.set(key, str(e), ttl=self.neg_ttl, neg=True)
-            raise RuntimeError(f"DNS resolution failed for {domain}: {e}")
+                task.add_done_callback(_cleanup)
 
-    # 可选：带 SWR 的“返回旧值+后台刷新”
+        # shield prevents one cancelled waiter from cancelling the shared lookup.
+        return await asyncio.shield(task)
+
+    async def resolve_ipv4(self, domain: str) -> str:
+        ip, _ttl = await self.resolve_ipv4_with_ttl(domain)
+        return ip
+
     async def resolve_ipv4_swr(self, domain: str) -> str:
-        """
-        stale-while-revalidate：如果命中且将近过期，先返回旧值，然后后台刷新。
-        """
-        key = f"A:{domain}"
+        normalized = domain.strip().rstrip(".").lower()
+        key = f"A:{normalized}"
         if not self.use_cache:
-            return await self.resolve_ipv4(domain)
+            return await self.resolve_ipv4(normalized)
 
         entry = await self.cache.get(key)
-        if entry and not entry.neg:
-            # 近似“快过期”的判断：剩余 < min_ttl*2 就后台刷新
-            remain = entry.expire_at - time.time()
-            if remain < (self.min_ttl * 2):
-                # 背景刷新（不阻塞请求路径）
-                asyncio.create_task(self._resolve_and_fill_cache(key, domain))
-            return entry.value
+        if entry is not None and not entry.neg:
+            ip, _ttl = entry.value
+            remain = entry.expire_at - time.monotonic()
+            if remain < self.min_ttl * 2:
+                # Reuse the normal in-flight de-dup path instead of spawning duplicate refreshes.
+                refresh = asyncio.create_task(self.resolve_ipv4_with_ttl(normalized))
 
-        # 没命中或负缓存，走正常路径
-        return await self.resolve_ipv4(domain)
+                def _consume_refresh_result(done_task: asyncio.Task):
+                    try:
+                        done_task.result()
+                    except (asyncio.CancelledError, DNSResolveError):
+                        pass
+
+                refresh.add_done_callback(_consume_refresh_result)
+            return ip
+
+        return await self.resolve_ipv4(normalized)

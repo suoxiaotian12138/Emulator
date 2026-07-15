@@ -1,5 +1,5 @@
 import sys
-from examples.Tor_simplified.Tor_Node import Tor_Node
+from network_src.TorCore.Tor_Node import Tor_Node
 import concurrent.futures
 import asyncio, threading, psutil, os
 

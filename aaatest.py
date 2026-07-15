@@ -1,5 +1,5 @@
 import sys
-from examples.Tor_simplified.Tor_Node import Tor_Node
+from network_src.TorCore.Tor_Node import Tor_Node
 import concurrent.futures
 import asyncio, threading, psutil, os
 
@@ -102,7 +102,7 @@ async def main():
     )
     os.environ["DIRECTORY_ADDR"] = "192.168.66.241:9030"
     # 多个 guard 配置
-    guard_configs = generate_specific_nodes(n_guard=3, n_middle=3, n_exit=3)
+    guard_configs = generate_specific_nodes(n_guard=1, n_middle=1, n_exit=1)
 
     # 注册所有 guard
     await register_all_guards(guard_configs)

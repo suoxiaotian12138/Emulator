@@ -4,7 +4,7 @@ import socket
 from dataclasses import dataclass, asdict
 from tools.Packet.packet_UDP import send_udp, recv_udp
 from tools.Packet.make_packet import RoutingInfo
-from examples.Loopix.Loopix_base import Loopix_Base
+from network_src.Loopix.Loopix_base import Loopix_Base
 
 @dataclass
 class NodeInfo:

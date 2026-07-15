@@ -4,7 +4,7 @@ import types
 
 sys.modules.setdefault("requests", types.SimpleNamespace(post=lambda *a, **k: None))
 
-from examples.Tor_simplified.circid_alloc import (
+from network_src.TorCore.circid_alloc import (
     AllocationError,
     Channel,
     CircuitRef,
