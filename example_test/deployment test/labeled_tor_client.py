@@ -16,7 +16,7 @@ from network_src.TorCore.Tor_Client import Tor_Client
 from tools.Log.bus import EventBus
 from tools.Log.writer import AsyncJsonlWriter
 from tools.Network_Management.delay_env import get_args
-#asdasdasdasdasd
+
 class LabeledTorClient(Tor_Client):
     """Tor_Client variant that injects a ratio label into all bus emissions."""
 

@@ -528,6 +528,7 @@ class CircuitManager:
         self.release_request(circ)
 
     def _send_destroy(self, circ_id: int):
+        self.client._locally_closing_circuits.add(circ_id)
         sock = self.client.socket_map.get(self.client.guard.addr)
         if not sock:
             return
@@ -559,6 +560,16 @@ class CircuitManager:
         # actually destroy and unregister
         for cid in to_close:
             self._send_destroy(cid)
+            circ = self.client.circuit_list.get_by_id(cid)
+            if circ is not None:
+                circ.close_all_streams()
+            self.client.circuit_list.remove(cid)
+            sock = self.client.socket_map.get(self.client.guard.addr)
+            if sock is not None:
+                try:
+                    sock.channel.recv_map.pop(cid, None)
+                except Exception:
+                    pass
             self._unregister(cid)
 
     async def maintain_prebuild(self):
