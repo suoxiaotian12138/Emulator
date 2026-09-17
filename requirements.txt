@@ -1,0 +1,29 @@
+# Core runtime
+aiofiles
+aiohttp
+cryptography
+dnspython
+geoip2
+msgpack
+numpy
+orjson
+psutil
+pydantic
+PyNaCl
+requests
+sslkeylog
+stem
+termcolor
+torpy
+
+# Experiment analysis and optional scenarios
+adjustText
+matplotlib
+pandas
+paramiko
+Pillow
+scipy
+
+# Focused tests in this repository
+pytest
+
